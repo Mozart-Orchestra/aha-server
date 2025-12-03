@@ -1,4 +1,4 @@
-import { eventRouter, buildNewSessionUpdate } from "@/app/events/eventRouter";
+import { eventRouter, buildNewSessionUpdate, buildUpdateSessionUpdate } from "@/app/events/eventRouter";
 import { type Fastify } from "../types";
 import { db } from "@/storage/db";
 import { z } from "zod";
@@ -373,5 +373,75 @@ export function sessionRoutes(app: Fastify) {
         }
 
         return reply.send({ success: true });
+    });
+
+    // Update session metadata
+    app.post('/v1/sessions/:sessionId/metadata', {
+        schema: {
+            params: z.object({
+                sessionId: z.string()
+            }),
+            body: z.object({
+                metadata: z.string(),
+                expectedVersion: z.number().int().optional()
+            })
+        },
+        preHandler: app.authenticate
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { sessionId } = request.params;
+        const { metadata, expectedVersion } = request.body;
+
+        // Verify session belongs to user
+        const session = await db.session.findFirst({
+            where: {
+                id: sessionId,
+                accountId: userId
+            }
+        });
+
+        if (!session) {
+            return reply.code(404).send({ error: 'Session not found' });
+        }
+
+        // Check version if provided
+        if (expectedVersion !== undefined && session.metadataVersion !== expectedVersion) {
+            return reply.code(409).send({
+                error: 'Version mismatch',
+                currentVersion: session.metadataVersion
+            });
+        }
+
+        // Update session
+        const updatedSession = await db.session.update({
+            where: { id: sessionId },
+            data: {
+                metadata: metadata,
+                metadataVersion: { increment: 1 }
+            }
+        });
+
+        // Emit update
+        const updSeq = await allocateUserSeq(userId);
+        const updatePayload = buildUpdateSessionUpdate(
+            session.id,
+            updSeq,
+            randomKeyNaked(12),
+            {
+                value: updatedSession.metadata,
+                version: updatedSession.metadataVersion
+            }
+        );
+
+        eventRouter.emitUpdate({
+            userId,
+            payload: updatePayload,
+            recipientFilter: { type: 'all-interested-in-session', sessionId: session.id }
+        });
+
+        return reply.send({
+            success: true,
+            version: updatedSession.metadataVersion
+        });
     });
 }

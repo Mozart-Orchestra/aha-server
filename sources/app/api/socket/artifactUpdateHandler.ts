@@ -49,6 +49,7 @@ export function artifactUpdateHandler(userId: string, socket: Socket) {
                     headerVersion: artifact.headerVersion,
                     body: privacyKit.encodeBase64(artifact.body),
                     bodyVersion: artifact.bodyVersion,
+                    dataEncryptionKey: privacyKit.encodeBase64(artifact.dataEncryptionKey),
                     seq: artifact.seq,
                     createdAt: artifact.createdAt.getTime(),
                     updatedAt: artifact.updatedAt.getTime()
@@ -132,21 +133,21 @@ export function artifactUpdateHandler(userId: string, socket: Socket) {
 
             if (headerMismatch || bodyMismatch) {
                 const response: any = { result: 'version-mismatch' };
-                
+
                 if (headerMismatch) {
                     response.header = {
                         currentVersion: currentArtifact.headerVersion,
                         currentData: privacyKit.encodeBase64(currentArtifact.header)
                     };
                 }
-                
+
                 if (bodyMismatch) {
                     response.body = {
                         currentVersion: currentArtifact.bodyVersion,
                         currentData: privacyKit.encodeBase64(currentArtifact.body)
                     };
                 }
-                
+
                 callback(response);
                 return;
             }
@@ -199,21 +200,21 @@ export function artifactUpdateHandler(userId: string, socket: Socket) {
                 });
 
                 const response: any = { result: 'version-mismatch' };
-                
+
                 if (header && current) {
                     response.header = {
                         currentVersion: current.headerVersion,
                         currentData: privacyKit.encodeBase64(current.header)
                     };
                 }
-                
+
                 if (body && current) {
                     response.body = {
                         currentVersion: current.bodyVersion,
                         currentData: privacyKit.encodeBase64(current.body)
                     };
                 }
-                
+
                 callback(response);
                 return;
             }
@@ -224,26 +225,26 @@ export function artifactUpdateHandler(userId: string, socket: Socket) {
             eventRouter.emitUpdate({
                 userId,
                 payload: updatePayload,
-                recipientFilter: { type: 'user-scoped-only' }
+                recipientFilter: { type: 'all-user-authenticated-connections' }
             });
 
             // Send success response
             const response: any = { result: 'success' };
-            
+
             if (headerUpdate) {
                 response.header = {
                     version: headerUpdate.version,
                     data: header!.data
                 };
             }
-            
+
             if (bodyUpdate) {
                 response.body = {
                     version: bodyUpdate.version,
                     data: body!.data
                 };
             }
-            
+
             callback(response);
         } catch (error) {
             log({ module: 'websocket', level: 'error' }, `Error in artifact-update: ${error}`);
@@ -324,7 +325,7 @@ export function artifactUpdateHandler(userId: string, socket: Socket) {
             eventRouter.emitUpdate({
                 userId,
                 payload: newArtifactPayload,
-                recipientFilter: { type: 'user-scoped-only' }
+                recipientFilter: { type: 'all-user-authenticated-connections' }
             });
 
             // Return created artifact
@@ -392,7 +393,7 @@ export function artifactUpdateHandler(userId: string, socket: Socket) {
             eventRouter.emitUpdate({
                 userId,
                 payload: deletePayload,
-                recipientFilter: { type: 'user-scoped-only' }
+                recipientFilter: { type: 'all-user-authenticated-connections' }
             });
 
             // Send success response
