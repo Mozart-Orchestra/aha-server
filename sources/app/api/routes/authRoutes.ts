@@ -58,15 +58,18 @@ export function authRoutes(app: Fastify) {
             }
         }
     }, async (request, reply) => {
+        log({ module: 'auth-request' }, `[AUTH REQUEST] Received terminal auth request`);
+
         const tweetnacl = (await import("tweetnacl")).default;
         const publicKey = privacyKit.decodeBase64(request.body.publicKey);
         const isValid = tweetnacl.box.publicKeyLength === publicKey.length;
         if (!isValid) {
+            log({ module: 'auth-request' }, `[AUTH REQUEST] ❌ Invalid public key length: ${publicKey.length}`);
             return reply.code(401).send({ error: 'Invalid public key' });
         }
 
         const publicKeyHex = privacyKit.encodeHex(publicKey);
-        log({ module: 'auth-request' }, `Terminal auth request - publicKey hex: ${publicKeyHex}`);
+        log({ module: 'auth-request' }, `[AUTH REQUEST] PublicKey hex: ${publicKeyHex}`);
 
         const answer = await db.terminalAuthRequest.upsert({
             where: { publicKey: publicKeyHex },
@@ -101,20 +104,29 @@ export function authRoutes(app: Fastify) {
         }
     }, async (request, reply) => {
         const tweetnacl = (await import("tweetnacl")).default;
+
+        log({ module: 'auth-status' }, `[AUTH STATUS] Checking status for publicKey: ${request.query.publicKey.substring(0, 20)}...`);
+
         const publicKey = privacyKit.decodeBase64(request.query.publicKey);
         const isValid = tweetnacl.box.publicKeyLength === publicKey.length;
         if (!isValid) {
+            log({ module: 'auth-status' }, `[AUTH STATUS] ❌ Invalid public key length: ${publicKey.length}`);
             return reply.send({ status: 'not_found', supportsV2: false });
         }
 
         const publicKeyHex = privacyKit.encodeHex(publicKey);
+        log({ module: 'auth-status' }, `[AUTH STATUS] PublicKey hex: ${publicKeyHex}`);
+
         const authRequest = await db.terminalAuthRequest.findUnique({
             where: { publicKey: publicKeyHex }
         });
 
         if (!authRequest) {
+            log({ module: 'auth-status' }, `[AUTH STATUS] ❌ Request not found`);
             return reply.send({ status: 'not_found', supportsV2: false });
         }
+
+        log({ module: 'auth-status' }, `[AUTH STATUS] Found request: ${authRequest.id}, response: ${!!authRequest.response}`);
 
         if (authRequest.response && authRequest.responseAccountId) {
             return reply.send({ status: 'authorized', supportsV2: false });
@@ -133,35 +145,53 @@ export function authRoutes(app: Fastify) {
             })
         }
     }, async (request, reply) => {
-        log({ module: 'auth-response' }, `Auth response endpoint hit - user: ${request.userId}, publicKey: ${request.body.publicKey.substring(0, 20)}...`);
+        log({ module: 'auth-response' }, `[TERMINAL AUTH] Processing auth response - user: ${request.userId}`);
+
         const tweetnacl = (await import("tweetnacl")).default;
         const publicKey = privacyKit.decodeBase64(request.body.publicKey);
+        log({ module: 'auth-response' }, `[TERMINAL AUTH] Decoded publicKey length: ${publicKey.length}`);
+
         const isValid = tweetnacl.box.publicKeyLength === publicKey.length;
         if (!isValid) {
-            log({ module: 'auth-response' }, `Invalid public key length: ${publicKey.length}`);
+            log({ module: 'auth-response' }, `[TERMINAL AUTH] ❌ Invalid public key length: ${publicKey.length}`);
             return reply.code(401).send({ error: 'Invalid public key' });
         }
+
         const publicKeyHex = privacyKit.encodeHex(publicKey);
-        log({ module: 'auth-response' }, `Looking for auth request with publicKey hex: ${publicKeyHex}`);
+        log({ module: 'auth-response' }, `[TERMINAL AUTH] Looking for auth request with publicKey hex: ${publicKeyHex}`);
+
         const authRequest = await db.terminalAuthRequest.findUnique({
             where: { publicKey: publicKeyHex }
         });
+
         if (!authRequest) {
-            log({ module: 'auth-response' }, `Auth request not found for publicKey: ${publicKeyHex}`);
+            log({ module: 'auth-response' }, `[TERMINAL AUTH] ❌ Auth request not found for publicKey: ${publicKeyHex}`);
             // Let's also check what auth requests exist
             const allRequests = await db.terminalAuthRequest.findMany({
                 take: 5,
                 orderBy: { createdAt: 'desc' }
             });
-            log({ module: 'auth-response' }, `Recent auth requests in DB: ${JSON.stringify(allRequests.map(r => ({ id: r.id, publicKey: r.publicKey.substring(0, 20) + '...', hasResponse: !!r.response })))}`);
+            log({ module: 'auth-response' }, `[TERMINAL AUTH] Recent auth requests in DB: ${JSON.stringify(allRequests.map(r => ({
+                id: r.id,
+                publicKey: r.publicKey.substring(0, 20) + '...',
+                hasResponse: !!r.response,
+                createdAt: r.createdAt
+            })))}`);
             return reply.code(404).send({ error: 'Request not found' });
         }
+
+        log({ module: 'auth-response' }, `[TERMINAL AUTH] Found auth request: ${authRequest.id}, hasResponse: ${!!authRequest.response}`);
+
         if (!authRequest.response) {
             await db.terminalAuthRequest.update({
                 where: { id: authRequest.id },
                 data: { response: request.body.response, responseAccountId: request.userId }
             });
+            log({ module: 'auth-response' }, `[TERMINAL AUTH] ✅ Updated auth request with response`);
+        } else {
+            log({ module: 'auth-response' }, `[TERMINAL AUTH] ⚠️ Auth request already has response, skipping update`);
         }
+
         return reply.send({ success: true });
     });
 
@@ -185,20 +215,31 @@ export function authRoutes(app: Fastify) {
             }
         }
     }, async (request, reply) => {
+        log({ module: 'account-auth-request' }, `[ACCOUNT AUTH] Received account auth request`);
+
         const tweetnacl = (await import("tweetnacl")).default;
         const publicKey = privacyKit.decodeBase64(request.body.publicKey);
+        const publicKeyHex = privacyKit.encodeHex(publicKey);
+
+        log({ module: 'account-auth-request' }, `[ACCOUNT AUTH] PublicKey hex: ${publicKeyHex}`);
+        log({ module: 'account-auth-request' }, `[ACCOUNT AUTH] PublicKey length: ${publicKey.length}`);
+
         const isValid = tweetnacl.box.publicKeyLength === publicKey.length;
         if (!isValid) {
+            log({ module: 'account-auth-request' }, `[ACCOUNT AUTH] ❌ Invalid public key length: ${publicKey.length}, expected: ${tweetnacl.box.publicKeyLength}`);
             return reply.code(401).send({ error: 'Invalid public key' });
         }
 
         const answer = await db.accountAuthRequest.upsert({
-            where: { publicKey: privacyKit.encodeHex(publicKey) },
+            where: { publicKey: publicKeyHex },
             update: {},
-            create: { publicKey: privacyKit.encodeHex(publicKey) }
+            create: { publicKey: publicKeyHex }
         });
 
+        log({ module: 'account-auth-request' }, `[ACCOUNT AUTH] Created/found auth request: ${answer.id}, hasResponse: ${!!answer.response}`);
+
         if (answer.response && answer.responseAccountId) {
+            log({ module: 'account-auth-request' }, `[ACCOUNT AUTH] ✅ Already authorized, returning token`);
             const token = await auth.createToken(answer.responseAccountId!);
             return reply.send({
                 state: 'authorized',
@@ -207,6 +248,7 @@ export function authRoutes(app: Fastify) {
             });
         }
 
+        log({ module: 'account-auth-request' }, `[ACCOUNT AUTH] 🕐 Waiting for approval...`);
         return reply.send({ state: 'requested' });
     });
 
@@ -220,24 +262,53 @@ export function authRoutes(app: Fastify) {
             })
         }
     }, async (request, reply) => {
+        log({ module: 'account-auth-response' }, `[ACCOUNT AUTH] Processing account auth response - user: ${request.userId}`);
+
         const tweetnacl = (await import("tweetnacl")).default;
         const publicKey = privacyKit.decodeBase64(request.body.publicKey);
+        log({ module: 'account-auth-response' }, `[ACCOUNT AUTH] Decoded publicKey length: ${publicKey.length}`);
+
         const isValid = tweetnacl.box.publicKeyLength === publicKey.length;
         if (!isValid) {
+            log({ module: 'account-auth-response' }, `[ACCOUNT AUTH] ❌ Invalid public key length: ${publicKey.length}, expected: ${tweetnacl.box.publicKeyLength}`);
             return reply.code(401).send({ error: 'Invalid public key' });
         }
+
+        const publicKeyHex = privacyKit.encodeHex(publicKey);
+        log({ module: 'account-auth-response' }, `[ACCOUNT AUTH] Looking for auth request with publicKey hex: ${publicKeyHex}`);
+
         const authRequest = await db.accountAuthRequest.findUnique({
-            where: { publicKey: privacyKit.encodeHex(publicKey) }
+            where: { publicKey: publicKeyHex }
         });
+
         if (!authRequest) {
+            log({ module: 'account-auth-response' }, `[ACCOUNT AUTH] ❌ Request not found for publicKey: ${publicKeyHex}`);
+            // Debug: check recent auth requests
+            const allRequests = await db.accountAuthRequest.findMany({
+                take: 5,
+                orderBy: { createdAt: 'desc' }
+            });
+            log({ module: 'account-auth-response' }, `[ACCOUNT AUTH] Recent auth requests in DB: ${JSON.stringify(allRequests.map(r => ({
+                id: r.id,
+                publicKey: r.publicKey.substring(0, 20) + '...',
+                hasResponse: !!r.response,
+                createdAt: r.createdAt
+            })))}`);
             return reply.code(404).send({ error: 'Request not found' });
         }
+
+        log({ module: 'account-auth-response' }, `[ACCOUNT AUTH] Found auth request: ${authRequest.id}, hasResponse: ${!!authRequest.response}`);
+
         if (!authRequest.response) {
             await db.accountAuthRequest.update({
                 where: { id: authRequest.id },
                 data: { response: request.body.response, responseAccountId: request.userId }
             });
+            log({ module: 'account-auth-response' }, `[ACCOUNT AUTH] ✅ Updated auth request with response`);
+        } else {
+            log({ module: 'account-auth-response' }, `[ACCOUNT AUTH] ⚠️ Auth request already has response, skipping update`);
         }
+
         return reply.send({ success: true });
     });
 

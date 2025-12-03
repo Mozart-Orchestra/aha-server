@@ -60,6 +60,20 @@ export const httpRequestDurationHistogram = new Histogram({
     registers: [register]
 });
 
+export const teamMessagesCounter = new Counter({
+    name: 'team_messages_total',
+    help: 'Number of team messages processed',
+    labelNames: ['type', 'role'] as const,
+    registers: [register]
+});
+
+export const teamTaskOperationsCounter = new Counter({
+    name: 'team_task_operations_total',
+    help: 'Number of task-related updates emitted via team messages',
+    labelNames: ['role'] as const,
+    registers: [register]
+});
+
 // Database count metrics
 export const databaseRecordCountGauge = new Gauge({
     name: 'database_records_total',

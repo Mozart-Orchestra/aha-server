@@ -152,6 +152,10 @@ export type UpdateEvent = {
         value: string | null; // null indicates deletion
         version: number; // -1 for deleted keys
     }>;
+} | {
+    type: 'team-message';
+    teamId: string;
+    message: any; // TeamMessage from teamMessageTypes
 };
 
 // === EPHEMERAL EVENT TYPES (Transient) ===
@@ -256,6 +260,18 @@ class EventRouter {
             recipientFilter: params.recipientFilter || { type: 'all-user-authenticated-connections' },
             skipSenderConnection: params.skipSenderConnection
         });
+    }
+
+    getSessionConnection(userId: string, sessionId: string): SessionScopedConnection | undefined {
+        const connections = this.userConnections.get(userId);
+        if (!connections) return undefined;
+
+        for (const connection of connections) {
+            if (connection.connectionType === 'session-scoped' && connection.sessionId === sessionId) {
+                return connection;
+            }
+        }
+        return undefined;
     }
 
     // === PRIVATE ROUTING LOGIC ===
