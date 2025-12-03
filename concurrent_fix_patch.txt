@@ -1,0 +1,44 @@
+// 并发问题修复补丁 - startHappyServer.ts
+// 问题1: 传入undefined清空header元数据
+// 问题2: 状态不匹配 ('in_progress' vs 'in-progress')
+
+// 修复1: create_task (第567行附近)
+// 原始代码（有问题）:
+// await api.updateArtifact(teamId, undefined, newBody, undefined, artifact.bodyVersion);
+
+// 修复后的代码:
+await api.updateArtifact(
+    teamId,
+    artifact.header,  // 保留现有header metadata
+    newBody,
+    undefined,
+    artifact.bodyVersion
+);
+
+// 修复2: update_task (第711行附近)
+// 原始代码（有问题）:
+// await api.updateArtifact(teamId, undefined, newBody, undefined, artifact.bodyVersion);
+
+// 修复后的代码:
+await api.updateArtifact(
+    teamId,
+    artifact.header,  // 保留现有header metadata
+    newBody,
+    undefined,
+    artifact.bodyVersion
+);
+
+// 修复3: 状态匹配问题 - list_tasks工具
+// 问题：UI显示'in_progress'，后端保存'in-progress'
+// 修复：统一状态字符串
+const normalizeStatus = (status: string): string => {
+    if (!status) return null;
+    return status === 'in_progress' ? 'in-progress' : status;
+};
+
+// 在create_task和update_task中使用:
+const normalizedStatus = normalizeStatus(status);
+const newBody = {
+    ...artifact.body,
+    status: normalizedStatus || 'todo', // 默认状态
+};

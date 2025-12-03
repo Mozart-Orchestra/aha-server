@@ -1,0 +1,47 @@
+// 安全修复补丁 - teamMessagesRoutes.ts
+// 问题：直接信任客户端提供的fromSessionId/fromRole
+// 修复：从ctx.session获取真实身份，验证客户端提交
+
+// 原始代码（有漏洞）:
+// const { content, type, metadata, fromSessionId, fromRole, fromDisplayName, mentions } = message;
+
+// 修复后的安全代码:
+const { content, type, metadata, mentions } = message;
+
+// 从认证session获取真实身份
+const sessionData = {
+  fromSessionId: ctx.session?.id,
+  fromRole: ctx.session?.role || 'unknown',
+  fromDisplayName: ctx.session?.displayName || ctx.session?.username || 'Unknown User',
+  accountId: ctx.session?.accountId
+};
+
+// 验证客户端提供的身份与session匹配（如果提供了）
+if (message.fromSessionId && message.fromSessionId !== sessionData.fromSessionId) {
+  return reply.code(403).send({ 
+    error: 'Session ID mismatch', 
+    details: 'Client-provided session ID does not match authenticated session'
+  });
+}
+
+// 验证role权限（如果需要）
+if (message.fromRole && message.fromRole !== ctx.session?.role) {
+  return reply.code(403).send({ 
+    error: 'Role verification failed', 
+    details: 'Client-provided role does not match authenticated user role'
+  });
+}
+
+// 使用认证session的数据
+const messageData = {
+  ...message,
+  ...sessionData
+};
+
+// 消息截断修复 - GET端点
+// 原始问题：kvList升序，获取最早记录
+// 修复：改为降序获取最新消息
+const messages = await db.kvList(path, limit, { 
+  reverse: true,  // 添加reverse: true获取最新消息
+  limit: limit || 100
+});
