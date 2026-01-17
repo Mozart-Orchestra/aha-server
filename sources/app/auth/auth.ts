@@ -5,6 +5,7 @@ interface TokenCacheEntry {
     userId: string;
     extras?: any;
     cachedAt: number;
+    lastAccessedAt: number;
 }
 
 interface AuthTokens {
@@ -14,9 +15,15 @@ interface AuthTokens {
     githubGenerator: Awaited<ReturnType<typeof privacyKit.createEphemeralTokenGenerator>>;
 }
 
+// Security: Token cache configuration
+const TOKEN_CACHE_MAX_SIZE = 10000; // Maximum number of cached tokens
+const TOKEN_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours expiration
+const TOKEN_CACHE_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // Cleanup every hour
+
 class AuthModule {
     private tokenCache = new Map<string, TokenCacheEntry>();
     private tokens: AuthTokens | null = null;
+    private cleanupInterval: NodeJS.Timeout | null = null;
     
     async init(): Promise<void> {
         if (this.tokens) {
@@ -49,8 +56,60 @@ class AuthModule {
 
 
         this.tokens = { generator, verifier, githubVerifier, githubGenerator };
-        
+
+        // Start periodic cleanup to prevent memory leaks
+        this.startCleanupInterval();
+
         log({ module: 'auth' }, 'Auth module initialized');
+    }
+
+    private startCleanupInterval(): void {
+        if (this.cleanupInterval) {
+            return;
+        }
+        this.cleanupInterval = setInterval(() => {
+            this.cleanupExpiredTokens();
+        }, TOKEN_CACHE_CLEANUP_INTERVAL_MS);
+        // Don't prevent process exit
+        this.cleanupInterval.unref();
+    }
+
+    private cleanupExpiredTokens(): void {
+        const now = Date.now();
+        let expiredCount = 0;
+
+        for (const [token, entry] of this.tokenCache.entries()) {
+            if (now - entry.cachedAt > TOKEN_CACHE_TTL_MS) {
+                this.tokenCache.delete(token);
+                expiredCount++;
+            }
+        }
+
+        if (expiredCount > 0) {
+            log({ module: 'auth' }, `Cleaned up ${expiredCount} expired tokens. Cache size: ${this.tokenCache.size}`);
+        }
+    }
+
+    private evictLRUIfNeeded(): void {
+        if (this.tokenCache.size < TOKEN_CACHE_MAX_SIZE) {
+            return;
+        }
+
+        // Find and remove the least recently accessed token
+        let oldestToken: string | null = null;
+        let oldestAccess = Date.now();
+
+        for (const [token, entry] of this.tokenCache.entries()) {
+            if (entry.lastAccessedAt < oldestAccess) {
+                oldestAccess = entry.lastAccessedAt;
+                oldestToken = token;
+            }
+        }
+
+        if (oldestToken) {
+            this.tokenCache.delete(oldestToken);
+            log({ module: 'auth' }, `Evicted LRU token. Cache size: ${this.tokenCache.size}`);
+        }
     }
     
     async createToken(userId: string, extras?: any): Promise<string> {
@@ -64,14 +123,19 @@ class AuthModule {
         }
         
         const token = await this.tokens.generator.new(payload);
-        
-        // Cache the token immediately
+
+        // Evict LRU token if cache is full
+        this.evictLRUIfNeeded();
+
+        const now = Date.now();
+        // Cache the token with expiration tracking
         this.tokenCache.set(token, {
             userId,
             extras,
-            cachedAt: Date.now()
+            cachedAt: now,
+            lastAccessedAt: now
         });
-        
+
         return token;
     }
     
@@ -79,10 +143,19 @@ class AuthModule {
         // Check cache first
         const cached = this.tokenCache.get(token);
         if (cached) {
-            return {
-                userId: cached.userId,
-                extras: cached.extras
-            };
+            const now = Date.now();
+            // Check if token has expired
+            if (now - cached.cachedAt > TOKEN_CACHE_TTL_MS) {
+                this.tokenCache.delete(token);
+                // Token expired, need to re-verify
+            } else {
+                // Update last accessed time for LRU
+                cached.lastAccessedAt = now;
+                return {
+                    userId: cached.userId,
+                    extras: cached.extras
+                };
+            }
         }
         
         // Cache miss - verify token
@@ -98,14 +171,19 @@ class AuthModule {
             
             const userId = verified.user as string;
             const extras = verified.extras;
-            
-            // Cache the result permanently
+
+            // Evict LRU token if cache is full
+            this.evictLRUIfNeeded();
+
+            const now = Date.now();
+            // Cache the result with expiration tracking
             this.tokenCache.set(token, {
                 userId,
                 extras,
-                cachedAt: Date.now()
+                cachedAt: now,
+                lastAccessedAt: now
             });
-            
+
             return { userId, extras };
             
         } catch (error) {
@@ -177,12 +255,20 @@ class AuthModule {
         }
     }
 
-    // Cleanup old entries (optional - can be called periodically)
+    // Force cleanup of expired tokens (can be called manually)
     cleanup(): void {
-        // Note: Since tokens are cached "forever" as requested,
-        // we don't do automatic cleanup. This method exists if needed later.
+        this.cleanupExpiredTokens();
         const stats = this.getCacheStats();
         log({ module: 'auth' }, `Token cache size: ${stats.size} entries`);
+    }
+
+    // Stop cleanup interval (for graceful shutdown)
+    shutdown(): void {
+        if (this.cleanupInterval) {
+            clearInterval(this.cleanupInterval);
+            this.cleanupInterval = null;
+        }
+        log({ module: 'auth' }, 'Auth module shutdown');
     }
 }
 

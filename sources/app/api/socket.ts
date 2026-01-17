@@ -12,15 +12,11 @@ import { sessionUpdateHandler } from "./socket/sessionUpdateHandler";
 import { machineUpdateHandler } from "./socket/machineUpdateHandler";
 import { artifactUpdateHandler } from "./socket/artifactUpdateHandler";
 import { accessKeyHandler } from "./socket/accessKeyHandler";
+import { getSocketCorsConfig } from "./utils/corsConfig";
 
 export function startSocket(app: Fastify) {
     const io = new Server(app.server, {
-        cors: {
-            origin: "*",
-            methods: ["GET", "POST", "OPTIONS"],
-            credentials: true,
-            allowedHeaders: ["*"]
-        },
+        cors: getSocketCorsConfig(),
         transports: ['websocket', 'polling'],
         pingTimeout: 45000,
         pingInterval: 15000,

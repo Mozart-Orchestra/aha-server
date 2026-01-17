@@ -6,9 +6,10 @@ export function enableAuthentication(app: Fastify) {
     app.decorate('authenticate', async function (request: any, reply: any) {
         try {
             const authHeader = request.headers.authorization;
-            log({ module: 'auth-decorator' }, `Auth check - path: ${request.url}, has header: ${!!authHeader}, header start: ${authHeader?.substring(0, 50)}...`);
+            // Security: Do not log token content, only presence
+            log({ module: 'auth-decorator' }, `Auth check - path: ${request.url}, has header: ${!!authHeader}`);
             if (!authHeader || !authHeader.startsWith('Bearer ')) {
-                log({ module: 'auth-decorator' }, `Auth failed - missing or invalid header`);
+                log({ module: 'auth-decorator' }, `Auth failed - missing or invalid header format`);
                 return reply.code(401).send({ error: 'Missing authorization header' });
             }
 
@@ -22,6 +23,7 @@ export function enableAuthentication(app: Fastify) {
             log({ module: 'auth-decorator' }, `Auth success - user: ${verified.userId}`);
             request.userId = verified.userId;
         } catch (error) {
+            log({ module: 'auth-decorator', level: 'error' }, `Auth error - ${error instanceof Error ? error.message : 'unknown'}`);
             return reply.code(401).send({ error: 'Authentication failed' });
         }
     });
