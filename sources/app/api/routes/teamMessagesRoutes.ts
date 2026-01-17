@@ -36,7 +36,7 @@ const TeamMessageMetadataSchema = z.object({
 const TeamMessageSchema = z.object({
     id: z.string().uuid(),
     teamId: z.string(),
-    fromSessionId: z.string(),
+    fromSessionId: z.string().optional(),
     fromRole: z.string().optional(),
     fromDisplayName: z.string().optional(),
     content: z.string().max(2000),
@@ -235,6 +235,12 @@ export function teamMessagesRoutes(app: Fastify) {
                     // Safer to clear them if we can't verify.
                     // But for now, let's assume if metadata is broken, we trust the client less.
                     // However, existing logic in kanban relies on metadata.
+                }
+            }
+            if (!message.fromSessionId) {
+                message.fromRole = 'user';
+                if (!message.fromDisplayName) {
+                    message.fromDisplayName = 'User';
                 }
             }
 
