@@ -62,7 +62,7 @@ export async function userRoutes(app: Fastify) {
     app.get('/v1/user/search', {
         schema: {
             querystring: z.object({
-                query: z.string()
+                query: z.string().min(2).max(50) // Security: Require minimum length to prevent expensive queries
             }),
             response: {
                 200: z.object({
@@ -91,17 +91,27 @@ export async function userRoutes(app: Fastify) {
             }
         });
 
-        // Resolve relationship status for each user
-        const userProfiles = await Promise.all(users.map(async (user) => {
-            const relationship = await db.userRelationship.findFirst({
+        // Performance: Batch fetch all relationships in a single query instead of N+1
+        const userIds = users.map(user => user.id);
+        const relationships = userIds.length > 0
+            ? await db.userRelationship.findMany({
                 where: {
                     fromUserId: request.userId,
-                    toUserId: user.id
+                    toUserId: { in: userIds }
                 }
-            });
-            const status: RelationshipStatus = relationship?.status || RelationshipStatus.none;
+            })
+            : [];
+
+        // Create a map for O(1) lookup
+        const relationshipMap = new Map(
+            relationships.map(rel => [rel.toUserId, rel.status])
+        );
+
+        // Build user profiles with cached relationship status
+        const userProfiles = users.map(user => {
+            const status = relationshipMap.get(user.id) || RelationshipStatus.none;
             return buildUserProfile(user, status);
-        }));
+        });
 
         return reply.send({
             users: userProfiles

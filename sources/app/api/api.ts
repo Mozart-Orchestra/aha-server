@@ -22,6 +22,8 @@ import { userRoutes } from "./routes/userRoutes";
 import { feedRoutes } from "./routes/feedRoutes";
 import { kvRoutes } from "./routes/kvRoutes";
 import { teamMessagesRoutes } from "./routes/teamMessagesRoutes";
+import { getCorsConfig } from "./utils/corsConfig";
+import { getDefaultRateLimitConfig } from "./utils/rateLimitConfig";
 
 export async function startApi() {
 
@@ -33,11 +35,11 @@ export async function startApi() {
         loggerInstance: logger,
         bodyLimit: 1024 * 1024 * 100, // 100MB
     });
-    app.register(import('@fastify/cors'), {
-        origin: '*',
-        allowedHeaders: '*',
-        methods: ['GET', 'POST', 'DELETE']
-    });
+    app.register(import('@fastify/cors'), getCorsConfig());
+
+    // Security: Rate limiting to prevent brute force and DoS attacks
+    await app.register(import('@fastify/rate-limit'), getDefaultRateLimitConfig());
+
     app.get('/', function (request, reply) {
         reply.send('Welcome to Happy Server!');
     });
