@@ -187,9 +187,7 @@ export function teamMessagesRoutes(app: Fastify) {
         // but we can add explicit logging for validation errors if needed.
         const parseResult = TeamMessageSchema.safeParse(request.body);
         if (!parseResult.success) {
-            console.error('[TeamMessages] Validation error:', JSON.stringify(parseResult.error.format(), null, 2));
-            // @ts-ignore
-            return reply.status(400).send({ error: 'Invalid message format', details: parseResult.error });
+            return reply.status(400).send({ error: 'Invalid message format' });
         }
         const message = parseResult.data;
         const { content, type, metadata, fromSessionId, fromRole, fromDisplayName, mentions } = message;
