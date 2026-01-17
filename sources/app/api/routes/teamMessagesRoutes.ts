@@ -262,7 +262,10 @@ export function teamMessagesRoutes(app: Fastify) {
             // 1. Force timestamp to server time
             message.timestamp = Date.now();
 
-            // 2. Derive shortContent from content to ensure it matches and isn't misleading
+            // 2. Add teamId to message for client-side filtering
+            message.teamId = teamId;
+
+            // 3. Derive shortContent from content to ensure it matches and isn't misleading
             // (Client provided shortContent is ignored/overwritten)
             message.shortContent = message.content.length > 150
                 ? message.content.substring(0, 150) + '...'
