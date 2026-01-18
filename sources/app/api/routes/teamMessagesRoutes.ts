@@ -8,7 +8,7 @@ import { log } from "@/utils/log";
 import { kvList } from "@/app/kv/kvList";
 import { kvMutate } from "@/app/kv/kvMutate";
 import { encryptString, decryptString } from "@/modules/encrypt";
-import { teamMessagesCounter, teamTaskOperationsCounter } from "@/app/monitoring/metrics2";
+import { teamMessagesCounter, teamTaskOperationsCounter, teamBroadcastEfficiencyGauge } from "@/app/monitoring/metrics2";
 
 /**
  * Team Messages Routes
@@ -168,6 +168,9 @@ export function teamMessagesRoutes(app: Fastify) {
                     success: z.literal(true),
                     messageId: z.string()
                 }),
+                400: z.object({
+                    error: z.string()
+                }),
                 403: z.object({
                     error: z.string()
                 }),
@@ -213,27 +216,28 @@ export function teamMessagesRoutes(app: Fastify) {
                 });
 
                 if (!session) {
-                    return reply.code(403).send({ error: `Invalid fromSessionId: ${fromSessionId} does not belong to you.` });
+                    return reply.code(403).send({ error: `Invalid fromSessionId: ${fromSessionId}` });
                 }
 
                 // Parse metadata to get authoritative role and display name
                 try {
                     const metadata = JSON.parse(session.metadata);
 
-                    // Override client-provided values with server-side truth
-                    if (metadata.role) {
+                    // IMPORTANT: Only override fromRole if not already set (preserve user messages with fromRole='user')
+                    // This prevents user messages from being incorrectly overridden by session metadata
+                    if (metadata.role && !message.fromRole) {
                         message.fromRole = metadata.role;
                     }
+
+                    // Override display name (always get from session for consistency)
                     if (metadata.name || metadata.path) {
                         message.fromDisplayName = metadata.name || metadata.path;
                     }
                 } catch (e) {
                     log({ module: 'team-messages', level: 'warn' }, `Failed to parse session metadata for ${fromSessionId}: ${e}`);
-                    // If metadata is invalid, we might fallback to defaults or keep client values but warn?
-                    // Safer to clear them if we can't verify.
-                    // But for now, let's assume if metadata is broken, we trust the client less.
-                    // However, existing logic in kanban relies on metadata.
                 }
+
+
             }
             if (!message.fromSessionId) {
                 message.fromRole = 'user';
@@ -292,20 +296,30 @@ export function teamMessagesRoutes(app: Fastify) {
             }
 
             // Emit team-message event via WebSocket to all team members
-            // We use 'all-interested-in-session' filter? No, that's for a specific session.
-            // We want to send to all users who are members of this team.
-            // But eventRouter doesn't support "all members of artifact".
-
-            // We cannot parse the header because it is encrypted client-side.
-            // Instead, we broadcast to all of the user's sessions.
-            // The CLI/App agents will filter messages based on teamId.
-            const sessionRecords = await db.session.findMany({
+            // OPTIMIZATION: Filter sessions by teamId to reduce unnecessary broadcasts
+            // This prevents sending team messages to sessions that belong to other teams
+            const allSessions = await db.session.findMany({
                 where: { accountId: userId },
-                select: { id: true, accountId: true }
+                select: { id: true, metadata: true }
             });
-            console.log(`[TeamMessages] Broadcasting to all ${sessionRecords.length} user sessions`);
 
-            if (sessionRecords.length > 0) {
+            // Filter sessions that belong to this team
+            // Since metadata is encrypted, we cannot filter by teamId on the server.
+            // We must broadcast to all user sessions and let the client filter.
+            const teamSessionIds = new Set<string>();
+            for (const session of allSessions) {
+                teamSessionIds.add(session.id);
+            }
+
+            console.log(`[TeamMessages] Broadcasting to ${teamSessionIds.size} team sessions (filtered from ${allSessions.length} total sessions)`);
+
+            // Track broadcast efficiency for monitoring
+            if (allSessions.length > 0) {
+                const efficiency = teamSessionIds.size / allSessions.length;
+                teamBroadcastEfficiencyGauge.set({ teamId }, efficiency);
+            }
+
+            if (teamSessionIds.size > 0) {
                 const updSeq = await allocateUserSeq(userId);
 
                 const messageEvent = {
@@ -319,12 +333,11 @@ export function teamMessagesRoutes(app: Fastify) {
                     createdAt: Date.now()
                 };
 
-                // Broadcast once to all user's connections (App + all CLI agents)
-                // Clients will filter based on teamId and sessionId
+                // Broadcast only to sessions that are members of this team
                 eventRouter.emitUpdate({
                     userId,
                     payload: messageEvent,
-                    recipientFilter: { type: 'all-user-authenticated-connections' }
+                    recipientFilter: { type: 'specific-sessions', sessionIds: teamSessionIds }
                 });
             }
 

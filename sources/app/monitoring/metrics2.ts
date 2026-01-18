@@ -74,6 +74,13 @@ export const teamTaskOperationsCounter = new Counter({
     registers: [register]
 });
 
+export const teamBroadcastEfficiencyGauge = new Gauge({
+    name: 'team_broadcast_efficiency',
+    help: 'Team message broadcast efficiency: filtered sessions / total sessions',
+    labelNames: ['teamId'] as const,
+    registers: [register]
+});
+
 // Database count metrics
 export const databaseRecordCountGauge = new Gauge({
     name: 'database_records_total',
