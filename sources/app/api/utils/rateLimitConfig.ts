@@ -4,8 +4,8 @@ import type { FastifyRateLimitOptions } from '@fastify/rate-limit';
 export const RATE_LIMIT_CONFIG = {
     // Default rate limit for most endpoints
     default: {
-        max: 100, // 100 requests
-        timeWindow: '1 minute',
+        max: 200, // 200 requests per second
+        timeWindow: '1 second',
     },
     // Auth endpoints - stricter limits to prevent brute force
     auth: {
