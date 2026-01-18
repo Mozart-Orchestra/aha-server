@@ -274,7 +274,15 @@ export function sessionRoutes(app: Fastify) {
 
             // Auto-link session to team artifact if metadata contains teamId
             try {
-                const parsedMetadata = metadata ? JSON.parse(metadata) : {};
+                // Safeguard against encrypted metadata which is not valid JSON
+                let parsedMetadata: any = {};
+                try {
+                    parsedMetadata = metadata ? JSON.parse(metadata) : {};
+                } catch (e) {
+                    // This is expected for encrypted sessions
+                    // log({ module: 'session-create', level: 'debug' }, `Skipping auto-link for encrypted session metadata`);
+                }
+
                 const teamId = parsedMetadata.teamId;
 
                 if (teamId) {
@@ -286,34 +294,39 @@ export function sessionRoutes(app: Fastify) {
                     });
 
                     if (artifact) {
-                        // Decode header
-                        const headerStr = privacyKit.encodeBase64(artifact.header);
-                        const header = JSON.parse(Buffer.from(headerStr, 'base64').toString());
+                        try {
+                            // Decode header
+                            const headerStr = privacyKit.encodeBase64(artifact.header);
+                            const header = JSON.parse(Buffer.from(headerStr, 'base64').toString());
 
-                        // Add session ID if not already present
-                        if (!header.sessions || !header.sessions.includes(session.id)) {
-                            header.sessions = [...(header.sessions || []), session.id];
+                            // Add session ID if not already present
+                            if (!header.sessions || !header.sessions.includes(session.id)) {
+                                header.sessions = [...(header.sessions || []), session.id];
 
-                            // Encode updated header
-                            const newHeaderStr = Buffer.from(JSON.stringify(header)).toString('base64');
-                            const newHeader = privacyKit.decodeBase64(newHeaderStr);
+                                // Encode updated header
+                                const newHeaderStr = Buffer.from(JSON.stringify(header)).toString('base64');
+                                const newHeader = privacyKit.decodeBase64(newHeaderStr);
 
-                            // Update artifact
-                            await db.artifact.update({
-                                where: { id: artifact.id },
-                                data: {
-                                    header: newHeader as any,
-                                    headerVersion: artifact.headerVersion + 1,
-                                    seq: artifact.seq + 1,
-                                    updatedAt: new Date()
-                                }
-                            });
+                                // Update artifact
+                                await db.artifact.update({
+                                    where: { id: artifact.id },
+                                    data: {
+                                        header: newHeader as any,
+                                        headerVersion: artifact.headerVersion + 1,
+                                        seq: artifact.seq + 1,
+                                        updatedAt: new Date()
+                                    }
+                                });
 
-                            log({ module: 'session-artifact-link', sessionId: session.id, teamId, artifactId: artifact.id },
-                                `Successfully linked session to artifact. New headerVersion: ${artifact.headerVersion + 1}`);
-                        } else {
-                            log({ module: 'session-artifact-link', sessionId: session.id, teamId },
-                                `Session already linked to artifact`);
+                                log({ module: 'session-artifact-link', sessionId: session.id, teamId, artifactId: artifact.id },
+                                    `Successfully linked session to artifact. New headerVersion: ${artifact.headerVersion + 1}`);
+                            } else {
+                                log({ module: 'session-artifact-link', sessionId: session.id, teamId },
+                                    `Session already linked to artifact`);
+                            }
+                        } catch (headerError) {
+                            // This is expected for encrypted artifacts
+                            // log({ module: 'session-artifact-link', level: 'debug' }, `Skipping link for encrypted artifact header`);
                         }
                     } else {
                         log({ module: 'session-artifact-link', sessionId: session.id, teamId, level: 'warn' },

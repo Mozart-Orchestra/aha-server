@@ -18,10 +18,12 @@ import { accessKeysRoutes } from "./routes/accessKeysRoutes";
 import { enableMonitoring } from "./utils/enableMonitoring";
 import { enableErrorHandlers } from "./utils/enableErrorHandlers";
 import { enableAuthentication } from "./utils/enableAuthentication";
+import { enablePermissionInterceptor } from "./utils/enablePermissionInterceptor";
 import { userRoutes } from "./routes/userRoutes";
 import { feedRoutes } from "./routes/feedRoutes";
 import { kvRoutes } from "./routes/kvRoutes";
 import { teamMessagesRoutes } from "./routes/teamMessagesRoutes";
+import { teamKeyRoutes } from "./routes/teamKeyRoutes";
 import { getCorsConfig } from "./utils/corsConfig";
 import { getDefaultRateLimitConfig } from "./utils/rateLimitConfig";
 
@@ -53,6 +55,12 @@ export async function startApi() {
     enableMonitoring(typed);
     enableErrorHandlers(typed);
     enableAuthentication(typed);
+    enablePermissionInterceptor(typed, {
+        enabled: process.env.PERMISSION_INTERCEPTOR_ENABLED !== 'false',
+        strictMode: process.env.PERMISSION_STRICT_MODE === 'true',
+        auditLog: process.env.PERMISSION_AUDIT_LOG !== 'false',
+        bypassPaths: ['/health', '/ping', '/metrics', '/api/health']
+    });
 
     // Routes
     authRoutes(typed);
@@ -70,6 +78,7 @@ export async function startApi() {
     feedRoutes(typed);
     kvRoutes(typed);
     teamMessagesRoutes(typed);
+    teamKeyRoutes(typed);
 
     // Start HTTP 
     const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3005;

@@ -1,0 +1,27 @@
+{
+  "name": "@happy/role-definitions",
+  "version": "2.0.0",
+  "description": "Unified role definition system for Happy team",
+  "main": "index.js",
+  "scripts": {
+    "generate": "node scripts/generate-all.js",
+    "generate:skill-md": "node scripts/generate-skill-md.js",
+    "generate:index-cjs": "node scripts/generate-index-cjs.js",
+    "validate": "node scripts/validate-roles.js",
+    "test": "npm run validate && npm run generate"
+  },
+  "keywords": [
+    "happy",
+    "role-definitions",
+    "team",
+    "agents"
+  ],
+  "author": "Happy Team",
+  "license": "MIT",
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2"
+  }
+}

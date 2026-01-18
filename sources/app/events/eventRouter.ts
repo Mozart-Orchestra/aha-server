@@ -34,6 +34,7 @@ export type RecipientFilter =
     | { type: 'all-interested-in-session'; sessionId: string }
     | { type: 'user-scoped-only' }
     | { type: 'machine-scoped-only'; machineId: string }  // For update-machine: sends to user-scoped + only the specific machine
+    | { type: 'specific-sessions'; sessionIds: Set<string> }  // For team messages: sends only to sessions that are team members
     | { type: 'all-user-authenticated-connections' };
 
 // === UPDATE EVENT TYPES (Persistent) ===
@@ -305,6 +306,16 @@ class EventRouter {
                     return connection.machineId === filter.machineId;
                 }
                 return false;  // session-scoped doesn't need machine updates
+
+            case 'specific-sessions':
+                // Send only to session-scoped connections that are in the allowed set + all user-scoped
+                if (connection.connectionType === 'session-scoped') {
+                    return filter.sessionIds.has(connection.sessionId);
+                } else if (connection.connectionType === 'machine-scoped') {
+                    return false;  // Machines don't need team messages
+                }
+                // user-scoped always gets team messages (for web/mobile apps)
+                return true;
 
             case 'all-user-authenticated-connections':
                 // Send to all connection types (default behavior)
