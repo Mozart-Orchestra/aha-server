@@ -24,6 +24,8 @@ import { feedRoutes } from "./routes/feedRoutes";
 import { kvRoutes } from "./routes/kvRoutes";
 import { teamMessagesRoutes } from "./routes/teamMessagesRoutes";
 import { teamKeyRoutes } from "./routes/teamKeyRoutes";
+import { taskRoutes } from "./routes/taskRoutes";
+import { teamManagementRoutes } from "./routes/teamManagementRoutes";
 import { getCorsConfig } from "./utils/corsConfig";
 import { getDefaultRateLimitConfig } from "./utils/rateLimitConfig";
 
@@ -42,8 +44,87 @@ export async function startApi() {
     // Security: Rate limiting to prevent brute force and DoS attacks
     await app.register(import('@fastify/rate-limit'), getDefaultRateLimitConfig());
 
+    // Register Swagger for API documentation
+    await app.register(await import('@fastify/swagger'), {
+        openapi: {
+            openapi: '3.0.0',
+            info: {
+                title: 'Happy Server API',
+                description: 'Happy Server provides the backend infrastructure for the Happy CLI and team collaboration platform.',
+                version: '1.0.0',
+                contact: {
+                    name: 'Happy Team',
+                    url: 'https://github.com/slopus/happy-server',
+                    email: 'steve@korshakov.com'
+                },
+                license: {
+                    name: 'MIT',
+                    url: 'https://opensource.org/licenses/MIT'
+                }
+            },
+            servers: [
+                {
+                    url: 'http://localhost:3005',
+                    description: 'Local development server'
+                },
+                {
+                    url: 'https://api.cluster-fluster.com',
+                    description: 'Production server'
+                }
+            ],
+            tags: [
+                { name: 'Authentication', description: 'User authentication and authorization' },
+                { name: 'Sessions', description: 'Claude Code session management' },
+                { name: 'Machines', description: 'Machine registration and heartbeat' },
+                { name: 'Artifacts', description: 'Session artifacts and outputs' },
+                { name: 'Push', description: 'Push notification management' },
+                { name: 'Connect', description: 'AI vendor API key management' },
+                { name: 'Account', description: 'User account operations' },
+                { name: 'Access Keys', description: 'Access key management' },
+                { name: 'Voice', description: 'Voice-related features' },
+                { name: 'User', description: 'User profile and settings' },
+                { name: 'Feed', description: 'Activity feed operations' },
+                { name: 'KV', description: 'Key-Value storage' },
+                { name: 'Team Messages', description: 'Team collaboration messaging' },
+                { name: 'Dev', description: 'Development and debugging endpoints' }
+            ],
+            components: {
+                securitySchemes: {
+                    bearerAuth: {
+                        type: 'http',
+                        scheme: 'bearer',
+                        bearerFormat: 'JWT',
+                        description: 'JWT token obtained from /v1/auth endpoint'
+                    }
+                }
+            },
+            security: [
+                {
+                    bearerAuth: []
+                }
+            ]
+        }
+    });
+
+    await app.register(await import('@fastify/swagger-ui'), {
+        routePrefix: '/docs',
+        uiConfig: {
+            docExpansion: 'list',
+            deepLinking: true,
+            persistAuthorization: true,
+            displayRequestDuration: true,
+            filter: true,
+            tryItOutEnabled: true
+        }
+    });
+
     app.get('/', function (request, reply) {
-        reply.send('Welcome to Happy Server!');
+        reply.send({
+            message: 'Welcome to Happy Server!',
+            docs: '/docs',
+            health: '/health',
+            version: '1.0.0'
+        });
     });
 
     // Create typed provider
@@ -79,6 +160,8 @@ export async function startApi() {
     kvRoutes(typed);
     teamMessagesRoutes(typed);
     teamKeyRoutes(typed);
+    taskRoutes(typed);
+    teamManagementRoutes(typed);
 
     // Start HTTP 
     const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3005;

@@ -157,6 +157,30 @@ export type UpdateEvent = {
     type: 'team-message';
     teamId: string;
     message: any; // TeamMessage from teamMessageTypes
+} | {
+    type: 'task-created';
+    teamId: string;
+    taskId: string;
+    task: any; // KanbanTask from taskOrchestrator
+} | {
+    type: 'task-updated';
+    teamId: string;
+    taskId: string;
+    task: any; // KanbanTask from taskOrchestrator
+} | {
+    type: 'task-deleted';
+    teamId: string;
+    taskId: string;
+} | {
+    type: 'team-update';
+    teamId: string;
+    eventType: 'member-added' | 'member-removed' | 'team-archived' | 'team-deleted' | 'team-renamed';
+    details: any;
+} | {
+    type: 'session-update';
+    sessionId: string;
+    eventType: 'session-archived' | 'session-deleted' | 'session-renamed';
+    details?: any;
 };
 
 // === EPHEMERAL EVENT TYPES (Transient) ===

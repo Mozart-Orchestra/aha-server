@@ -189,11 +189,11 @@ export function artifactsRoutes(app: Fastify) {
                 data: {
                     id,
                     accountId: userId,
-                    header: privacyKit.decodeBase64(header),
+                    header: privacyKit.decodeBase64(header) as Uint8Array<ArrayBuffer>,
                     headerVersion: 1,
-                    body: privacyKit.decodeBase64(body),
+                    body: privacyKit.decodeBase64(body) as Uint8Array<ArrayBuffer>,
                     bodyVersion: 1,
-                    dataEncryptionKey: privacyKit.decodeBase64(dataEncryptionKey),
+                    dataEncryptionKey: privacyKit.decodeBase64(dataEncryptionKey) as Uint8Array<ArrayBuffer>,
                     seq: 0
                 }
             });
@@ -309,7 +309,7 @@ export function artifactsRoutes(app: Fastify) {
             let bodyUpdate: { value: string; version: number } | undefined;
 
             if (header !== undefined && expectedHeaderVersion !== undefined) {
-                updateData.header = privacyKit.decodeBase64(header);
+                updateData.header = privacyKit.decodeBase64(header) as Uint8Array<ArrayBuffer>;
                 updateData.headerVersion = expectedHeaderVersion + 1;
                 headerUpdate = {
                     value: header,
@@ -318,7 +318,7 @@ export function artifactsRoutes(app: Fastify) {
             }
 
             if (body !== undefined && expectedBodyVersion !== undefined) {
-                updateData.body = privacyKit.decodeBase64(body);
+                updateData.body = privacyKit.decodeBase64(body) as Uint8Array<ArrayBuffer>;
                 updateData.bodyVersion = expectedBodyVersion + 1;
                 bodyUpdate = {
                     value: body,

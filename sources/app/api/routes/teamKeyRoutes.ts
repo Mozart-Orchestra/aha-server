@@ -40,6 +40,9 @@ export function teamKeyRoutes(app: Fastify) {
                 }),
                 404: z.object({
                     error: z.literal('Team not found')
+                }),
+                500: z.object({
+                    error: z.literal('Failed to provide team key')
                 })
             }
         }
@@ -125,7 +128,7 @@ export function teamKeyRoutes(app: Fastify) {
             } catch (error) {
                 log({ module: 'team-key', level: 'error' },
                     `Failed to decode team header: ${error}`);
-                return reply.code(500).send({ error: 'Failed to derive team key' });
+                return reply.code(500).send({ error: 'Failed to provide team key' });
             }
 
             // Encode key as base64 for transmission
@@ -160,6 +163,9 @@ export function teamKeyRoutes(app: Fastify) {
                 }),
                 404: z.object({
                     error: z.literal('Team not found')
+                }),
+                500: z.object({
+                    error: z.literal('Failed to get team key info')
                 })
             }
         }

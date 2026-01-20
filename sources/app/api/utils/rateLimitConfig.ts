@@ -1,4 +1,5 @@
 import type { FastifyRateLimitOptions } from '@fastify/rate-limit';
+import type { FastifyRequest } from 'fastify';
 
 // Rate limit configuration for different endpoint types
 export const RATE_LIMIT_CONFIG = {
@@ -33,7 +34,7 @@ export function getDefaultRateLimitConfig(): FastifyRateLimitOptions {
     return {
         max: RATE_LIMIT_CONFIG.default.max,
         timeWindow: RATE_LIMIT_CONFIG.default.timeWindow,
-        errorResponseBuilder: (request, context) => {
+        errorResponseBuilder: (request: FastifyRequest, context: any) => {
             return {
                 statusCode: 429,
                 error: 'Too Many Requests',
@@ -41,12 +42,12 @@ export function getDefaultRateLimitConfig(): FastifyRateLimitOptions {
                 retryAfter: context.after,
             };
         },
-        keyGenerator: (request) => {
+        keyGenerator: (request: FastifyRequest) => {
             // Use user ID if authenticated, otherwise use IP
             return (request as any).userId || request.ip;
         },
         // Skip rate limiting for health checks
-        allowList: (request) => {
+        allowList: (request: FastifyRequest) => {
             return request.url === '/' || request.url === '/health';
         },
     };
@@ -58,7 +59,7 @@ export function getAuthRateLimitConfig(): FastifyRateLimitOptions {
         ...getDefaultRateLimitConfig(),
         max: RATE_LIMIT_CONFIG.auth.max,
         timeWindow: RATE_LIMIT_CONFIG.auth.timeWindow,
-        keyGenerator: (request) => {
+        keyGenerator: (request: FastifyRequest) => {
             // For auth endpoints, always use IP to prevent brute force
             return request.ip;
         },
