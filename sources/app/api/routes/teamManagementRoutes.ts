@@ -76,17 +76,23 @@ export function teamManagementRoutes(app: Fastify) {
     // === Team Operations ===
 
     // POST /v1/teams/:teamId/archive - Archive team and all sessions
+    // Note: Client must provide sessionIds since artifact body is encrypted
     app.post('/v1/teams/:teamId/archive', {
         preHandler: app.authenticate,
         schema: {
-            params: z.object({ teamId: z.string() })
+            params: z.object({ teamId: z.string() }),
+            body: z.object({
+                sessionIds: z.array(z.string()).optional() // Client provides session IDs
+            }).optional()
         }
     }, async (request, reply) => {
         const userId = request.userId;
         const { teamId } = request.params as { teamId: string };
+        const body = request.body as { sessionIds?: string[] } | undefined;
+        const sessionIds = body?.sessionIds || [];
 
         try {
-            const result = await archiveTeam(userId, teamId);
+            const result = await archiveTeam(userId, teamId, sessionIds);
             log({ module: 'team-management', teamId }, `Team archived with ${result.archivedSessions} sessions`);
             return reply.send(result);
         } catch (error: any) {
@@ -96,17 +102,23 @@ export function teamManagementRoutes(app: Fastify) {
     });
 
     // DELETE /v1/teams/:teamId - Delete team and all sessions
+    // Note: Client must provide sessionIds since artifact body is encrypted
     app.delete('/v1/teams/:teamId', {
         preHandler: app.authenticate,
         schema: {
-            params: z.object({ teamId: z.string() })
+            params: z.object({ teamId: z.string() }),
+            body: z.object({
+                sessionIds: z.array(z.string()).optional() // Client provides session IDs
+            }).optional()
         }
     }, async (request, reply) => {
         const userId = request.userId;
         const { teamId } = request.params as { teamId: string };
+        const body = request.body as { sessionIds?: string[] } | undefined;
+        const sessionIds = body?.sessionIds || [];
 
         try {
-            const result = await deleteTeam(userId, teamId);
+            const result = await deleteTeam(userId, teamId, sessionIds);
             log({ module: 'team-management', teamId }, `Team deleted with ${result.deletedSessions} sessions`);
             return reply.send(result);
         } catch (error: any) {
@@ -355,9 +367,10 @@ async function removeTeamMember(
 
 async function archiveTeam(
     userId: string,
-    teamId: string
+    teamId: string,
+    sessionIds: string[] = []
 ): Promise<{ success: boolean; archivedSessions: number }> {
-    // Get team artifact
+    // Get team artifact (just verify it exists)
     const artifact = await db.artifact.findFirst({
         where: { id: teamId, accountId: userId }
     });
@@ -366,17 +379,12 @@ async function archiveTeam(
         throw new Error('Team not found');
     }
 
-    const bodyStr = Buffer.from(artifact.body).toString('utf-8');
-    const board = JSON.parse(bodyStr);
-
-    // Get all member session IDs
-    const memberSessionIds: string[] = board.team?.members?.map((m: any) => m.sessionId) || [];
-
+    // Use sessionIds provided by client (since body is encrypted)
     // Archive all sessions (set active = false)
-    if (memberSessionIds.length > 0) {
+    if (sessionIds.length > 0) {
         await db.session.updateMany({
             where: {
-                id: { in: memberSessionIds },
+                id: { in: sessionIds },
                 accountId: userId
             },
             data: {
@@ -386,35 +394,32 @@ async function archiveTeam(
         });
     }
 
-    // Mark team artifact as archived
-    board.archived = true;
-    board.archivedAt = Date.now();
-
-    const bodyBuffer = Buffer.from(JSON.stringify(board));
+    // Just increment version to trigger sync - client will handle body update
+    // (We can't modify encrypted body on server)
     await db.artifact.update({
         where: { id: teamId },
         data: {
-            body: bodyBuffer,
             bodyVersion: { increment: 1 },
             updatedAt: new Date()
         }
     });
 
     // Broadcast archive events for each session
-    for (const sessionId of memberSessionIds) {
+    for (const sessionId of sessionIds) {
         await broadcastSessionUpdate(userId, sessionId, 'session-archived');
     }
 
-    await broadcastTeamUpdate(userId, teamId, 'team-archived', { archivedSessions: memberSessionIds.length });
+    await broadcastTeamUpdate(userId, teamId, 'team-archived', { archivedSessions: sessionIds.length });
 
-    return { success: true, archivedSessions: memberSessionIds.length };
+    return { success: true, archivedSessions: sessionIds.length };
 }
 
 async function deleteTeam(
     userId: string,
-    teamId: string
+    teamId: string,
+    sessionIds: string[] = []
 ): Promise<{ success: boolean; deletedSessions: number }> {
-    // Get team artifact
+    // Get team artifact (just verify it exists)
     const artifact = await db.artifact.findFirst({
         where: { id: teamId, accountId: userId }
     });
@@ -423,17 +428,12 @@ async function deleteTeam(
         throw new Error('Team not found');
     }
 
-    const bodyStr = Buffer.from(artifact.body).toString('utf-8');
-    const board = JSON.parse(bodyStr);
-
-    // Get all member session IDs
-    const memberSessionIds: string[] = board.team?.members?.map((m: any) => m.sessionId) || [];
-
+    // Use sessionIds provided by client (since body is encrypted)
     // Delete all sessions
-    if (memberSessionIds.length > 0) {
+    if (sessionIds.length > 0) {
         await db.session.deleteMany({
             where: {
-                id: { in: memberSessionIds },
+                id: { in: sessionIds },
                 accountId: userId
             }
         });
@@ -445,13 +445,13 @@ async function deleteTeam(
     });
 
     // Broadcast delete events
-    for (const sessionId of memberSessionIds) {
+    for (const sessionId of sessionIds) {
         await broadcastSessionUpdate(userId, sessionId, 'session-deleted');
     }
 
-    await broadcastTeamUpdate(userId, teamId, 'team-deleted', { deletedSessions: memberSessionIds.length });
+    await broadcastTeamUpdate(userId, teamId, 'team-deleted', { deletedSessions: sessionIds.length });
 
-    return { success: true, deletedSessions: memberSessionIds.length };
+    return { success: true, deletedSessions: sessionIds.length };
 }
 
 async function renameTeam(
