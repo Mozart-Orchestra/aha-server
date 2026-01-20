@@ -94,7 +94,7 @@ export function getSocketCorsConfig() {
     if (isProduction()) {
         return {
             origin: ALLOWED_ORIGINS_PRODUCTION,
-            methods: ['GET', 'POST', 'OPTIONS'] as const,
+            methods: ['GET', 'POST', 'OPTIONS'],
             credentials: true,
             allowedHeaders: ALLOWED_HEADERS,
         };
@@ -121,7 +121,7 @@ export function getSocketCorsConfig() {
                 callback(null, true);
             }
         },
-        methods: ['GET', 'POST', 'OPTIONS'] as const,
+        methods: ['GET', 'POST', 'OPTIONS'],
         credentials: true,
         allowedHeaders: [...ALLOWED_HEADERS, '*'],
     };

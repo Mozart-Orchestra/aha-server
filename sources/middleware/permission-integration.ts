@@ -80,7 +80,7 @@ export async function checkPermissionInHandler(
     return true; // Allow if service not available
   }
 
-  const result = globalRolePermissionService.isOperationAllowed(role, operation);
+  const result = globalRolePermissionService.isOperationAllowed(role, operation as any);
   return result.allowed;
 }
 

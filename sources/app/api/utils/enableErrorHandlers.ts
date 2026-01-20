@@ -9,6 +9,9 @@ export function enableErrorHandlers(app: Fastify) {
         const userAgent = request.headers['user-agent'] || 'unknown';
         const ip = request.ip || 'unknown';
 
+        // Type guard for error
+        const err = error as Error & { statusCode?: number; code?: string };
+
         // Log the error with comprehensive context
         log({
             module: 'fastify-error',
@@ -17,13 +20,13 @@ export function enableErrorHandlers(app: Fastify) {
             url,
             userAgent,
             ip,
-            statusCode: error.statusCode || 500,
-            errorCode: error.code,
-            stack: error.stack
-        }, `Unhandled error: ${error.message}`);
+            statusCode: err.statusCode || 500,
+            errorCode: err.code,
+            stack: err.stack
+        }, `Unhandled error: ${err.message}`);
 
         // Return appropriate error response
-        const statusCode = error.statusCode || 500;
+        const statusCode = err.statusCode || 500;
 
         if (statusCode >= 500) {
             // Internal server errors - don't expose details
@@ -35,8 +38,8 @@ export function enableErrorHandlers(app: Fastify) {
         } else {
             // Client errors - can expose more details
             return reply.code(statusCode).send({
-                error: error.name || 'Error',
-                message: error.message || 'An error occurred',
+                error: err.name || 'Error',
+                message: err.message || 'An error occurred',
                 statusCode
             });
         }
@@ -54,16 +57,19 @@ export function enableErrorHandlers(app: Fastify) {
         const url = request.url;
         const duration = (Date.now() - (request.startTime || Date.now())) / 1000;
 
+        // Type guard for error
+        const err = error as Error & { statusCode?: number; code?: string };
+
         log({
             module: 'fastify-hook-error',
             level: 'error',
             method,
             url,
             duration,
-            statusCode: reply.statusCode || error.statusCode || 500,
-            errorName: error.name,
-            errorCode: error.code
-        }, `Request error: ${error.message}`);
+            statusCode: reply.statusCode || err.statusCode || 500,
+            errorName: err.name,
+            errorCode: err.code
+        }, `Request error: ${err.message}`);
     });
 
     // Handle uncaught exceptions in routes
@@ -73,7 +79,8 @@ export function enableErrorHandlers(app: Fastify) {
         reply.send = function (payload: any) {
             try {
                 return originalSend(payload);
-            } catch (error: any) {
+            } catch (err) {
+                const error = err as Error;
                 log({
                     module: 'fastify-serialization-error',
                     level: 'error',

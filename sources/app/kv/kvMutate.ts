@@ -106,7 +106,7 @@ export async function kvMutate(
                         }
                     },
                     data: {
-                        value: mutation.value ? privacyKit.decodeBase64(mutation.value) : null,
+                        value: mutation.value ? privacyKit.decodeBase64(mutation.value) as Uint8Array<ArrayBuffer> | null : null,
                         version: newVersion
                     }
                 });

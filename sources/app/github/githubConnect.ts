@@ -68,12 +68,12 @@ export async function githubConnect(
             where: { id: githubUserId },
             update: {
                 profile: githubProfile,
-                token: encryptString(['user', userId, 'github', 'token'], accessToken)
+                token: encryptString(['user', userId, 'github', 'token'], accessToken) as Uint8Array<ArrayBuffer>
             },
             create: {
                 id: githubUserId,
                 profile: githubProfile,
-                token: encryptString(['user', userId, 'github', 'token'], accessToken)
+                token: encryptString(['user', userId, 'github', 'token'], accessToken) as Uint8Array<ArrayBuffer>
             }
         });
 
