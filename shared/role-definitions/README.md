@@ -1,10 +1,10 @@
-# Happy Role Definitions
+# Aha Role Definitions
 
-**Single Source of Truth** for the Happy team role system.
+**Single Source of Truth** for the Aha team role system.
 
 This directory contains the unified role definition system that generates:
 - `SKILL.md` files (oh-my-opencode format)
-- `index.cjs` (Happy role library)
+- `index.cjs` (Aha role library)
 - Permission configurations
 
 ## Directory Structure
@@ -26,7 +26,7 @@ role-definitions/
 ### Install Dependencies
 
 ```bash
-cd happy-server/shared/role-definitions
+cd aha-server/shared/role-definitions
 npm install
 ```
 
@@ -175,7 +175,7 @@ Format: oh-my-opencode SKILL.md format with YAML frontmatter
 
 Generated to: `kanban/sources/team-config/index.cjs`
 
-Format: Happy TEAM_ROLE_LIBRARY format
+Format: Aha TEAM_ROLE_LIBRARY format
 
 ## Version History
 
@@ -192,7 +192,7 @@ When modifying role definitions:
 2. Validate changes: `npm run validate`
 3. Generate artifacts: `npm run generate`
 4. Review generated files
-5. Test with Happy team system
+5. Test with Aha team system
 6. Submit PR with both YAML and generated files
 
 ## License

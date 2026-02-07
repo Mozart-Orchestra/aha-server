@@ -1,5 +1,5 @@
 /**
- * Swagger/OpenAPI configuration for happy-server API documentation
+ * Swagger/OpenAPI configuration for aha-server API documentation
  *
  * Provides interactive API documentation at /docs
  * Auto-generates schemas from Zod validators
@@ -25,11 +25,11 @@ export function transformZodSchema(zodSchema: any) {
 export const swaggerConfig = {
   openapi: '3.0.0',
   info: {
-    title: 'Happy Server API',
+    title: 'Aha Server API',
     description: `
-# Happy Server API Documentation
+# Aha Server API Documentation
 
-Happy Server provides the backend infrastructure for the Happy CLI and team collaboration platform.
+Aha Server provides the backend infrastructure for the Aha CLI and team collaboration platform.
 
 ## Authentication
 
@@ -65,12 +65,12 @@ HTTP Status Codes:
 - 429: Rate limit exceeded
 - 500: Server error
 
-For more information, visit [GitHub Repository](https://github.com/slopus/happy-server)
+For more information, visit [GitHub Repository](https://github.com/slopus/aha-server)
     `,
     version: '1.0.0',
     contact: {
-      name: 'Happy Team',
-      url: 'https://github.com/slopus/happy-server',
+      name: 'Aha Team',
+      url: 'https://github.com/slopus/aha-server',
       email: 'steve@korshakov.com'
     },
     license: {
@@ -84,7 +84,7 @@ For more information, visit [GitHub Repository](https://github.com/slopus/happy-
       description: 'Local development server'
     },
     {
-      url: 'https://api.cluster-fluster.com',
+      url: 'https://top1vibe.com',
       description: 'Production server'
     }
   ],
@@ -156,8 +156,8 @@ export const swaggerUiOptions = {
     components: swaggerConfig.components,
     security: swaggerConfig.security,
     externalDocs: {
-      description: 'Find out more about Happy',
-      url: 'https://github.com/slopus/happy-server/blob/main/README.md'
+      description: 'Find out more about Aha',
+      url: 'https://github.com/slopus/aha-server/blob/main/README.md'
     }
   },
   uiConfig: {

@@ -5,6 +5,7 @@ import { db } from "@/storage/db";
 import { eventRouter } from "@/app/events/eventRouter";
 import { allocateUserSeq } from "@/storage/seq";
 import { randomKeyNaked } from "@/utils/randomKeyNaked";
+import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
 
 /**
  * Team Management Routes
@@ -275,16 +276,21 @@ async function addTeamMember(
     roleId: string,
     displayName?: string
 ): Promise<{ success: boolean; member: any }> {
+    // Query by teamId only - team artifacts are shared across all team members
     const artifact = await db.artifact.findFirst({
-        where: { id: teamId, accountId: userId }
+        where: { id: teamId }
     });
 
     if (!artifact) {
         throw new Error('Team not found');
     }
 
-    const bodyStr = Buffer.from(artifact.body).toString('utf-8');
-    const board = JSON.parse(bodyStr);
+    // 防御性检查: artifact.body 可能为 null
+    if (!artifact.body) {
+        throw new Error('Team artifact not initialized - please open Kanban to initialize the team first');
+    }
+
+    const board = parseTeamArtifactBody(artifact.body) as Record<string, any>;
 
     if (!board.team) {
         board.team = { members: [] };
@@ -308,7 +314,9 @@ async function addTeamMember(
         });
     }
 
-    const bodyBuffer = Buffer.from(JSON.stringify(board));
+    // Re-wrap in the same structure for storage
+    const updatedWrapper = { body: JSON.stringify(board) };
+    const bodyBuffer = Buffer.from(JSON.stringify(updatedWrapper));
     await db.artifact.update({
         where: { id: teamId },
         data: {
@@ -332,16 +340,21 @@ async function removeTeamMember(
     teamId: string,
     sessionId: string
 ): Promise<{ success: boolean }> {
+    // Query by teamId only - team artifacts are shared across all team members
     const artifact = await db.artifact.findFirst({
-        where: { id: teamId, accountId: userId }
+        where: { id: teamId }
     });
 
     if (!artifact) {
         throw new Error('Team not found');
     }
 
-    const bodyStr = Buffer.from(artifact.body).toString('utf-8');
-    const board = JSON.parse(bodyStr);
+    // 防御性检查: artifact.body 可能为 null
+    if (!artifact.body) {
+        throw new Error('Team artifact not initialized - please open Kanban to initialize the team first');
+    }
+
+    const board = parseTeamArtifactBody(artifact.body) as Record<string, any>;
 
     if (!board.team?.members) {
         return { success: true };
@@ -349,7 +362,9 @@ async function removeTeamMember(
 
     board.team.members = board.team.members.filter((m: any) => m.sessionId !== sessionId);
 
-    const bodyBuffer = Buffer.from(JSON.stringify(board));
+    // Re-wrap in the same structure for storage
+    const updatedWrapper = { body: JSON.stringify(board) };
+    const bodyBuffer = Buffer.from(JSON.stringify(updatedWrapper));
     await db.artifact.update({
         where: { id: teamId },
         data: {
@@ -371,8 +386,9 @@ async function archiveTeam(
     sessionIds: string[] = []
 ): Promise<{ success: boolean; archivedSessions: number }> {
     // Get team artifact (just verify it exists)
+    // Query by teamId only - team artifacts are shared across all team members
     const artifact = await db.artifact.findFirst({
-        where: { id: teamId, accountId: userId }
+        where: { id: teamId }
     });
 
     if (!artifact) {
@@ -420,8 +436,9 @@ async function deleteTeam(
     sessionIds: string[] = []
 ): Promise<{ success: boolean; deletedSessions: number }> {
     // Get team artifact (just verify it exists)
+    // Query by teamId only - team artifacts are shared across all team members
     const artifact = await db.artifact.findFirst({
-        where: { id: teamId, accountId: userId }
+        where: { id: teamId }
     });
 
     if (!artifact) {
@@ -459,23 +476,30 @@ async function renameTeam(
     teamId: string,
     name: string
 ): Promise<{ success: boolean; name: string }> {
+    // Query by teamId only - team artifacts are shared across all team members
     const artifact = await db.artifact.findFirst({
-        where: { id: teamId, accountId: userId }
+        where: { id: teamId }
     });
 
     if (!artifact) {
         throw new Error('Team not found');
     }
 
-    const bodyStr = Buffer.from(artifact.body).toString('utf-8');
-    const board = JSON.parse(bodyStr);
+    // 防御性检查: artifact.body 可能为 null
+    if (!artifact.body) {
+        throw new Error('Team artifact not initialized - please open Kanban to initialize the team first');
+    }
+
+    const board = parseTeamArtifactBody(artifact.body) as Record<string, any>;
 
     board.name = name;
     if (board.team) {
         board.team.name = name;
     }
 
-    const bodyBuffer = Buffer.from(JSON.stringify(board));
+    // Re-wrap in the same structure for storage
+    const updatedWrapper = { body: JSON.stringify(board) };
+    const bodyBuffer = Buffer.from(JSON.stringify(updatedWrapper));
     await db.artifact.update({
         where: { id: teamId },
         data: {

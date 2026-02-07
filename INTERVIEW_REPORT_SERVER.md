@@ -1,10 +1,10 @@
-# Happy Server 深度访谈报告 - Dev-1119
+# Aha Server 深度访谈报告 - Dev-1119
 
 ## 📋 访谈基本信息
 
 - **访谈时间**: 2026-01-19 10:00
 - **访谈者**: Master Coordinator
-- **受访者**: happy-server 项目 (Electron Main Process)
+- **受访者**: aha-server 项目 (Electron Main Process)
 - **访谈方式**: 代码分析 + 配置研究
 - **访谈模板**: ASK_INTERVIEW_TEMPLATE.md
 
@@ -88,12 +88,12 @@
 
 - **下游服务**:
   - kanban (React Native 前端)
-  - happy-cli (CLI 工具)
+  - aha-cli (CLI 工具)
   - MCP 客户端
 
 - **并行项目**:
   - kanban-1119: 前端应用
-  - happy-cli-1119: CLI 工具
+  - aha-cli-1119: CLI 工具
 
 **追问**: 与其他项目的数据交互如何？
 
@@ -103,7 +103,7 @@
   - HTTP RESTful API
   - 数据流向: Server ←→ Kanban (双向)
 
-- **与 happy-cli**:
+- **与 aha-cli**:
   - IPC (进程间通信)
   - HTTP API
   - 数据流向: Server → CLI (单向)
@@ -234,9 +234,9 @@ yarn migrate  # prisma migrate dev
 
 **A**:
 - **配置文件位置**:
-  - `/happy-server/tsconfig.json` - TypeScript 配置
-  - `/happy-server/package.json` - 脚本配置
-  - `/happy-server/prisma/schema.prisma` - 数据库配置
+  - `/aha-server/tsconfig.json` - TypeScript 配置
+  - `/aha-server/package.json` - 脚本配置
+  - `/aha-server/prisma/schema.prisma` - 数据库配置
 
 **追问**: 关键配置项有哪些？**
 
@@ -350,7 +350,7 @@ yarn migrate  # prisma migrate dev
 **Q1: 当前主题如何管理？**
 
 **A**:
-- ❌ **无主题系统** - happy-server 是后端服务
+- ❌ **无主题系统** - aha-server 是后端服务
 - ⚠️ 但需要支持主题配置的 API
 - ✅ 可以通过 API 向前端提供主题配置
 
@@ -387,7 +387,7 @@ export class ThemeService {
 ```
 
 ⚠️ **注意事项**:
-- happy-server 在 monorepo 根目录，需要相对路径导入
+- aha-server 在 monorepo 根目录，需要相对路径导入
 - 需要配置 TypeScript paths
 - 需要处理构建时依赖
 
@@ -414,7 +414,7 @@ export class ThemeService {
 **Q1: 渲染性能如何？**
 
 **A**:
-- ⚠️ happy-server 不负责 UI 渲染
+- ⚠️ aha-server 不负责 UI 渲染
 - ✅ 但需要优化 API 响应时间
 - ✅ 需要优化 WebSocket 性能
 
@@ -807,8 +807,8 @@ export class ThemeService {
 ### 下一步行动
 
 - [x] **Interviewer**: 完成 kanban-1119 访谈
-- [x] **Interviewer**: 完成 happy-server-1119 访谈
-- [ ] **Interviewer**: 完成 happy-cli-1119 访谈（1小时）
+- [x] **Interviewer**: 完成 aha-server-1119 访谈
+- [ ] **Interviewer**: 完成 aha-cli-1119 访谈（1小时）
 - [ ] **Architect**: 分析三个项目的构建系统差异（2小时）
 - [ ] **Master**: 综合三个访谈，确定 Feature 和 Rank（30分钟）
 
@@ -840,6 +840,6 @@ export class ThemeService {
 
 ---
 
-*Generated with [Claude Code](https://claude.ai/code) via [Happy](https://happy.engineering)*
+*Generated with [Claude Code](https://claude.ai/code) via [Aha](https://aha.engineering)*
 *Co-Authored-By: Claude <noreply@anthropic.com>*
-*Co-Authored-By: Happy <yesreply@happy.engineering>*
+*Co-Authored-By: Aha <yesreply@aha.engineering>*

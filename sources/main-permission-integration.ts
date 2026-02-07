@@ -1,7 +1,7 @@
 /**
  * PermissionInterceptor 集成到 main.ts 的示例代码
  *
- * 这个文件展示了如何将 PermissionInterceptor 集成到 happy-server 的主应用中
+ * 这个文件展示了如何将 PermissionInterceptor 集成到 aha-server 的主应用中
  *
  * @author Builder (cmkj60r4)
  * @date: 2026-01-18

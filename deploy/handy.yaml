@@ -32,9 +32,9 @@ spec:
         - name: PORT
           value: "3005"
         - name: REDIS_URL
-          value: redis://happy-redis:6379
+          value: redis://aha-redis:6379
         - name: S3_PUBLIC_URL
-          value: https://files.cluster-fluster.com/happy
+          value: https://files.cluster-fluster.com/aha
         envFrom:
         - secretRef:
             name: handy-secrets

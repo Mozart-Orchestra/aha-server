@@ -2,7 +2,7 @@
  * Permission Interceptor Integration Example
  *
  * This file demonstrates how to integrate the PermissionInterceptor
- * into happy-server's Express application.
+ * into aha-server's Express application.
  *
  * @author Builder (cmkj60r4)
  * @since 2026-01-18

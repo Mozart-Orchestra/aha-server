@@ -1,7 +1,7 @@
-# Happy Server API Documentation
+# Aha Server API Documentation
 
 **Version:** 1.0.0
-**Base URL:** `http://localhost:3005` (development) or `https://api.cluster-fluster.com` (production)
+**Base URL:** `http://localhost:3005` (development) or `https://top1vibe.com` (production)
 **Documentation:** `http://localhost:3005/docs` (Swagger UI)
 
 ---
@@ -810,6 +810,6 @@ artifacts = requests.get(
 
 ---
 
-*Generated with [Claude Code](https://claude.ai/code) via [Happy](https://happy.engineering)*
+*Generated with [Claude Code](https://claude.ai/code) via [Aha](https://aha.engineering)*
 *Co-Authored-By: Claude <noreply@anthropic.com>*
-*Co-Authored-By: Happy <yesreply@happy.engineering>*
+*Co-Authored-By: Aha <yesreply@aha.engineering>*

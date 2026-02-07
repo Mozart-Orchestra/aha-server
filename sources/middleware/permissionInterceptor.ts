@@ -1,7 +1,7 @@
 /**
  * Permission Interceptor Middleware
  *
- * Intercepts all requests to happy-server and validates permissions
+ * Intercepts all requests to aha-server and validates permissions
  * based on user roles. Ensures that only authorized operations are performed.
  *
  * @author Builder (cmkj60r4)

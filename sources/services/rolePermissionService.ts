@@ -130,7 +130,7 @@ export class RolePermissionService {
   private loadDefaultRoles(): void {
     logger.warn('[RolePermissionService] Using default role definitions');
 
-    // TODO: Load from @happy/shared-team-config as fallback
+    // TODO: Load from @aha/shared-team-config as fallback
     // For now, initialize with empty map
   }
 

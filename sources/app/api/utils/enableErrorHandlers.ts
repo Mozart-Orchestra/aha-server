@@ -1,5 +1,6 @@
 import { log } from "@/utils/log";
 import { Fastify } from "../types";
+import { ZodError } from "zod";
 
 export function enableErrorHandlers(app: Fastify) {
     // Global error handler
@@ -10,7 +11,23 @@ export function enableErrorHandlers(app: Fastify) {
         const ip = request.ip || 'unknown';
 
         // Type guard for error
-        const err = error as Error & { statusCode?: number; code?: string };
+        const err = error as Error & { statusCode?: number; code?: string; validation?: any };
+
+        // Handle Zod validation errors specially
+        if (err.code === 'FST_ERR_VALIDATION' || err.validation) {
+            log({
+                module: 'fastify-validation-error',
+                level: 'error',
+                method,
+                url,
+                validation: JSON.stringify(err.validation || err.message)
+            }, `Validation error: ${err.message}`);
+            return reply.code(400).send({
+                error: 'Validation Error',
+                message: err.message,
+                details: err.validation
+            });
+        }
 
         // Log the error with comprehensive context
         log({

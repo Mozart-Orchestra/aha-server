@@ -1,3 +1,6 @@
-import { Redis } from 'ioredis';
+/**
+ * Redis 替换为内存缓存
+ * 为了保持兼容性,导出 memoryCache 作为 redis
+ */
 
-export const redis = new Redis(process.env.REDIS_URL!);
+export { redis, memoryCache } from '../cache/memory'

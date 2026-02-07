@@ -44,13 +44,13 @@ class AuthModule {
         });
         
         const githubGenerator = await privacyKit.createEphemeralTokenGenerator({
-            service: 'github-happy',
+            service: 'github-aha',
             seed: process.env.HANDY_MASTER_SECRET!,
             ttl: 5 * 60 * 1000 // 5 minutes
         });
 
         const githubVerifier = await privacyKit.createEphemeralTokenVerifier({
-            service: 'github-happy',
+            service: 'github-aha',
             publicKey: githubGenerator.publicKey,
         });
 

@@ -10,17 +10,17 @@
 
 ### 目标
 
-实现运行时权限验证拦截器，确保 happy-server 中的所有请求都经过严格的权限检查，而不是仅依赖客户端的 honor system。
+实现运行时权限验证拦截器，确保 aha-server 中的所有请求都经过严格的权限检查，而不是仅依赖客户端的 honor system。
 
 ### 当前问题
 
-**现有系统（happy-cli）**:
+**现有系统（aha-cli）**:
 - ✅ 完善的 `PermissionHandler` 类
 - ✅ 4种权限模式：default, acceptEdits, bypassPermissions, plan
 - ✅ 工具级别的权限控制（disallowedTools）
 - ✅ 基于 `accessLevel` 的角色权限（read-only vs full-access）
 
-**happy-server 现状**:
+**aha-server 现状**:
 - ❌ **没有运行时权限验证**
 - ❌ 依赖客户端遵守规则
 - ❌ 服务器端不检查角色权限
@@ -28,7 +28,7 @@
 
 ### 解决方案
 
-在 happy-server 中实现 `PermissionInterceptor` 中间件，对所有 API 请求进行权限验证。
+在 aha-server 中实现 `PermissionInterceptor` 中间件，对所有 API 请求进行权限验证。
 
 ---
 
@@ -38,7 +38,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                  happy-server 架构                       │
+│                  aha-server 架构                       │
 ├─────────────────────────────────────────────────────────┤
 │                                                           │
 │  Client Request                                          │
@@ -96,7 +96,7 @@
 ```typescript
 /**
  * Permission Interceptor Middleware
- * Intercepts all requests to happy-server and validates permissions
+ * Intercepts all requests to aha-server and validates permissions
  */
 export class PermissionInterceptor {
   constructor(
@@ -221,7 +221,7 @@ interface PermissionCheckResult {
 
 ### Phase 1: 基础拦截器（Day 1-2）
 
-**文件**: `happy-server/sources/middleware/permissionInterceptor.ts`
+**文件**: `aha-server/sources/middleware/permissionInterceptor.ts`
 
 ```typescript
 import { Request, Response, NextFunction } from 'express';
@@ -443,11 +443,11 @@ export class PermissionInterceptor {
 
 ### Phase 2: RolePermissionService（Day 3-4）
 
-**文件**: `happy-server/sources/services/rolePermissionService.ts`
+**文件**: `aha-server/sources/services/rolePermissionService.ts`
 
 ```typescript
 import { logger } from '@/utils/log';
-import { DEFAULT_ROLES } from '@happy/shared-team-config';
+import { DEFAULT_ROLES } from '@aha/shared-team-config';
 
 export class RolePermissionService {
   private permissionCache = new Map<string, RolePermissions>();
@@ -574,9 +574,9 @@ export class RolePermissionService {
 }
 ```
 
-### Phase 3: 集成到 happy-server（Day 5）
+### Phase 3: 集成到 aha-server（Day 5）
 
-**文件**: `happy-server/sources/app.ts`
+**文件**: `aha-server/sources/app.ts`
 
 ```typescript
 import { PermissionInterceptor } from './middleware/permissionInterceptor';
@@ -604,7 +604,7 @@ app.use('/api', permissionInterceptor.intercept.bind(permissionInterceptor));
 
 ### 单元测试
 
-**文件**: `happy-server/test/middleware/permissionInterceptor.test.ts`
+**文件**: `aha-server/test/middleware/permissionInterceptor.test.ts`
 
 ```typescript
 import { PermissionInterceptor } from '../../sources/middleware/permissionInterceptor';
@@ -664,7 +664,7 @@ describe('PermissionInterceptor', () => {
 
 ### 集成测试
 
-**文件**: `happy-server/test/integration/permission.test.ts`
+**文件**: `aha-server/test/integration/permission.test.ts`
 
 ```typescript
 import request from 'supertest';
@@ -725,7 +725,7 @@ logger.info('[PermissionInterceptor] Permission check', {
 - ✅ 编写单元测试
 
 ### Phase 2: 集成（Day 6）
-- ✅ 集成到 happy-server
+- ✅ 集成到 aha-server
 - ✅ 配置环境变量
 - ✅ 编写集成测试
 
@@ -766,9 +766,9 @@ logger.info('[PermissionInterceptor] Permission check', {
 ## 📚 参考资料
 
 - 现有代码：
-  - `happy-cli/src/claude/utils/permissionHandler.ts`
-  - `happy-cli/src/claude/team/roles.ts`
-  - `happy-server/sources/app/auth/auth.ts`
+  - `aha-cli/src/claude/utils/permissionHandler.ts`
+  - `aha-cli/src/claude/team/roles.ts`
+  - `aha-server/sources/app/auth/auth.ts`
 - 角色定义：
   - `kanban/sources/team-config/index.cjs`
   - `kanban/sources/team-config/skills/`

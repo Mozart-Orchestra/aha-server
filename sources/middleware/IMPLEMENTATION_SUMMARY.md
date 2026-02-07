@@ -11,7 +11,7 @@
 ### 1. 核心实现（100% 完成）
 
 #### RolePermissionService
-**文件**: `happy-server/sources/services/rolePermissionService.ts`
+**文件**: `aha-server/sources/services/rolePermissionService.ts`
 - ✅ 加载 Master 的 ROLE_DEFINITIONS.yaml
 - ✅ 权限缓存机制（5分钟 TTL）
 - ✅ isOperationAllowed() 方法
@@ -22,7 +22,7 @@
 - ✅ getAvailableRoles() 方法
 
 #### PermissionInterceptor
-**文件**: `happy-server/sources/middleware/permissionInterceptor.ts`
+**文件**: `aha-server/sources/middleware/permissionInterceptor.ts`
 - ✅ Express 中间件实现
 - ✅ 用户信息提取
 - ✅ 操作映射（HTTP → operation name）
@@ -32,7 +32,7 @@
 - ✅ 严格模式支持
 
 #### 集成代码
-**文件**: `happy-server/sources/middleware/permission-integration.ts`
+**文件**: `aha-server/sources/middleware/permission-integration.ts`
 - ✅ 初始化函数
 - ✅ 全局服务设置
 - ✅ 受保护路由处理器
@@ -42,7 +42,7 @@
 ### 2. 文档（100% 完成）
 
 #### 技术设计文档
-**文件**: `happy-server/sources/middleware/PERMISSION_INTERCEPTOR_DESIGN.md`
+**文件**: `aha-server/sources/middleware/PERMISSION_INTERCEPTOR_DESIGN.md`
 - ✅ 系统架构图
 - ✅ 数据流设计
 - ✅ 接口定义
@@ -51,7 +51,7 @@
 - ✅ 部署计划
 
 #### 使用指南
-**文件**: `happy-server/sources/middleware/PERMISSION_INTERCEPTOR_README.md`
+**文件**: `aha-server/sources/middleware/PERMISSION_INTERCEPTOR_README.md`
 - ✅ 快速开始
 - ✅ 使用示例
 - ✅ API 参考
@@ -61,7 +61,7 @@
 ### 3. 测试（100% 完成）
 
 #### 单元测试
-**文件**: `happy-server/test/middleware/permissionInterceptor.test.ts`
+**文件**: `aha-server/test/middleware/permissionInterceptor.test.ts`
 - ✅ RolePermissionService 测试（15个测试用例）
 - ✅ PermissionInterceptor 测试（8个测试用例）
 - ✅ 覆盖所有主要功能
@@ -79,12 +79,12 @@
 - **总计**: ~1,600+ 行
 
 ### 文件清单
-1. ✅ `happy-server/sources/services/rolePermissionService.ts`
-2. ✅ `happy-server/sources/middleware/permissionInterceptor.ts`
-3. ✅ `happy-server/sources/middleware/permission-integration.ts`
-4. ✅ `happy-server/sources/middleware/PERMISSION_INTERCEPTOR_DESIGN.md`
-5. ✅ `happy-server/sources/middleware/PERMISSION_INTERCEPTOR_README.md`
-6. ✅ `happy-server/test/middleware/permissionInterceptor.test.ts`
+1. ✅ `aha-server/sources/services/rolePermissionService.ts`
+2. ✅ `aha-server/sources/middleware/permissionInterceptor.ts`
+3. ✅ `aha-server/sources/middleware/permission-integration.ts`
+4. ✅ `aha-server/sources/middleware/PERMISSION_INTERCEPTOR_DESIGN.md`
+5. ✅ `aha-server/sources/middleware/PERMISSION_INTERCEPTOR_README.md`
+6. ✅ `aha-server/test/middleware/permissionInterceptor.test.ts`
 
 ---
 
@@ -123,7 +123,7 @@
 
 #### 安装依赖
 ```bash
-cd /Users/swmt/happy/happy-server
+cd /Users/swmt/happy/aha-server
 npm install js-yaml
 npm install --save-dev @types/js-yaml
 ```
@@ -288,7 +288,7 @@ PermissionInterceptor
 - ✅ 文档完成（100%）
 
 **Day 3-7 待完成**
-- ⏳ 集成到 happy-server
+- ⏳ 集成到 aha-server
 - ⏳ 端到端测试
 - ⏳ 性能优化
 - ⏳ 监控和部署
