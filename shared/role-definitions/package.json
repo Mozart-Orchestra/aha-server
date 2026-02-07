@@ -1,7 +1,7 @@
 {
-  "name": "@happy/role-definitions",
+  "name": "@aha/role-definitions",
   "version": "2.0.0",
-  "description": "Unified role definition system for Happy team",
+  "description": "Unified role definition system for Aha team",
   "main": "index.js",
   "scripts": {
     "generate": "node scripts/generate-all.js",
@@ -11,12 +11,12 @@
     "test": "npm run validate && npm run generate"
   },
   "keywords": [
-    "happy",
+    "aha",
     "role-definitions",
     "team",
     "agents"
   ],
-  "author": "Happy Team",
+  "author": "Aha Team",
   "license": "MIT",
   "dependencies": {
     "js-yaml": "^4.1.0"

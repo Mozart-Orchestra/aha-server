@@ -2,7 +2,7 @@
  * Fastify Permission Interceptor Plugin
  *
  * Fastify plugin version of PermissionInterceptor for runtime permission validation.
- * Integrates with Happy's role-based access control system.
+ * Integrates with Aha's role-based access control system.
  *
  * @author Builder (cmkj60r4)
  * @since 2026-01-18

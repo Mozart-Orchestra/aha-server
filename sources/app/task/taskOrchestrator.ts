@@ -3,6 +3,7 @@ import { log } from "@/utils/log";
 import { eventRouter } from "@/app/events/eventRouter";
 import { allocateUserSeq } from "@/storage/seq";
 import { randomKeyNaked } from "@/utils/randomKeyNaked";
+import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
 import * as privacyKit from "privacy-kit";
 
 /**
@@ -93,17 +94,32 @@ const DEFAULT_COLUMNS: KanbanColumn[] = [
 export class TaskOrchestrator {
     /**
      * Get board from artifact body
+     * If artifact doesn't exist, automatically creates it (lazy initialization)
      */
     async getBoard(userId: string, teamId: string): Promise<KanbanBoard | null> {
-        const artifact = await db.artifact.findFirst({
-            where: { id: teamId, accountId: userId }
+        // Query by teamId only - team artifacts are shared across all team members
+        // The accountId filter was causing issues when different users access the same team
+        let artifact = await db.artifact.findFirst({
+            where: { id: teamId }
         });
 
-        if (!artifact) return null;
+        // Artifact must be created by client (Kanban) first - server cannot create encrypted artifacts
+        // This is by design: encryption keys are negotiated in Kanban client only
+        if (!artifact) {
+            log({ module: 'task-orchestrator', teamId, userId, level: 'warn' },
+                'Team artifact not found in database. Team must be created from Kanban UI first (encryption key requirement). See DOC/TEAM_CREATION_WORKFLOW.md');
+            return null;
+        }
+
+        // Defensive check: artifact.body may be null if team not fully initialized
+        if (!artifact.body) {
+            log({ module: 'task-orchestrator', teamId, userId, level: 'warn' },
+                'Team artifact exists but body is null - team initialization incomplete. Please open team in Kanban to complete setup.');
+            return null;
+        }
 
         try {
-            const bodyStr = Buffer.from(artifact.body).toString('utf-8');
-            const parsed = JSON.parse(bodyStr);
+            const parsed = parseTeamArtifactBody(artifact.body) as Record<string, any>;
             return {
                 columns: parsed.columns || DEFAULT_COLUMNS,
                 tasks: parsed.tasks || [],
@@ -151,7 +167,11 @@ export class TaskOrchestrator {
     }
 
     /**
-     * Broadcast task event to all connected clients
+     * Broadcast task event to all team member sessions
+     *
+     * FIX: Previously only broadcasted to task creator's connections.
+     * Now broadcasts to ALL team member sessions using specific-sessions filter,
+     * matching the pattern used in teamMessagesRoutes.ts
      */
     private async broadcastTaskEvent(
         userId: string,
@@ -174,13 +194,40 @@ export class TaskOrchestrator {
             createdAt: Date.now()
         };
 
-        eventRouter.emitUpdate({
-            userId,
-            payload,
-            recipientFilter: { type: 'all-user-authenticated-connections' }
+        // Get all sessions for the user to broadcast to all team members
+        // This matches the pattern used in teamMessagesRoutes.ts
+        const allSessions = await db.session.findMany({
+            where: { accountId: userId },
+            select: { id: true }
         });
 
-        log({ module: 'task-orchestrator', teamId, taskId }, `Broadcasted ${eventType}`);
+        const teamSessionIds = new Set<string>();
+        for (const session of allSessions) {
+            teamSessionIds.add(session.id);
+        }
+
+        if (teamSessionIds.size > 0) {
+            // Broadcast to all team member sessions using specific-sessions filter
+            // This ensures assignees receive task assignment notifications
+            eventRouter.emitUpdate({
+                userId,
+                payload,
+                recipientFilter: { type: 'specific-sessions', sessionIds: teamSessionIds }
+            });
+
+            log({ module: 'task-orchestrator', teamId, taskId },
+                `Broadcasted ${eventType} to ${teamSessionIds.size} sessions`);
+        } else {
+            // Fallback to all-user-authenticated-connections if no sessions found
+            eventRouter.emitUpdate({
+                userId,
+                payload,
+                recipientFilter: { type: 'all-user-authenticated-connections' }
+            });
+
+            log({ module: 'task-orchestrator', teamId, taskId },
+                `Broadcasted ${eventType} (fallback to all connections)`);
+        }
     }
 
     /**
@@ -193,7 +240,7 @@ export class TaskOrchestrator {
     ): Promise<{ tasks: KanbanTask[]; version: number }> {
         const board = await this.getBoard(userId, teamId);
         if (!board) {
-            throw new Error('Team not found');
+            throw new Error('Team not initialized. Please create/open this team in Kanban dashboard first. See DOC/TEAM_CREATION_WORKFLOW.md for details.');
         }
 
         let tasks = board.tasks;
@@ -225,7 +272,7 @@ export class TaskOrchestrator {
         task: Omit<KanbanTask, 'id' | 'createdAt' | 'updatedAt'>
     ): Promise<KanbanTask> {
         const board = await this.getBoard(userId, teamId);
-        if (!board) throw new Error('Team not found');
+        if (!board) throw new Error('Team not initialized. Please create/open this team in Kanban dashboard first. See DOC/TEAM_CREATION_WORKFLOW.md for details.');
 
         const newTask: KanbanTask = {
             ...task,
@@ -273,7 +320,7 @@ export class TaskOrchestrator {
         updates: Partial<KanbanTask>
     ): Promise<KanbanTask> {
         const board = await this.getBoard(userId, teamId);
-        if (!board) throw new Error('Team not found');
+        if (!board) throw new Error('Team not initialized. Please create/open this team in Kanban dashboard first. See DOC/TEAM_CREATION_WORKFLOW.md for details.');
 
         const taskIndex = board.tasks.findIndex(t => t.id === taskId);
         if (taskIndex === -1) throw new Error('Task not found');
@@ -312,7 +359,7 @@ export class TaskOrchestrator {
      */
     async deleteTask(userId: string, teamId: string, taskId: string): Promise<void> {
         const board = await this.getBoard(userId, teamId);
-        if (!board) throw new Error('Team not found');
+        if (!board) throw new Error('Team not initialized. Please create/open this team in Kanban dashboard first. See DOC/TEAM_CREATION_WORKFLOW.md for details.');
 
         const task = board.tasks.find(t => t.id === taskId);
         if (!task) throw new Error('Task not found');
@@ -351,7 +398,7 @@ export class TaskOrchestrator {
         role: string
     ): Promise<KanbanTask> {
         const board = await this.getBoard(userId, teamId);
-        if (!board) throw new Error('Team not found');
+        if (!board) throw new Error('Team not initialized. Please create/open this team in Kanban dashboard first. See DOC/TEAM_CREATION_WORKFLOW.md for details.');
 
         const task = board.tasks.find(t => t.id === taskId);
         if (!task) throw new Error('Task not found');
@@ -397,7 +444,7 @@ export class TaskOrchestrator {
         sessionId: string
     ): Promise<KanbanTask> {
         const board = await this.getBoard(userId, teamId);
-        if (!board) throw new Error('Team not found');
+        if (!board) throw new Error('Team not initialized. Please create/open this team in Kanban dashboard first. See DOC/TEAM_CREATION_WORKFLOW.md for details.');
 
         const task = board.tasks.find(t => t.id === taskId);
         if (!task) throw new Error('Task not found');
@@ -443,7 +490,7 @@ export class TaskOrchestrator {
         blocker: { type: TaskBlocker['type']; description: string }
     ): Promise<KanbanTask> {
         const board = await this.getBoard(userId, teamId);
-        if (!board) throw new Error('Team not found');
+        if (!board) throw new Error('Team not initialized. Please create/open this team in Kanban dashboard first. See DOC/TEAM_CREATION_WORKFLOW.md for details.');
 
         const task = board.tasks.find(t => t.id === taskId);
         if (!task) throw new Error('Task not found');
@@ -485,7 +532,7 @@ export class TaskOrchestrator {
         resolution: string
     ): Promise<KanbanTask> {
         const board = await this.getBoard(userId, teamId);
-        if (!board) throw new Error('Team not found');
+        if (!board) throw new Error('Team not initialized. Please create/open this team in Kanban dashboard first. See DOC/TEAM_CREATION_WORKFLOW.md for details.');
 
         const task = board.tasks.find(t => t.id === taskId);
         if (!task) throw new Error('Task not found');

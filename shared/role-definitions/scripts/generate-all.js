@@ -43,7 +43,7 @@ try {
   console.log('\nNext steps:');
   console.log('  1. Review generated files');
   console.log('  2. Commit changes to git');
-  console.log('  3. Test with Happy team system');
+  console.log('  3. Test with Aha team system');
 
 } catch (error) {
   console.error('\n❌ Generation failed!');

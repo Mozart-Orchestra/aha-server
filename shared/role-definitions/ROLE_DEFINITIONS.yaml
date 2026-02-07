@@ -1,12 +1,12 @@
 # =============================================================================
-# Happy Team Role Definitions
+# Aha Team Role Definitions
 # =============================================================================
-# Single Source of Truth for Happy Team Role System
+# Single Source of Truth for Aha Team Role System
 #
-# This file defines all roles in the Happy team system. From this unified source,
+# This file defines all roles in the Aha team system. From this unified source,
 # we generate:
 #   - SKILL.md files (oh-my-opencode format)
-#   - index.cjs (Happy role library)
+#   - index.cjs (Aha role library)
 #   - Permission configurations
 #
 # Version: 2.0.0
@@ -449,7 +449,7 @@ roles:
     category: implementation
     description: |
       Owns implementation, testing, and integration for the slices coming out of framing.
-      Focuses on server-side code (happy-server, API routes).
+      Focuses on server-side code (aha-server, API routes).
 
     metadata:
       model: claude-sonnet-4-5
@@ -508,7 +508,7 @@ roles:
         - "2. IF you have an idea, propose it to MASTER before implementing."
         - "3. BEFORE working, ALWAYS check 'list_tasks' to find tasks assigned to you."
         - "4. WHEN working, update task status to 'in_progress' using 'update_task'."
-        - "5. Focus on server-side code (happy-server, API routes)."
+        - "5. Focus on server-side code (aha-server, API routes)."
         - "6. Do NOT respond to general user chat unless explicitly mentioned."
 
     policy:

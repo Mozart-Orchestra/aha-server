@@ -4,6 +4,7 @@ import { buildMachineActivityEphemeral, ClientConnection, eventRouter } from "@/
 import { Server, Socket } from "socket.io";
 import { log } from "@/utils/log";
 import { auth } from "@/app/auth/auth";
+import { db } from "@/storage/db";
 import { decrementWebSocketConnection, incrementWebSocketConnection, websocketEventsCounter } from "../monitoring/metrics2";
 import { usageHandler } from "./socket/usageHandler";
 import { rpcHandler } from "./socket/rpcHandler";
@@ -107,7 +108,7 @@ export function startSocket(app: Fastify) {
             });
         }
 
-        socket.on('disconnect', () => {
+        socket.on('disconnect', async () => {
             websocketEventsCounter.inc({ event_type: 'disconnect' });
 
             // Cleanup connections
@@ -124,6 +125,25 @@ export function startSocket(app: Fastify) {
                     payload: machineActivity,
                     recipientFilter: { type: 'user-scoped-only' }
                 });
+
+                // Update database to mark machine as offline
+                try {
+                    await db.machine.update({
+                        where: {
+                            accountId_id: {
+                                accountId: userId,
+                                id: connection.machineId
+                            }
+                        },
+                        data: {
+                            active: false,
+                            lastActiveAt: new Date()
+                        }
+                    });
+                    log({ module: 'websocket' }, `Machine ${connection.machineId} marked as offline`);
+                } catch (error) {
+                    log({ module: 'websocket', level: 'error' }, `Error marking machine ${connection.machineId} as offline: ${error}`);
+                }
             }
         });
 

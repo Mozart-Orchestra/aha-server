@@ -2,9 +2,12 @@ import type { FastifyCorsOptions } from '@fastify/cors';
 
 // Security: Allowed origins for production
 const ALLOWED_ORIGINS_PRODUCTION = [
-    'https://happy.engineering',
-    'https://app.happy.engineering',
-    'https://www.happy.engineering',
+    'https://aha.engineering',
+    'https://app.aha.engineering',
+    'https://www.aha.engineering',
+    'https://top1vibe.com',
+    'https://app.top1vibe.com',
+    'https://www.top1vibe.com',
     // Mobile app origins (Expo)
     'exp://localhost:8081',
     'exp://localhost:19000',

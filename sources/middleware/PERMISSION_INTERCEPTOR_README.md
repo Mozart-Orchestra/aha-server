@@ -8,7 +8,7 @@
 
 ## 📋 概述
 
-`PermissionInterceptor` 是 happy-server 的权限验证中间件，用于在运行时检查用户权限，确保只有授权的操作才能执行。
+`PermissionInterceptor` 是 aha-server 的权限验证中间件，用于在运行时检查用户权限，确保只有授权的操作才能执行。
 
 ### 主要特性
 
@@ -39,7 +39,7 @@
 ### 1. 安装依赖
 
 ```bash
-cd /Users/swmt/happy/happy-server
+cd /Users/swmt/happy/aha-server
 npm install js-yaml
 npm install --save-dev @types/js-yaml
 ```

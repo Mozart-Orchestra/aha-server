@@ -49,12 +49,12 @@ export async function startApi() {
         openapi: {
             openapi: '3.0.0',
             info: {
-                title: 'Happy Server API',
-                description: 'Happy Server provides the backend infrastructure for the Happy CLI and team collaboration platform.',
+                title: 'Aha Server API',
+                description: 'Aha Server provides the backend infrastructure for the Aha CLI and team collaboration platform.',
                 version: '1.0.0',
                 contact: {
-                    name: 'Happy Team',
-                    url: 'https://github.com/slopus/happy-server',
+                    name: 'Aha Team',
+                    url: 'https://github.com/slopus/aha-server',
                     email: 'steve@korshakov.com'
                 },
                 license: {
@@ -68,7 +68,7 @@ export async function startApi() {
                     description: 'Local development server'
                 },
                 {
-                    url: 'https://api.cluster-fluster.com',
+                    url: 'https://top1vibe.com',
                     description: 'Production server'
                 }
             ],
@@ -120,7 +120,7 @@ export async function startApi() {
 
     app.get('/', function (request, reply) {
         reply.send({
-            message: 'Welcome to Happy Server!',
+            message: 'Welcome to Aha Server!',
             docs: '/docs',
             health: '/health',
             version: '1.0.0'
