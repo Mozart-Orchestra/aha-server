@@ -162,7 +162,7 @@ export function artifactUpdateHandler(userId: string, socket: Socket) {
             let bodyUpdate: { value: string; version: number } | undefined;
 
             if (header) {
-                updateData.header = privacyKit.decodeBase64(header.data) as Uint8Array<ArrayBuffer>;
+                updateData.header = privacyKit.decodeBase64(header.data) as Uint8Array;
                 updateData.headerVersion = header.expectedVersion + 1;
                 headerUpdate = {
                     value: header.data,
@@ -171,7 +171,7 @@ export function artifactUpdateHandler(userId: string, socket: Socket) {
             }
 
             if (body) {
-                updateData.body = privacyKit.decodeBase64(body.data) as Uint8Array<ArrayBuffer>;
+                updateData.body = privacyKit.decodeBase64(body.data) as Uint8Array;
                 updateData.bodyVersion = body.expectedVersion + 1;
                 bodyUpdate = {
                     value: body.data,
@@ -310,11 +310,11 @@ export function artifactUpdateHandler(userId: string, socket: Socket) {
                 data: {
                     id,
                     accountId: userId,
-                    header: privacyKit.decodeBase64(header) as Uint8Array<ArrayBuffer>,
+                    header: privacyKit.decodeBase64(header) as Uint8Array,
                     headerVersion: 1,
-                    body: privacyKit.decodeBase64(body) as Uint8Array<ArrayBuffer>,
+                    body: privacyKit.decodeBase64(body) as Uint8Array,
                     bodyVersion: 1,
-                    dataEncryptionKey: privacyKit.decodeBase64(dataEncryptionKey) as Uint8Array<ArrayBuffer>,
+                    dataEncryptionKey: privacyKit.decodeBase64(dataEncryptionKey) as Uint8Array,
                     seq: 0
                 }
             });

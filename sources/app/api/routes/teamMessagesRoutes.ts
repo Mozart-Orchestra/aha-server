@@ -9,6 +9,8 @@ import { kvList } from "@/app/kv/kvList";
 import { kvMutate } from "@/app/kv/kvMutate";
 import { encryptString, decryptString } from "@/modules/encrypt";
 import { teamMessagesCounter, teamTaskOperationsCounter, teamBroadcastEfficiencyGauge } from "@/app/monitoring/metrics2";
+import * as privacyKit from "privacy-kit";
+import { ensureSessionLinkedToTeam } from "@/utils/teamArtifacts";
 
 /**
  * Team Messages Routes
@@ -287,6 +289,16 @@ export function teamMessagesRoutes(app: Fastify) {
                 value: serializedMessage,
                 version: -1
             }]);
+
+            // HOTFIX: Auto-link session to team artifact if not already linked
+            // This ensures agents that join via messages (not session creation) are registered
+            // Also registers a body.team.members entry to fix "0 members" display in Kanban
+            if (fromSessionId) {
+                await ensureSessionLinkedToTeam(db, userId, fromSessionId, teamId, privacyKit, log, {
+                    roleId: message.fromRole,
+                    displayName: message.fromRole ?? fromSessionId.substring(0, 8),
+                });
+            }
 
             // Metrics for observability
             teamMessagesCounter.inc({

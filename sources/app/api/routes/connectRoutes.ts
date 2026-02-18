@@ -257,7 +257,7 @@ export function connectRoutes(app: Fastify) {
         }
     }, async (request, reply) => {
         const userId = request.userId;
-        const encrypted = encryptString(['user', userId, 'vendors', request.params.vendor, 'token'], request.body.token) as Uint8Array<ArrayBuffer>;
+        const encrypted = encryptString(['user', userId, 'vendors', request.params.vendor, 'token'], request.body.token) as Uint8Array;
         await db.serviceAccountToken.upsert({
             where: { accountId_vendor: { accountId: userId, vendor: request.params.vendor } },
             update: { updatedAt: new Date(), token: encrypted },

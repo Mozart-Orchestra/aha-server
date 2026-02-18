@@ -8,6 +8,7 @@ import { randomKeyNaked } from "@/utils/randomKeyNaked";
 import { allocateUserSeq } from "@/storage/seq";
 import { sessionDelete } from "@/app/session/sessionDelete";
 import * as privacyKit from "privacy-kit";
+import { ensureSessionLinkedToTeam } from "@/utils/teamArtifacts";
 
 export function sessionRoutes(app: Fastify) {
 
@@ -286,52 +287,7 @@ export function sessionRoutes(app: Fastify) {
                 const teamId = parsedMetadata.teamId;
 
                 if (teamId) {
-                    log({ module: 'session-artifact-link', sessionId: session.id, teamId }, `Attempting to link session to team artifact ${teamId}`);
-
-                    // Find the team artifact
-                    const artifact = await db.artifact.findFirst({
-                        where: { id: teamId, accountId: userId }
-                    });
-
-                    if (artifact) {
-                        try {
-                            // Decode header
-                            const headerStr = privacyKit.encodeBase64(artifact.header);
-                            const header = JSON.parse(Buffer.from(headerStr, 'base64').toString());
-
-                            // Add session ID if not already present
-                            if (!header.sessions || !header.sessions.includes(session.id)) {
-                                header.sessions = [...(header.sessions || []), session.id];
-
-                                // Encode updated header
-                                const newHeaderStr = Buffer.from(JSON.stringify(header)).toString('base64');
-                                const newHeader = privacyKit.decodeBase64(newHeaderStr);
-
-                                // Update artifact
-                                await db.artifact.update({
-                                    where: { id: artifact.id },
-                                    data: {
-                                        header: newHeader as any,
-                                        headerVersion: artifact.headerVersion + 1,
-                                        seq: artifact.seq + 1,
-                                        updatedAt: new Date()
-                                    }
-                                });
-
-                                log({ module: 'session-artifact-link', sessionId: session.id, teamId, artifactId: artifact.id },
-                                    `Successfully linked session to artifact. New headerVersion: ${artifact.headerVersion + 1}`);
-                            } else {
-                                log({ module: 'session-artifact-link', sessionId: session.id, teamId },
-                                    `Session already linked to artifact`);
-                            }
-                        } catch (headerError) {
-                            // This is expected for encrypted artifacts
-                            // log({ module: 'session-artifact-link', level: 'debug' }, `Skipping link for encrypted artifact header`);
-                        }
-                    } else {
-                        log({ module: 'session-artifact-link', sessionId: session.id, teamId, level: 'warn' },
-                            `Team artifact ${teamId} not found. Session not linked.`);
-                    }
+                    await ensureSessionLinkedToTeam(db, userId, session.id, teamId, privacyKit, log);
                 }
             } catch (error) {
                 // Don't fail session creation if artifact linking fails

@@ -285,12 +285,26 @@ async function addTeamMember(
         throw new Error('Team not found');
     }
 
-    // 防御性检查: artifact.body 可能为 null
+    // Auto-initialize if body is null (e.g., CLI-created teams)
+    let board: Record<string, any>;
     if (!artifact.body) {
-        throw new Error('Team artifact not initialized - please open Kanban to initialize the team first');
-    }
+        log({ module: 'team-management', level: 'warn', teamId }, 'Team artifact body is null, auto-initializing with default structure');
 
-    const board = parseTeamArtifactBody(artifact.body) as Record<string, any>;
+        board = {
+            team: {
+                members: [],
+                roles: [],  // Empty array, can be populated later
+                agreements: {
+                    statusUpdates: '',
+                    handoffs: '',
+                    escalation: '',
+                    definitionOfDone: ''
+                }
+            }
+        };
+    } else {
+        board = parseTeamArtifactBody(artifact.body) as Record<string, any>;
+    }
 
     if (!board.team) {
         board.team = { members: [] };
@@ -349,12 +363,26 @@ async function removeTeamMember(
         throw new Error('Team not found');
     }
 
-    // 防御性检查: artifact.body 可能为 null
+    // Auto-initialize if body is null (e.g., CLI-created teams)
+    let board: Record<string, any>;
     if (!artifact.body) {
-        throw new Error('Team artifact not initialized - please open Kanban to initialize the team first');
-    }
+        log({ module: 'team-management', level: 'warn', teamId }, 'Team artifact body is null, auto-initializing with default structure');
 
-    const board = parseTeamArtifactBody(artifact.body) as Record<string, any>;
+        board = {
+            team: {
+                members: [],
+                roles: [],
+                agreements: {
+                    statusUpdates: '',
+                    handoffs: '',
+                    escalation: '',
+                    definitionOfDone: ''
+                }
+            }
+        };
+    } else {
+        board = parseTeamArtifactBody(artifact.body) as Record<string, any>;
+    }
 
     if (!board.team?.members) {
         return { success: true };
@@ -485,12 +513,27 @@ async function renameTeam(
         throw new Error('Team not found');
     }
 
-    // 防御性检查: artifact.body 可能为 null
+    // Auto-initialize if body is null (e.g., CLI-created teams)
+    let board: Record<string, any>;
     if (!artifact.body) {
-        throw new Error('Team artifact not initialized - please open Kanban to initialize the team first');
-    }
+        log({ module: 'team-management', level: 'warn', teamId }, 'Team artifact body is null, auto-initializing with default structure');
 
-    const board = parseTeamArtifactBody(artifact.body) as Record<string, any>;
+        board = {
+            name,  // Use the provided name directly
+            team: {
+                members: [],
+                roles: [],
+                agreements: {
+                    statusUpdates: '',
+                    handoffs: '',
+                    escalation: '',
+                    definitionOfDone: ''
+                }
+            }
+        };
+    } else {
+        board = parseTeamArtifactBody(artifact.body) as Record<string, any>;
+    }
 
     board.name = name;
     if (board.team) {
