@@ -21,7 +21,7 @@ const __dirname = path.dirname(__filename);
  * Role permissions configuration
  */
 export interface RolePermissions {
-  permissionMode: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
+  permissionMode: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'read-only' | 'safe-yolo' | 'yolo';
   accessLevel: 'read-only' | 'full-access';
   disallowedTools: string[];
   allowedOperations: string[];
@@ -61,11 +61,13 @@ export interface UserInfo {
 interface RoleDefinition {
   id: string;
   title: string;
-  accessLevel: 'read-only' | 'full-access';
+  accessLevel?: 'read-only' | 'full-access';
   policy?: {
     permissionMode?: string;
+    accessLevel?: 'read-only' | 'full-access';
     disallowedTools?: string[];
   };
+  toolsToAvoid?: Array<{ name?: string }>;
   responsibilities?: string[];
   protocol?: string[];
 }
@@ -139,29 +141,55 @@ export class RolePermissionService {
    */
   async getPermissions(role: string): Promise<RolePermissions> {
     // Check cache first
-    if (this.permissionCache.has(role)) {
-      return this.permissionCache.get(role)!;
+    const cached = this.permissionCache.get(role);
+    if (cached) {
+      return cached;
     }
 
-    // Load from role definitions
-    const permissions = await this.loadPermissions(role);
+    // Load from role definitions and cache
+    const permissions = this.loadPermissions(role);
+    this.cachePermissions(role, permissions);
 
-    // Cache with timeout
+    return permissions;
+  }
+
+  /**
+   * Normalize tool names for case-insensitive comparison.
+   */
+  private normalizeToolName(tool: string): string {
+    return tool.trim().toLowerCase();
+  }
+
+  /**
+   * Cache permissions for role with expiration.
+   */
+  private cachePermissions(role: string, permissions: RolePermissions): void {
     this.permissionCache.set(role, permissions);
-
-    // Clear cache after timeout
     setTimeout(() => {
       this.permissionCache.delete(role);
       logger.debug(`[RolePermissionService] Cache expired for role: ${role}`);
     }, this.cacheTimeout);
+  }
 
+  /**
+   * Get permissions from cache, or compute and cache them synchronously.
+   * Used by runtime permission checks to avoid silent allow-on-cache-miss.
+   */
+  private getOrLoadPermissions(role: string): RolePermissions {
+    const cached = this.permissionCache.get(role);
+    if (cached) {
+      return cached;
+    }
+
+    const permissions = this.loadPermissions(role);
+    this.cachePermissions(role, permissions);
     return permissions;
   }
 
   /**
    * Load permissions from role definition
    */
-  private async loadPermissions(role: string): Promise<RolePermissions> {
+  private loadPermissions(role: string): RolePermissions {
     const roleDef = this.roleDefinitions.get(role);
 
     if (!roleDef) {
@@ -177,10 +205,20 @@ export class RolePermissionService {
     }
 
     // Map role definition to permissions
+    const disallowedToolSet = new Set<string>();
+    (roleDef.policy?.disallowedTools || []).forEach((tool) => {
+      disallowedToolSet.add(this.normalizeToolName(tool));
+    });
+    (roleDef.toolsToAvoid || []).forEach((tool) => {
+      if (tool?.name) {
+        disallowedToolSet.add(this.normalizeToolName(tool.name));
+      }
+    });
+
     const permissions: RolePermissions = {
-      permissionMode: (roleDef.policy?.permissionMode as any) || 'default',
-      accessLevel: roleDef.accessLevel || 'full-access',
-      disallowedTools: roleDef.policy?.disallowedTools || [],
+      permissionMode: (roleDef.policy?.permissionMode as RolePermissions['permissionMode']) || 'default',
+      accessLevel: roleDef.policy?.accessLevel || roleDef.accessLevel || 'full-access',
+      disallowedTools: Array.from(disallowedToolSet),
       allowedOperations: this.extractAllowedOperations(roleDef)
     };
 
@@ -275,12 +313,7 @@ export class RolePermissionService {
    * Check if operation is allowed for role
    */
   isOperationAllowed(role: string, operation: Operation): PermissionCheckResult {
-    const permissions = this.permissionCache.get(role);
-
-    if (!permissions) {
-      // If not cached, assume allowed for now (will be checked on next request)
-      return { allowed: true, requiresConfirmation: false };
-    }
+    const permissions = this.getOrLoadPermissions(role);
 
     // Check if wildcard is present
     if (permissions.allowedOperations.includes('*')) {
@@ -339,13 +372,9 @@ export class RolePermissionService {
    * Check if tool is allowed for role
    */
   isToolAllowed(role: string, tool: string): boolean {
-    const permissions = this.permissionCache.get(role);
-
-    if (!permissions) {
-      return true; // Assume allowed if not loaded
-    }
-
-    return !permissions.disallowedTools.includes(tool);
+    const permissions = this.getOrLoadPermissions(role);
+    const normalizedTool = this.normalizeToolName(tool);
+    return !permissions.disallowedTools.includes(normalizedTool);
   }
 
   /**

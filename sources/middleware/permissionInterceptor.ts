@@ -143,6 +143,7 @@ export class PermissionInterceptor {
     // For now, use mock data or extract from headers
 
     const authHeader = req.headers.authorization;
+    const headerUserId = req.headers['x-user-id'] as string;
     const teamId = req.headers['x-team-id'] as string;
     const role = req.headers['x-role'] as string;
     const sessionId = req.headers['x-session-id'] as string;
@@ -153,12 +154,14 @@ export class PermissionInterceptor {
         const token = authHeader.replace('Bearer ', '');
         const decoded = this.decodeToken(token);
 
-        return {
-          userId: decoded.userId,
-          teamId: decoded.teamId || teamId || 'default-team',
-          role: decoded.role || role || 'builder',
-          sessionId: decoded.sessionId || sessionId || 'default-session'
-        };
+        if (decoded) {
+          return {
+            userId: decoded.userId || headerUserId || 'anonymous',
+            teamId: decoded.teamId || teamId || 'default-team',
+            role: decoded.role || role || 'builder',
+            sessionId: decoded.sessionId || sessionId || 'default-session'
+          };
+        }
       } catch (error) {
         logger.warn('[PermissionInterceptor] Failed to decode token', error);
       }
@@ -166,7 +169,7 @@ export class PermissionInterceptor {
 
     // Fallback to headers or defaults
     return {
-      userId: req.headers['x-user-id'] as string || 'anonymous',
+      userId: headerUserId || 'anonymous',
       teamId: teamId || 'default-team',
       role: role || 'builder',
       sessionId: sessionId || 'default-session'
@@ -250,10 +253,7 @@ export class PermissionInterceptor {
    * Decode JWT token
    * TODO: Implement proper JWT decoding
    */
-  private decodeToken(token: string): any {
-    // For now, return mock data
-    // In production, use jwt.decode() or similar
-
+  private decodeToken(token: string): Partial<UserInfo> | null {
     try {
       // Split token into parts (header.payload.signature)
       const parts = token.split('.');
@@ -264,15 +264,14 @@ export class PermissionInterceptor {
       // Decode payload (base64url)
       const payload = parts[1];
       const decoded = Buffer.from(payload, 'base64url').toString('utf8');
-      return JSON.parse(decoded);
+      const parsed = JSON.parse(decoded);
+      if (!parsed || typeof parsed !== 'object') {
+        return null;
+      }
+      return parsed;
     } catch (error) {
-      logger.debug('[PermissionInterceptor] Could not decode token, returning mock data');
-      return {
-        userId: 'mock-user-id',
-        teamId: 'mock-team-id',
-        role: 'builder',
-        sessionId: 'mock-session-id'
-      };
+      logger.debug('[PermissionInterceptor] Could not decode token');
+      return null;
     }
   }
 
