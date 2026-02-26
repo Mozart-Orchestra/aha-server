@@ -69,7 +69,9 @@ const RoleStatsSchema = z.object({
 const CustomRoleSchema = z.object({
     id: z.string().optional(),
     title: z.string().min(1).max(100),
-    summary: z.string().max(500).optional(),
+    // Role summary can include long guidance blocks (prompt/MCP notes),
+    // so keep this comfortably above short-description limits.
+    summary: z.string().max(5000).optional(),
     icon: z.string().max(10).optional(),
 
     modelConfig: ModelConfigSchema.optional(),
