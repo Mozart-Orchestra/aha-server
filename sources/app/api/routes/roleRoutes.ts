@@ -487,6 +487,17 @@ const ROLE_REVIEW_PREFIX = "role_review.";
 const TEAM_REVIEW_PREFIX = "team_review.";
 const TEAM_SCORE_PREFIX = "team_score.";
 const TEAM_RATING_PREFIX = "rating_record.";
+const TEAM_RATING_ANALYTICS_PREFIX = "rating_analytics.";
+
+const ROLE_POOL_LIST_CACHE_TTL_MS = 30_000;
+const TEAM_RATING_ANALYTICS_CACHE_TTL_MS = 60_000;
+
+type RolePoolListCacheEntry = {
+    expiresAt: number;
+    roles: PublicRole[];
+};
+
+const rolePoolListCache = new Map<string, RolePoolListCacheEntry>();
 
 type CustomRole = z.infer<typeof CustomRoleSchema>;
 type PublicRole = z.infer<typeof PublicRoleSchema>;
@@ -497,6 +508,7 @@ type TeamReviewInput = z.infer<typeof TeamReviewInputSchema>;
 type TeamReview = z.infer<typeof TeamReviewSchema>;
 type TeamScorecard = z.infer<typeof TeamScorecardSchema>;
 type RatingRecord = z.infer<typeof RatingRecordSchema>;
+type TeamRatingAnalytics = z.infer<typeof TeamRatingAnalyticsSchema>;
 type CreateRatingInput = z.infer<typeof CreateRatingInputSchema>;
 type SourceScoreTotals = z.infer<typeof SourceScoreTotalsSchema>;
 type SourceScoreInput = z.infer<typeof SourceScoreInputSchema>;
@@ -543,6 +555,41 @@ function parseJson<T>(value: string): T | null {
     } catch {
         return null;
     }
+}
+
+function normalizeSearchTerm(search?: string): string {
+    return search?.toLowerCase().trim() || "";
+}
+
+function rolePoolListCacheKey(search?: string): string {
+    return normalizeSearchTerm(search);
+}
+
+function readRolePoolListCache(search?: string): PublicRole[] | null {
+    const key = rolePoolListCacheKey(search);
+    const existing = rolePoolListCache.get(key);
+    if (!existing) {
+        return null;
+    }
+
+    if (existing.expiresAt <= Date.now()) {
+        rolePoolListCache.delete(key);
+        return null;
+    }
+
+    return existing.roles;
+}
+
+function writeRolePoolListCache(search: string | undefined, roles: PublicRole[]): void {
+    const key = rolePoolListCacheKey(search);
+    rolePoolListCache.set(key, {
+        expiresAt: Date.now() + ROLE_POOL_LIST_CACHE_TTL_MS,
+        roles,
+    });
+}
+
+function invalidateRolePoolListCache(): void {
+    rolePoolListCache.clear();
 }
 
 function emptySourceScoreTotals(): SourceScoreTotals {
@@ -816,6 +863,67 @@ async function loadPublicRole(roleId: string): Promise<PublicRole | null> {
     return parsePublicRole(cache.value);
 }
 
+async function loadPublicRoleMap(roleIds: string[]): Promise<Map<string, PublicRole>> {
+    const uniqueRoleIds = Array.from(new Set(roleIds.filter(Boolean)));
+    if (uniqueRoleIds.length === 0) {
+        return new Map();
+    }
+
+    const rows = await db.simpleCache.findMany({
+        where: {
+            OR: uniqueRoleIds.map((roleId) => ({ key: `${ROLE_POOL_PREFIX}${roleId}` })),
+        },
+        take: uniqueRoleIds.length,
+    });
+
+    const roleMap = new Map<string, PublicRole>();
+    for (const row of rows) {
+        const parsed = parsePublicRole(row.value);
+        if (parsed?.id) {
+            roleMap.set(parsed.id, parsed);
+        }
+    }
+
+    return roleMap;
+}
+
+async function listPublicRoles(search?: string): Promise<PublicRole[]> {
+    const cached = readRolePoolListCache(search);
+    if (cached) {
+        return cached;
+    }
+
+    const caches = await db.simpleCache.findMany({
+        where: {
+            key: { startsWith: ROLE_POOL_PREFIX },
+        },
+        orderBy: {
+            updatedAt: "desc",
+        },
+        take: 1000,
+    });
+
+    const normalizedSearch = normalizeSearchTerm(search);
+    const parsedRoles = caches
+        .map((entry) => parsePublicRole(entry.value))
+        .filter((role): role is PublicRole => Boolean(role))
+        .filter((role) => {
+            if (!normalizedSearch) return true;
+            const haystack = `${role.title} ${role.summary || ""} ${role.id}`.toLowerCase();
+            return haystack.includes(normalizedSearch);
+        })
+        .sort((a, b) => {
+            const ratingDiff = b.stats.averageRating - a.stats.averageRating;
+            if (ratingDiff !== 0) return ratingDiff;
+            const reviewDiff = b.stats.reviewCount - a.stats.reviewCount;
+            if (reviewDiff !== 0) return reviewDiff;
+            return (b.updatedAt || 0) - (a.updatedAt || 0);
+        });
+
+    writeRolePoolListCache(search, parsedRoles);
+    return parsedRoles;
+}
+
 async function syncRoleToPublicPool(role: CustomRole, ownerId: string): Promise<void> {
     if (!role.id) {
         return;
@@ -825,6 +933,7 @@ async function syncRoleToPublicPool(role: CustomRole, ownerId: string): Promise<
 
     if (role.visibility === "private") {
         await db.simpleCache.deleteMany({ where: { key: poolKey } });
+        invalidateRolePoolListCache();
         return;
     }
 
@@ -852,14 +961,18 @@ async function syncRoleToPublicPool(role: CustomRole, ownerId: string): Promise<
             value: JSON.stringify(publishedRole)
         }
     });
+    invalidateRolePoolListCache();
 }
 
-async function mergeWithPublicStats(role: CustomRole): Promise<CustomRole> {
+async function mergeWithPublicStats(
+    role: CustomRole,
+    publicRoleMap?: Map<string, PublicRole>,
+): Promise<CustomRole> {
     if (!role.id || role.visibility !== "public") {
         return role;
     }
 
-    const publicRole = await loadPublicRole(role.id);
+    const publicRole = publicRoleMap?.get(role.id) ?? await loadPublicRole(role.id);
     if (!publicRole) {
         return role;
     }
@@ -911,25 +1024,7 @@ export function roleRoutes(app: Fastify) {
         // Delegate to /v1/roles/pool handler logic
         const { limit, search } = request.query as { limit: number; search?: string };
         try {
-            const caches = await db.simpleCache.findMany({
-                where: { key: { startsWith: ROLE_POOL_PREFIX } },
-                orderBy: { updatedAt: "desc" },
-                take: 1000
-            });
-            const normalizedSearch = search?.toLowerCase().trim();
-            const parsedRoles = caches
-                .map((entry) => parsePublicRole(entry.value))
-                .filter((role): role is PublicRole => Boolean(role))
-                .filter((role) => {
-                    if (!normalizedSearch) return true;
-                    const haystack = `${role.title} ${role.summary || ""} ${role.id}`.toLowerCase();
-                    return haystack.includes(normalizedSearch);
-                })
-                .sort((a, b) => {
-                    const ratingDiff = b.stats.averageRating - a.stats.averageRating;
-                    if (ratingDiff !== 0) return ratingDiff;
-                    return (b.stats.reviewCount - a.stats.reviewCount) || (b.updatedAt || 0) - (a.updatedAt || 0);
-                });
+            const parsedRoles = await listPublicRoles(search);
             return reply.send({ roles: parsedRoles.slice(0, limit), total: parsedRoles.length });
         } catch (error) {
             log({ module: "role-routes", level: "error" }, `Failed to list public roles: ${error}`);
@@ -959,32 +1054,7 @@ export function roleRoutes(app: Fastify) {
         const { limit, search } = request.query as { limit: number; search?: string };
 
         try {
-            const caches = await db.simpleCache.findMany({
-                where: {
-                    key: { startsWith: ROLE_POOL_PREFIX }
-                },
-                orderBy: {
-                    updatedAt: "desc"
-                },
-                take: 1000
-            });
-
-            const normalizedSearch = search?.toLowerCase().trim();
-            const parsedRoles = caches
-                .map((entry) => parsePublicRole(entry.value))
-                .filter((role): role is PublicRole => Boolean(role))
-                .filter((role) => {
-                    if (!normalizedSearch) return true;
-                    const haystack = `${role.title} ${role.summary || ""} ${role.id}`.toLowerCase();
-                    return haystack.includes(normalizedSearch);
-                })
-                .sort((a, b) => {
-                    const ratingDiff = b.stats.averageRating - a.stats.averageRating;
-                    if (ratingDiff !== 0) return ratingDiff;
-                    const reviewDiff = b.stats.reviewCount - a.stats.reviewCount;
-                    if (reviewDiff !== 0) return reviewDiff;
-                    return (b.updatedAt || 0) - (a.updatedAt || 0);
-                });
+            const parsedRoles = await listPublicRoles(search);
 
             return reply.send({
                 roles: parsedRoles.slice(0, limit),
@@ -1029,14 +1099,24 @@ export function roleRoutes(app: Fastify) {
                 })
             ]);
 
-            const customRoles: CustomRole[] = [];
+            const normalizedRoles: CustomRole[] = [];
             for (const item of mine.items) {
                 const role = parseRole(item.value);
                 if (!role || !role.id) {
                     continue;
                 }
+                normalizedRoles.push(normalizeRole(role, role.id, role.ownerId || userId));
+            }
 
-                const hydrated = await mergeWithPublicStats(normalizeRole(role, role.id, role.ownerId || userId));
+            const publicRoleMap = await loadPublicRoleMap(
+                normalizedRoles
+                    .filter((role) => role.visibility === "public" && Boolean(role.id))
+                    .map((role) => role.id as string),
+            );
+
+            const customRoles: CustomRole[] = [];
+            for (const normalizedRole of normalizedRoles) {
+                const hydrated = await mergeWithPublicStats(normalizedRole, publicRoleMap);
                 if (!includePrivate && hydrated.visibility === "private") {
                     continue;
                 }
@@ -1088,15 +1168,26 @@ export function roleRoutes(app: Fastify) {
 
         try {
             const result = await kvList({ uid: userId }, { prefix: ROLES_PREFIX, limit: 1000 });
-            const roles: CustomRole[] = [];
+            const normalizedRoles: CustomRole[] = [];
 
             for (const item of result.items) {
                 const parsed = parseRole(item.value);
                 if (!parsed || !parsed.id) {
                     continue;
                 }
+                normalizedRoles.push(normalizeRole(parsed, parsed.id, parsed.ownerId || userId));
+            }
 
-                const role = await mergeWithPublicStats(normalizeRole(parsed, parsed.id, parsed.ownerId || userId));
+            const publicRoleMap = await loadPublicRoleMap(
+                normalizedRoles
+                    .filter((role) => role.visibility === "public" && Boolean(role.id))
+                    .map((role) => role.id as string),
+            );
+
+            const roles: CustomRole[] = [];
+
+            for (const normalizedRole of normalizedRoles) {
+                const role = await mergeWithPublicStats(normalizedRole, publicRoleMap);
 
                 if (!includeTemplates && role.isTemplate) {
                     continue;
@@ -1333,6 +1424,7 @@ export function roleRoutes(app: Fastify) {
                     ]
                 }
             });
+            invalidateRolePoolListCache();
 
             log({ module: "role-routes", roleId: id }, "Custom role deleted");
             return reply.send({ success: true });
@@ -1516,6 +1608,7 @@ export function roleRoutes(app: Fastify) {
                         })
                     }
                 });
+                invalidateRolePoolListCache();
             }
 
             // If reviewer is owner and has local role copy, keep it in sync too.
@@ -1798,6 +1891,9 @@ export function roleRoutes(app: Fastify) {
                     value: JSON.stringify(record),
                 },
             });
+            await db.simpleCache.deleteMany({
+                where: { key: `${TEAM_RATING_ANALYTICS_PREFIX}${record.teamId}` },
+            });
 
             return reply.send({
                 success: true,
@@ -2026,8 +2122,24 @@ export function roleRoutes(app: Fastify) {
         },
     }, async (request, reply) => {
         const { teamId } = request.params as { teamId: string };
+        const analyticsCacheKey = `${TEAM_RATING_ANALYTICS_PREFIX}${teamId}`;
 
         try {
+            const cachedAnalytics = await db.simpleCache.findUnique({
+                where: { key: analyticsCacheKey },
+            });
+            if (cachedAnalytics) {
+                const parsed = parseJson<{ computedAt: number; data: TeamRatingAnalytics }>(cachedAnalytics.value);
+                if (
+                    parsed &&
+                    typeof parsed.computedAt === "number" &&
+                    parsed.data &&
+                    Date.now() - parsed.computedAt < TEAM_RATING_ANALYTICS_CACHE_TTL_MS
+                ) {
+                    return reply.send(parsed.data);
+                }
+            }
+
             const rows = await db.simpleCache.findMany({
                 where: { key: { startsWith: `${TEAM_RATING_PREFIX}${teamId}.` } },
                 orderBy: { updatedAt: "desc" },
@@ -2039,7 +2151,7 @@ export function roleRoutes(app: Fastify) {
                 .filter((record): record is RatingRecord => Boolean(record));
 
             if (ratings.length === 0) {
-                return reply.send({
+                const emptyPayload: TeamRatingAnalytics = {
                     teamId,
                     totalRatings: 0,
                     averageRating: 0,
@@ -2048,7 +2160,24 @@ export function roleRoutes(app: Fastify) {
                     totalBugs: 0,
                     averageQualityScore: 0,
                     roleBreakdown: [],
+                };
+                await db.simpleCache.upsert({
+                    where: { key: analyticsCacheKey },
+                    update: {
+                        value: JSON.stringify({
+                            computedAt: Date.now(),
+                            data: emptyPayload,
+                        }),
+                    },
+                    create: {
+                        key: analyticsCacheKey,
+                        value: JSON.stringify({
+                            computedAt: Date.now(),
+                            data: emptyPayload,
+                        }),
+                    },
                 });
+                return reply.send(emptyPayload);
             }
 
             const totalRatings = ratings.length;
@@ -2086,7 +2215,7 @@ export function roleRoutes(app: Fastify) {
                 })
                 .sort((a, b) => b.averageRating - a.averageRating || b.totalRatings - a.totalRatings);
 
-            return reply.send({
+            const analyticsPayload: TeamRatingAnalytics = {
                 teamId,
                 totalRatings,
                 averageRating: Number((totalRatingScore / totalRatings).toFixed(3)),
@@ -2095,7 +2224,26 @@ export function roleRoutes(app: Fastify) {
                 totalBugs,
                 averageQualityScore: Number((totalQuality / totalRatings).toFixed(3)),
                 roleBreakdown,
+            };
+
+            await db.simpleCache.upsert({
+                where: { key: analyticsCacheKey },
+                update: {
+                    value: JSON.stringify({
+                        computedAt: Date.now(),
+                        data: analyticsPayload,
+                    }),
+                },
+                create: {
+                    key: analyticsCacheKey,
+                    value: JSON.stringify({
+                        computedAt: Date.now(),
+                        data: analyticsPayload,
+                    }),
+                },
             });
+
+            return reply.send(analyticsPayload);
         } catch (error) {
             log({ module: "role-routes", level: "error" }, `Failed to get rating analytics: ${error}`);
             return reply.code(500).send({ error: "Failed to get rating analytics" });

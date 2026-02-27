@@ -151,7 +151,7 @@ export class TaskOrchestrator {
         board.version = (board.version || 0) + 1;
         board.updatedAt = Date.now();
 
-        const bodyBuffer = Buffer.from(JSON.stringify(board));
+        const bodyBuffer = new Uint8Array(Buffer.from(JSON.stringify(board)));
 
         await db.artifact.update({
             where: { id: teamId },

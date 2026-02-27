@@ -23,6 +23,10 @@
 13. [Team Messages](#team-messages)
 14. [Development](#development)
 
+15. [Roles](#15-roles)
+16. [Ratings](#16-ratings)
+17. [OpenAPI / Swagger](#17-openapi--swagger)
+
 ---
 
 ## Authentication
@@ -804,12 +808,409 @@ artifacts = requests.get(
 
 ---
 
-**Last Updated:** 2024-01-19
-**API Version:** 1.0.0
-**Documentation Version:** 1.0.0
+## 15. Roles
+
+Role APIs are split into three buckets:
+- **Defaults**: built-in role templates from server.
+- **Custom**: user-owned roles (`/v1/roles` CRUD).
+- **Pool**: public/shared roles (`/v1/roles/pool`).
+
+### GET /v1/roles/defaults
+
+Get server-provided default templates.
+
+**Response (200):**
+```json
+{
+  "roles": [
+    {
+      "id": "master",
+      "title": "Master",
+      "summary": "Team coordinator and task distributor",
+      "icon": "target",
+      "category": "management",
+      "responsibilities": ["Break requirements into scoped tasks"],
+      "abilityBoundaries": ["Do not bypass validation gates when closing tasks"],
+      "handoffProtocol": ["Confirm acceptance criteria before marking done"],
+      "protocol": ["Keep board state and team status aligned"]
+    }
+  ]
+}
+```
+
+### GET /v1/roles/templates/list
+
+Backward-compatible alias of default templates.
+
+**Response (200):**
+```json
+{
+  "templates": [
+    {
+      "id": "master",
+      "title": "Master"
+    }
+  ]
+}
+```
+
+### GET /v1/roles/public
+
+Backward-compatible alias of `/v1/roles/pool`.
+
+**Query Parameters:**
+- `limit` (number, optional, default `100`, max `200`)
+- `search` (string, optional)
+
+### GET /v1/roles/pool
+
+List public role pool entries.
+
+**Response (200):**
+```json
+{
+  "roles": [
+    {
+      "id": "role-abc123",
+      "title": "Frontend Expert",
+      "summary": "React and UX specialist",
+      "visibility": "public",
+      "ownerId": "user-001",
+      "publishedAt": 1740700000000,
+      "stats": {
+        "reviewCount": 12,
+        "averageRating": 4.6,
+        "cumulativeCode": 9800,
+        "cumulativeQuality": 88
+      }
+    }
+  ],
+  "total": 1
+}
+```
+
+### GET /v1/roles/library
+
+Load defaults + my custom roles + public pool in a single request.
+
+**Query Parameters:**
+- `includePrivate` (boolean, optional, default `false`)
+- `limit` (number, optional, default `100`, max `200`)
+
+**Response (200):**
+```json
+{
+  "defaults": [],
+  "custom": [],
+  "pool": []
+}
+```
+
+### GET /v1/roles
+
+List custom roles created by current user.
+
+**Query Parameters:**
+- `includeTemplates` (boolean, optional, default `false`)
+- `includePrivate` (boolean, optional, default `true`)
+- `limit` (number, optional, default `50`, max `200`)
+
+**Response (200):**
+```json
+{
+  "roles": [],
+  "total": 0
+}
+```
+
+### GET /v1/roles/:id
+
+Get one role by id. Server checks user-owned role first, then public pool fallback.
+
+### POST /v1/roles
+
+Create custom role (default visibility is public unless `isPublic` is explicitly false).
+
+**Request Body:**
+```json
+{
+  "title": "My Custom Role",
+  "summary": "Role description",
+  "icon": "star",
+  "visibility": "public",
+  "isPublic": true,
+  "responsibilities": ["Build API", "Write tests"]
+}
+```
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "role": {
+    "id": "role-k2f91m",
+    "title": "My Custom Role",
+    "visibility": "public"
+  }
+}
+```
+
+### PUT /v1/roles/:id
+
+Update custom role fields (partial update payload supported).
+
+### DELETE /v1/roles/:id
+
+Delete custom role. Also removes the role from public pool and review cache.
+
+### POST /v1/roles/:id/export
+
+Export role template payload:
+```json
+{
+  "version": "1.0",
+  "exportedAt": 1740700000000,
+  "role": {
+    "title": "Frontend Expert",
+    "templateSource": "role-abc123"
+  }
+}
+```
+
+### POST /v1/roles/import
+
+Import role template payload exported above.
+
+### POST /v1/roles/:id/reviews
+
+Submit role review (public review model).
+
+**Request Body:**
+```json
+{
+  "rating": 5,
+  "codeScore": 92,
+  "qualityScore": 95,
+  "source": "user",
+  "sourceScores": {
+    "user": 5,
+    "master": 4.8
+  },
+  "teamId": "team-123",
+  "comment": "Great implementation quality"
+}
+```
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "review": {
+    "id": "rr-a1b2c3",
+    "roleId": "role-abc123",
+    "reviewerId": "user-001",
+    "rating": 5
+  },
+  "stats": {
+    "reviewCount": 13,
+    "averageRating": 4.63
+  }
+}
+```
+
+### GET /v1/roles/:id/reviews
+
+Get role review feed.
+
+**Query Parameters:**
+- `limit` (number, optional, default `50`, max `200`)
 
 ---
 
-*Generated with [Claude Code](https://claude.ai/code) via [Aha](https://aha.engineering)*
-*Co-Authored-By: Claude <noreply@anthropic.com>*
-*Co-Authored-By: Aha <yesreply@aha.engineering>*
+## 16. Ratings
+
+### POST /v1/teams/:teamId/reviews
+
+Submit team-level review and update team scorecard.
+
+**Request Body:**
+```json
+{
+  "rating": 4.7,
+  "codeScore": 90,
+  "qualityScore": 87,
+  "source": "master",
+  "sourceScores": {
+    "master": 4.7
+  },
+  "roleIds": ["master", "implementer"],
+  "comment": "Strong delivery quality"
+}
+```
+
+### GET /v1/teams/:teamId/reviews
+
+Get team review timeline.
+
+### GET /v1/teams/:teamId/score
+
+Get cumulative team scorecard.
+
+**Response (200):**
+```json
+{
+  "teamId": "team-123",
+  "reviewCount": 27,
+  "totalRating": 123.4,
+  "averageRating": 4.57,
+  "cumulativeCode": 25500,
+  "cumulativeQuality": 2410,
+  "sourceScoreTotals": {
+    "user": 39,
+    "master": 42,
+    "system": 36
+  }
+}
+```
+
+### POST /v1/ratings
+
+Create unified rating record (PRD-compatible endpoint).
+
+**Request Body:**
+```json
+{
+  "teamId": "team-123",
+  "roleId": "role-abc123",
+  "taskId": "task-456",
+  "rating": 4.8,
+  "userRating": 5,
+  "masterRating": 4.5,
+  "systemRating": 4.9,
+  "codeLines": 820,
+  "commits": 12,
+  "bugsCount": 1,
+  "qualityScore": 93,
+  "source": "system",
+  "comment": "Solid delivery and low bug count"
+}
+```
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "rating": {
+    "id": "rating-7ec43f01",
+    "teamId": "team-123",
+    "roleId": "role-abc123",
+    "rating": 4.8,
+    "createdAt": 1740700000000
+  }
+}
+```
+
+### GET /v1/ratings/:teamId
+
+Get rating history for one team.
+
+**Query Parameters:**
+- `limit` (number, optional, default `200`, max `500`)
+
+### GET /v1/ratings/:teamId/role/:roleId
+
+Get rating history for one role inside a team.
+
+### GET /v1/ratings/:teamId/analytics
+
+Get aggregated team analytics snapshot.
+
+**Performance note:** this endpoint uses a server cache with 60s TTL and is invalidated when new ratings are written.
+
+**Response (200):**
+```json
+{
+  "teamId": "team-123",
+  "totalRatings": 48,
+  "averageRating": 4.31,
+  "totalCodeLines": 51200,
+  "totalCommits": 680,
+  "totalBugs": 17,
+  "averageQualityScore": 88.7,
+  "roleBreakdown": [
+    {
+      "roleId": "implementer",
+      "totalRatings": 14,
+      "averageRating": 4.6,
+      "totalCodeLines": 17700,
+      "totalCommits": 219,
+      "totalBugs": 6,
+      "averageQualityScore": 91.2
+    }
+  ]
+}
+```
+
+### POST /v1/ratings/system/calculate
+
+Run automatic system rating algorithm.
+
+**Request Body:**
+```json
+{
+  "roleId": "role-abc123",
+  "teamId": "team-123",
+  "taskId": "task-456",
+  "codeLines": 830,
+  "commits": 13,
+  "bugsCount": 1,
+  "filesChanged": 9,
+  "reviewComments": 4,
+  "testCoverage": 87.06,
+  "persist": true
+}
+```
+
+### GET /v1/ratings/system/role/:roleId
+
+Get system rating snapshot derived from role stats.
+
+---
+
+## 17. OpenAPI / Swagger
+
+Swagger UI is enabled in API server:
+- **UI**: `http://localhost:3005/docs`
+- **Server config**: `sources/app/api/api.ts`
+
+Role and rating routes use Zod schemas for request/response models, so Swagger is generated from the same runtime validators used by Fastify.
+
+Minimal OpenAPI shape for V3 role/rating endpoints:
+
+```yaml
+openapi: 3.0.0
+info:
+  title: Aha Server API
+  version: 1.0.0
+paths:
+  /v1/roles:
+    get:
+      summary: List custom roles
+    post:
+      summary: Create custom role
+  /v1/roles/{id}/reviews:
+    post:
+      summary: Submit role review
+  /v1/ratings:
+    post:
+      summary: Create rating record
+  /v1/ratings/{teamId}/analytics:
+    get:
+      summary: Get team rating analytics
+```
+
+---
+
+**Last Updated:** 2026-02-28
+**API Version:** 1.0.0
+**Documentation Version:** 3.0.0

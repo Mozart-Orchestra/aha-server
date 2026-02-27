@@ -50,7 +50,7 @@ class FileSystemStorage {
     await fs.mkdir(dir, { recursive: true })
 
     // 写入文件
-    await fs.writeFile(filePath, buffer)
+    await fs.writeFile(filePath, new Uint8Array(buffer))
   }
 
   /**

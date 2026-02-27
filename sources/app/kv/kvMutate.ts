@@ -1,9 +1,10 @@
 import { db } from "@/storage/db";
-import { inTx, afterTx } from "@/storage/inTx";
+import { inTx, afterTx, Tx } from "@/storage/inTx";
 import { allocateUserSeq } from "@/storage/seq";
 import { randomKeyNaked } from "@/utils/randomKeyNaked";
 import { eventRouter, buildKVBatchUpdateUpdate } from "@/app/events/eventRouter";
 import * as privacyKit from "privacy-kit";
+import { createHash } from "node:crypto";
 
 export interface KVMutation {
     key: string;
@@ -25,6 +26,28 @@ export interface KVMutateResult {
     }>;
 }
 
+function buildSyntheticPublicKey(accountId: string): string {
+    return createHash("sha256").update(`bootstrap:${accountId}`).digest("hex");
+}
+
+async function ensureAccountExists(tx: Tx, accountId: string): Promise<void> {
+    const existing = await tx.account.findUnique({
+        where: { id: accountId },
+        select: { id: true },
+    });
+
+    if (existing) {
+        return;
+    }
+
+    await tx.account.create({
+        data: {
+            id: accountId,
+            publicKey: buildSyntheticPublicKey(accountId),
+        },
+    });
+}
+
 /**
  * Atomically mutate multiple key-value pairs.
  * All mutations succeed or all fail.
@@ -37,6 +60,7 @@ export async function kvMutate(
     mutations: KVMutation[]
 ): Promise<KVMutateResult> {
     return await inTx(async (tx) => {
+        await ensureAccountExists(tx, ctx.uid);
         const errors: KVMutateResult['errors'] = [];
 
         // Pre-validate all mutations

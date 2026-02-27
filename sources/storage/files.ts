@@ -31,7 +31,7 @@ class FileSystemClient {
     const dir = path.dirname(filePath)
 
     await fs.mkdir(dir, { recursive: true })
-    await fs.writeFile(filePath, buffer)
+    await fs.writeFile(filePath, new Uint8Array(buffer))
   }
 
   /**

@@ -273,10 +273,10 @@ export function channelRoutes(app: Fastify) {
             }
 
             // Encrypt the API key
-            const encryptedKey = encryptString(
+            const encryptedKey = new Uint8Array(encryptString(
                 ['channels', userId, channelId],
                 channelData.apiKey
-            );
+            ));
 
             // Use default models if not provided
             const models = channelData.models || DEFAULT_MODELS[channelData.provider] || [];
@@ -382,10 +382,10 @@ export function channelRoutes(app: Fastify) {
 
             // Update API key if provided
             if (updates.apiKey) {
-                updatedChannel.encryptedKey = encryptString(
+                updatedChannel.encryptedKey = new Uint8Array(encryptString(
                     ['channels', userId, id],
                     updates.apiKey
-                );
+                ));
             }
 
             // Store updated channel

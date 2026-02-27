@@ -28,6 +28,7 @@ import { taskRoutes } from "./routes/taskRoutes";
 import { teamManagementRoutes } from "./routes/teamManagementRoutes";
 import { roleRoutes } from "./routes/roleRoutes";
 import { channelRoutes } from "./routes/channelRoutes";
+import { teamCompositionRoutes } from "./routes/teamCompositionRoutes";
 import { getCorsConfig } from "./utils/corsConfig";
 import { getDefaultRateLimitConfig } from "./utils/rateLimitConfig";
 
@@ -90,6 +91,7 @@ export async function startApi() {
                 { name: 'Team Messages', description: 'Team collaboration messaging' },
                 { name: 'Roles', description: 'Custom role definition and management' },
                 { name: 'Channels', description: 'Multi-provider API channel management' },
+                { name: 'Team Planning', description: 'Adaptive team composition planning' },
                 { name: 'Dev', description: 'Development and debugging endpoints' }
             ],
             components: {
@@ -168,6 +170,7 @@ export async function startApi() {
     teamManagementRoutes(typed);
     roleRoutes(typed);
     channelRoutes(typed);
+    teamCompositionRoutes(typed);
 
     // Start HTTP 
     const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3005;

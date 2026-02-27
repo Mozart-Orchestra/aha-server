@@ -369,6 +369,41 @@ describe('roleRoutes', () => {
         expect(roleIds.indexOf(tieHigherCountId)).toBeLessThan(roleIds.indexOf(tieLowerCountId));
     });
 
+    it('refreshes role pool listing after new reviews change cached scores', async () => {
+        const createResponse = await app.inject({
+            method: 'POST',
+            url: '/v1/roles',
+            headers: { 'content-type': 'application/json', 'x-user-id': 'owner-cache' },
+            payload: { title: 'Cache Role' },
+        });
+        const roleId = createResponse.json().role.id as string;
+
+        const firstList = await app.inject({
+            method: 'GET',
+            url: '/v1/roles/pool?limit=10',
+            headers: { 'x-user-id': 'owner-cache' },
+        });
+        expect(firstList.statusCode).toBe(200);
+        expect(firstList.json().roles[0].stats.averageRating).toBe(0);
+
+        const reviewResponse = await app.inject({
+            method: 'POST',
+            url: `/v1/roles/${roleId}/reviews`,
+            headers: { 'content-type': 'application/json', 'x-user-id': 'owner-cache' },
+            payload: { rating: 5, source: 'user' },
+        });
+        expect(reviewResponse.statusCode).toBe(200);
+
+        const secondList = await app.inject({
+            method: 'GET',
+            url: '/v1/roles/pool?limit=10',
+            headers: { 'x-user-id': 'owner-cache' },
+        });
+        expect(secondList.statusCode).toBe(200);
+        expect(secondList.json().roles[0].stats.averageRating).toBe(5);
+        expect(secondList.json().roles[0].stats.reviewCount).toBe(1);
+    });
+
     it('accumulates role ratings, code/quality totals, and source totals on review', async () => {
         const createResponse = await app.inject({
             method: 'POST',
@@ -545,6 +580,14 @@ describe('roleRoutes', () => {
 
         expect(create1.statusCode).toBe(200);
         expect(create1.json().rating.rating).toBe(4.5);
+
+        const analyticsBeforeSecondInsert = await app.inject({
+            method: 'GET',
+            url: `/v1/ratings/${teamId}/analytics`,
+            headers: { 'x-user-id': 'rater-1' },
+        });
+        expect(analyticsBeforeSecondInsert.statusCode).toBe(200);
+        expect(analyticsBeforeSecondInsert.json().totalRatings).toBe(1);
 
         const create2 = await app.inject({
             method: 'POST',

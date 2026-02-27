@@ -330,7 +330,7 @@ async function addTeamMember(
 
     // Re-wrap in the same structure for storage
     const updatedWrapper = { body: JSON.stringify(board) };
-    const bodyBuffer = Buffer.from(JSON.stringify(updatedWrapper));
+    const bodyBuffer = new Uint8Array(Buffer.from(JSON.stringify(updatedWrapper)));
     await db.artifact.update({
         where: { id: teamId },
         data: {
@@ -392,7 +392,7 @@ async function removeTeamMember(
 
     // Re-wrap in the same structure for storage
     const updatedWrapper = { body: JSON.stringify(board) };
-    const bodyBuffer = Buffer.from(JSON.stringify(updatedWrapper));
+    const bodyBuffer = new Uint8Array(Buffer.from(JSON.stringify(updatedWrapper)));
     await db.artifact.update({
         where: { id: teamId },
         data: {
@@ -542,7 +542,7 @@ async function renameTeam(
 
     // Re-wrap in the same structure for storage
     const updatedWrapper = { body: JSON.stringify(board) };
-    const bodyBuffer = Buffer.from(JSON.stringify(updatedWrapper));
+    const bodyBuffer = new Uint8Array(Buffer.from(JSON.stringify(updatedWrapper)));
     await db.artifact.update({
         where: { id: teamId },
         data: {
