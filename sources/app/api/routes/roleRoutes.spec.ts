@@ -104,6 +104,20 @@ vi.mock('@/storage/db', () => ({
                     updatedAt: new Date(current.updatedAt),
                 };
             }),
+            update: vi.fn(async ({ where, data }: any) => {
+                const existing = testState.cacheStore.get(where.key);
+                if (!existing) {
+                    throw new Error(`Record not found for key ${where.key}`);
+                }
+                existing.value = data.value;
+                existing.updatedAt = Date.now();
+                return {
+                    key: where.key,
+                    value: existing.value,
+                    createdAt: new Date(existing.createdAt),
+                    updatedAt: new Date(existing.updatedAt),
+                };
+            }),
             deleteMany: vi.fn(async ({ where }: any) => {
                 const keys = Array.from(testState.cacheStore.keys())
                     .filter((key) => matchSimpleCacheWhere(key, where));
@@ -482,6 +496,32 @@ describe('roleRoutes', () => {
         expect(payload.templates.some((template) => template.id === 'implementer')).toBe(true);
     });
 
+    it('supports /v1/roles/public alias and isPublic compatibility field', async () => {
+        const created = await app.inject({
+            method: 'POST',
+            url: '/v1/roles',
+            headers: { 'content-type': 'application/json', 'x-user-id': 'public-alias-owner' },
+            payload: {
+                title: 'Public Alias Role',
+                summary: 'Should appear in /v1/roles/public',
+                isPublic: true,
+            },
+        });
+
+        expect(created.statusCode).toBe(200);
+        expect(created.json().role.isPublic).toBe(true);
+        expect(created.json().role.visibility).toBe('public');
+
+        const listPublic = await app.inject({
+            method: 'GET',
+            url: '/v1/roles/public?limit=20',
+            headers: { 'x-user-id': 'public-alias-owner' },
+        });
+
+        expect(listPublic.statusCode).toBe(200);
+        expect(listPublic.json().roles.some((role: { title: string }) => role.title === 'Public Alias Role')).toBe(true);
+    });
+
     it('creates and queries rating records through /v1/ratings endpoints', async () => {
         const teamId = 'team-rating';
 
@@ -554,6 +594,51 @@ describe('roleRoutes', () => {
         expect(analyticsPayload.totalCommits).toBe(5);
         expect(analyticsPayload.totalBugs).toBe(1);
         expect(analyticsPayload.roleBreakdown).toHaveLength(2);
+    });
+
+    it('calculates system rating and can persist it to role pool stats', async () => {
+        const createRole = await app.inject({
+            method: 'POST',
+            url: '/v1/roles',
+            headers: { 'content-type': 'application/json', 'x-user-id': 'system-rater' },
+            payload: {
+                id: 'custom-system-role',
+                title: 'System Rated Role',
+                summary: 'Role for system rating test',
+            },
+        });
+        expect(createRole.statusCode).toBe(200);
+
+        const calc = await app.inject({
+            method: 'POST',
+            url: '/v1/ratings/system/calculate',
+            headers: { 'content-type': 'application/json', 'x-user-id': 'system-rater' },
+            payload: {
+                roleId: 'custom-system-role',
+                codeLines: 300,
+                commits: 4,
+                bugsCount: 1,
+                filesChanged: 5,
+                reviewComments: 2,
+                persist: true,
+            },
+        });
+
+        expect(calc.statusCode).toBe(200);
+        expect(calc.json().success).toBe(true);
+        expect(calc.json().result.rating).toBeGreaterThanOrEqual(1);
+        expect(calc.json().result.rating).toBeLessThanOrEqual(5);
+        expect(calc.json().persisted).toBe(true);
+
+        const scoreSnapshot = await app.inject({
+            method: 'GET',
+            url: '/v1/ratings/system/role/custom-system-role',
+            headers: { 'x-user-id': 'system-rater' },
+        });
+
+        expect(scoreSnapshot.statusCode).toBe(200);
+        expect(scoreSnapshot.json().success).toBe(true);
+        expect(scoreSnapshot.json().result).toBeTruthy();
     });
 
     it('reads legacy plain JSON role values while supporting encoded values', async () => {

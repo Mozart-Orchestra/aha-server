@@ -1,0 +1,15 @@
+happy-server - Aha 后端 API 服务器
+
+STACK:
+- Node.js 20 + TypeScript
+- Fastify 5, Prisma, PostgreSQL
+- Socket.io, Redis, Zod
+
+FEATURES:
+- RESTful API
+- WebSocket 实时更新
+- 用户认证/会话管理
+- 媒体处理
+
+PORTS:
+- 3000 (prod), 3005 (dev)
