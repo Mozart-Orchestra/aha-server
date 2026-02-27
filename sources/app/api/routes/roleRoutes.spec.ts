@@ -467,6 +467,95 @@ describe('roleRoutes', () => {
         expect(teamReviewsResponse.json().total).toBe(2);
     });
 
+    it('serves 22 default role templates with responsibilities via templates alias', async () => {
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/roles/templates/list',
+            headers: { 'x-user-id': 'template-user' },
+        });
+
+        expect(response.statusCode).toBe(200);
+        const payload = response.json() as { templates: Array<{ id: string; responsibilities: string[] }> };
+
+        expect(payload.templates).toHaveLength(22);
+        expect(payload.templates.every((template) => Array.isArray(template.responsibilities))).toBe(true);
+        expect(payload.templates.some((template) => template.id === 'implementer')).toBe(true);
+    });
+
+    it('creates and queries rating records through /v1/ratings endpoints', async () => {
+        const teamId = 'team-rating';
+
+        const create1 = await app.inject({
+            method: 'POST',
+            url: '/v1/ratings',
+            headers: { 'content-type': 'application/json', 'x-user-id': 'rater-1' },
+            payload: {
+                teamId,
+                roleId: 'implementer',
+                taskId: 'task-1',
+                userRating: 4,
+                systemRating: 5,
+                codeLines: 120,
+                commits: 3,
+                bugsCount: 1,
+                qualityScore: 88,
+                source: 'system',
+            },
+        });
+
+        expect(create1.statusCode).toBe(200);
+        expect(create1.json().rating.rating).toBe(4.5);
+
+        const create2 = await app.inject({
+            method: 'POST',
+            url: '/v1/ratings',
+            headers: { 'content-type': 'application/json', 'x-user-id': 'rater-2' },
+            payload: {
+                teamId,
+                roleId: 'qa-engineer',
+                rating: 3,
+                codeLines: 20,
+                commits: 2,
+                bugsCount: 0,
+                qualityScore: 76,
+                source: 'user',
+            },
+        });
+
+        expect(create2.statusCode).toBe(200);
+
+        const listTeam = await app.inject({
+            method: 'GET',
+            url: `/v1/ratings/${teamId}`,
+            headers: { 'x-user-id': 'rater-1' },
+        });
+        expect(listTeam.statusCode).toBe(200);
+        expect(listTeam.json().total).toBe(2);
+
+        const listRole = await app.inject({
+            method: 'GET',
+            url: `/v1/ratings/${teamId}/role/implementer`,
+            headers: { 'x-user-id': 'rater-1' },
+        });
+        expect(listRole.statusCode).toBe(200);
+        expect(listRole.json().total).toBe(1);
+        expect(listRole.json().ratings[0].roleId).toBe('implementer');
+
+        const analytics = await app.inject({
+            method: 'GET',
+            url: `/v1/ratings/${teamId}/analytics`,
+            headers: { 'x-user-id': 'rater-1' },
+        });
+
+        expect(analytics.statusCode).toBe(200);
+        const analyticsPayload = analytics.json();
+        expect(analyticsPayload.totalRatings).toBe(2);
+        expect(analyticsPayload.totalCodeLines).toBe(140);
+        expect(analyticsPayload.totalCommits).toBe(5);
+        expect(analyticsPayload.totalBugs).toBe(1);
+        expect(analyticsPayload.roleBreakdown).toHaveLength(2);
+    });
+
     it('reads legacy plain JSON role values while supporting encoded values', async () => {
         const userId = 'legacy-user';
         const legacyRole = {

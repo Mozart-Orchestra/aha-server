@@ -7,6 +7,7 @@ import { db } from "@/storage/db";
 import { log } from "@/utils/log";
 import { randomUUID } from "node:crypto";
 import * as privacyKit from "privacy-kit";
+import { calculateSystemRating, submitSystemRating, getRoleSystemRating } from "@/services/systemRatingService";
 
 /**
  * Custom Role Routes - User-defined Role Management API
@@ -88,6 +89,8 @@ const CustomRoleSchema = z.object({
     templateSource: z.string().optional(),
 
     visibility: RoleVisibilitySchema.optional().default("public"),
+    // Backward compatibility alias used by PRD clients.
+    isPublic: z.boolean().optional(),
     ownerId: z.string().optional(),
     createdAt: z.number().optional(),
     updatedAt: z.number().optional(),
@@ -154,23 +157,328 @@ const TeamScorecardSchema = z.object({
     lastReviewedAt: z.number().optional(),
 });
 
+const RatingRecordSchema = z.object({
+    id: z.string(),
+    teamId: z.string(),
+    roleId: z.string(),
+    taskId: z.string().optional(),
+    rating: z.number().min(1).max(5),
+    userRating: z.number().min(1).max(5).optional(),
+    masterRating: z.number().min(1).max(5).optional(),
+    systemRating: z.number().min(1).max(5).optional(),
+    codeLines: z.number().int().nonnegative().default(0),
+    commits: z.number().int().nonnegative().default(0),
+    bugsCount: z.number().int().nonnegative().default(0),
+    qualityScore: z.number().min(0).max(100).default(0),
+    source: ReviewSourceSchema.default("system"),
+    reviewerId: z.string(),
+    comment: z.string().max(1000).optional(),
+    createdAt: z.number(),
+});
+
+const CreateRatingInputSchema = z.object({
+    teamId: z.string(),
+    roleId: z.string(),
+    taskId: z.string().optional(),
+    userRating: z.number().min(1).max(5).optional(),
+    masterRating: z.number().min(1).max(5).optional(),
+    systemRating: z.number().min(1).max(5).optional(),
+    rating: z.number().min(1).max(5).optional(),
+    codeLines: z.number().int().nonnegative().optional().default(0),
+    commits: z.number().int().nonnegative().optional().default(0),
+    bugsCount: z.number().int().nonnegative().optional().default(0),
+    qualityScore: z.number().min(0).max(100).optional().default(0),
+    source: ReviewSourceSchema.optional().default("system"),
+    comment: z.string().max(1000).optional(),
+});
+
+const TeamRatingAnalyticsSchema = z.object({
+    teamId: z.string(),
+    totalRatings: z.number().int().nonnegative(),
+    averageRating: z.number().min(0).max(5),
+    totalCodeLines: z.number().int().nonnegative(),
+    totalCommits: z.number().int().nonnegative(),
+    totalBugs: z.number().int().nonnegative(),
+    averageQualityScore: z.number().min(0).max(100),
+    roleBreakdown: z.array(z.object({
+        roleId: z.string(),
+        totalRatings: z.number().int().nonnegative(),
+        averageRating: z.number().min(0).max(5),
+        totalCodeLines: z.number().int().nonnegative(),
+        totalCommits: z.number().int().nonnegative(),
+        totalBugs: z.number().int().nonnegative(),
+        averageQualityScore: z.number().min(0).max(100),
+    })),
+});
+
+const SystemRatingMetricsSchema = z.object({
+    roleId: z.string(),
+    teamId: z.string().optional(),
+    taskId: z.string().optional(),
+    codeLines: z.number().int().nonnegative().default(0),
+    commits: z.number().int().nonnegative().default(0),
+    bugsCount: z.number().int().nonnegative().default(0),
+    filesChanged: z.number().int().nonnegative().default(0),
+    reviewComments: z.number().int().nonnegative().default(0),
+    testCoverage: z.number().min(0).max(100).optional(),
+    persist: z.boolean().optional().default(false),
+});
+
 const RoleTemplateSchema = z.object({
     id: z.string(),
     title: z.string(),
     summary: z.string(),
     icon: z.string().optional(),
     category: z.string().optional(),
+    responsibilities: z.array(z.string()).default([]),
+    abilityBoundaries: z.array(z.string()).default([]),
+    handoffProtocol: z.array(z.string()).default([]),
+    protocol: z.array(z.string()).default([]),
 });
 
 const DEFAULT_ROLE_TEMPLATES: z.infer<typeof RoleTemplateSchema>[] = [
-    { id: "master", title: "Master", summary: "Team coordinator and task distributor", icon: "🎯", category: "management" },
-    { id: "orchestrator", title: "Orchestrator", summary: "Plans, delegates, and coordinates team workflows", icon: "🧭", category: "management" },
-    { id: "architect", title: "Architect", summary: "System design and architecture decisions", icon: "🏗️", category: "engineering" },
-    { id: "implementer", title: "Implementer", summary: "Code implementation and execution", icon: "⚙️", category: "engineering" },
-    { id: "reviewer", title: "Reviewer", summary: "Code review and quality assurance", icon: "🔍", category: "quality" },
-    { id: "qa", title: "QA", summary: "Testing and quality validation", icon: "✅", category: "quality" },
-    { id: "observer", title: "Observer", summary: "Progress monitoring and reporting", icon: "👁️", category: "support" },
-    { id: "user", title: "User", summary: "Human team member with full context", icon: "👤", category: "human" },
+    {
+        id: "master",
+        title: "Master",
+        summary: "Team coordinator and task distributor",
+        icon: "🎯",
+        category: "management",
+        responsibilities: ["Break requirements into scoped tasks", "Assign work based on role expertise"],
+        abilityBoundaries: ["Do not bypass validation gates when closing tasks"],
+        handoffProtocol: ["Confirm acceptance criteria before marking done"],
+        protocol: ["Keep board state and team status aligned"],
+    },
+    {
+        id: "orchestrator",
+        title: "Orchestrator",
+        summary: "Plans, delegates, and coordinates team workflows",
+        icon: "🧭",
+        category: "management",
+        responsibilities: ["Sequence parallel workstreams", "Resolve dependency and ordering conflicts"],
+        abilityBoundaries: ["Escalate scope changes to master/user before re-planning"],
+        handoffProtocol: ["Publish execution plan before implementation starts"],
+        protocol: ["Prefer smallest viable plan that unblocks delivery"],
+    },
+    {
+        id: "project-manager",
+        title: "Project Manager",
+        summary: "Tracks milestones, risks, and delivery commitments",
+        icon: "📋",
+        category: "management",
+        responsibilities: ["Track milestone burndown", "Maintain risk/mitigation log"],
+        abilityBoundaries: ["Do not rewrite technical implementation details"],
+        handoffProtocol: ["Escalate schedule risk with impact and options"],
+        protocol: ["Review timeline assumptions on every major update"],
+    },
+    {
+        id: "product-owner",
+        title: "Product Owner",
+        summary: "Owns requirements clarity and acceptance outcomes",
+        icon: "🧩",
+        category: "management",
+        responsibilities: ["Clarify user value and acceptance criteria", "Prioritize scope with business impact"],
+        abilityBoundaries: ["Do not directly merge code or bypass QA"],
+        handoffProtocol: ["Provide acceptance decision with rationale"],
+        protocol: ["Default to user-facing value over internal complexity"],
+    },
+    {
+        id: "business-analyst",
+        title: "Business Analyst",
+        summary: "Translates goals into measurable requirements",
+        icon: "📈",
+        category: "management",
+        responsibilities: ["Map user stories to metrics", "Capture assumptions and constraints"],
+        abilityBoundaries: ["Do not alter implementation branches directly"],
+        handoffProtocol: ["Share requirement deltas before implementation"],
+        protocol: ["Keep traceability from story to validation evidence"],
+    },
+    {
+        id: "architect",
+        title: "Architect",
+        summary: "System design and architecture decisions",
+        icon: "🏗️",
+        category: "engineering",
+        responsibilities: ["Define module boundaries and contracts", "Review technical tradeoffs"],
+        abilityBoundaries: ["Avoid shipping unreviewed large refactors alone"],
+        handoffProtocol: ["Document architecture decisions and constraints"],
+        protocol: ["Prefer backward-compatible interfaces for shared services"],
+    },
+    {
+        id: "solution-architect",
+        title: "Solution Architect",
+        summary: "Designs end-to-end technical solutions",
+        icon: "🧱",
+        category: "engineering",
+        responsibilities: ["Produce implementation-ready technical specs", "Ensure deployability across environments"],
+        abilityBoundaries: ["Do not skip validation for cross-service changes"],
+        handoffProtocol: ["Provide rollout/rollback notes with design"],
+        protocol: ["Design for observability and failure isolation first"],
+    },
+    {
+        id: "builder",
+        title: "Builder",
+        summary: "Builds and integrates scoped features",
+        icon: "🛠️",
+        category: "engineering",
+        responsibilities: ["Implement scoped tasks with small diffs", "Keep task status updated during execution"],
+        abilityBoundaries: ["Do not re-prioritize tasks without coordinator approval"],
+        handoffProtocol: ["Attach validation steps before review handoff"],
+        protocol: ["Escalate blockers quickly with actionable context"],
+    },
+    {
+        id: "implementer",
+        title: "Implementer",
+        summary: "Code implementation and execution",
+        icon: "⚙️",
+        category: "engineering",
+        responsibilities: ["Deliver code changes with focused scope", "Drive assigned tasks to completion"],
+        abilityBoundaries: ["Avoid broad rewrites without architecture sign-off"],
+        handoffProtocol: ["Signal ready-for-review with test evidence"],
+        protocol: ["Keep diffs readable and reversible"],
+    },
+    {
+        id: "framer",
+        title: "Framer",
+        summary: "Turns goals into implementation-ready technical slices",
+        icon: "🧠",
+        category: "engineering",
+        responsibilities: ["Frame work into actionable slices", "Prepare scaffolding for builders"],
+        abilityBoundaries: ["Do not self-approve major architecture changes"],
+        handoffProtocol: ["Align assumptions with architect before coding"],
+        protocol: ["Favor iterative delivery over big-bang design"],
+    },
+    {
+        id: "qa-engineer",
+        title: "QA Engineer",
+        summary: "Writes and executes verification suites",
+        icon: "✅",
+        category: "quality",
+        responsibilities: ["Validate acceptance criteria", "Stress edge cases and regressions"],
+        abilityBoundaries: ["Do not merge production changes directly"],
+        handoffProtocol: ["Provide reproducible bug reports and evidence"],
+        protocol: ["Treat missing tests as release risk"],
+    },
+    {
+        id: "qa",
+        title: "QA",
+        summary: "Quality validation support role",
+        icon: "🧪",
+        category: "quality",
+        responsibilities: ["Run smoke/regression checks", "Track defect lifecycle"],
+        abilityBoundaries: ["Do not redefine product scope"],
+        handoffProtocol: ["Route defects to owner with impact notes"],
+        protocol: ["Keep pass/fail evidence auditable"],
+    },
+    {
+        id: "reviewer",
+        title: "Reviewer",
+        summary: "Code review and quality assurance",
+        icon: "🔍",
+        category: "quality",
+        responsibilities: ["Review implementation correctness", "Flag risks and regressions early"],
+        abilityBoundaries: ["Do not silently change scope during review"],
+        handoffProtocol: ["Leave clear must-fix vs follow-up feedback"],
+        protocol: ["Prioritize correctness, safety, and test coverage"],
+    },
+    {
+        id: "researcher",
+        title: "Researcher",
+        summary: "Investigates technical options and references",
+        icon: "🔬",
+        category: "research",
+        responsibilities: ["Collect primary-source references", "Compare options with tradeoff matrix"],
+        abilityBoundaries: ["Do not make production code edits unless assigned"],
+        handoffProtocol: ["Deliver concise findings with source links"],
+        protocol: ["Call out confidence and unknowns explicitly"],
+    },
+    {
+        id: "scout",
+        title: "Scout",
+        summary: "Fast codebase reconnaissance and context gathering",
+        icon: "🛰️",
+        category: "research",
+        responsibilities: ["Locate relevant files and ownership", "Map current behavior quickly"],
+        abilityBoundaries: ["Read-only unless explicit implementation task"],
+        handoffProtocol: ["Return file/line references for follow-up"],
+        protocol: ["Optimize for speed and signal density"],
+    },
+    {
+        id: "observer",
+        title: "Observer",
+        summary: "Progress monitoring and reporting",
+        icon: "👁️",
+        category: "support",
+        responsibilities: ["Maintain execution timeline and status notes", "Surface drift between board and code"],
+        abilityBoundaries: ["Do not alter implementation behavior directly"],
+        handoffProtocol: ["Publish concise status snapshots to stakeholders"],
+        protocol: ["Report facts first, interpretation second"],
+    },
+    {
+        id: "scribe",
+        title: "Scribe",
+        summary: "Maintains project documentation and changelogs",
+        icon: "📝",
+        category: "support",
+        responsibilities: ["Update docs/readmes/changelogs", "Capture architecture and workflow decisions"],
+        abilityBoundaries: ["Avoid code changes outside documentation scope"],
+        handoffProtocol: ["Request technical context before finalizing docs"],
+        protocol: ["Keep docs aligned with shipped behavior"],
+    },
+    {
+        id: "technical-writer",
+        title: "Technical Writer",
+        summary: "Produces user-facing and API documentation",
+        icon: "📚",
+        category: "support",
+        responsibilities: ["Document API contracts and usage", "Create onboarding/how-to content"],
+        abilityBoundaries: ["Do not approve technical architecture changes"],
+        handoffProtocol: ["Tag code owners for doc accuracy review"],
+        protocol: ["Prefer examples that mirror real workflows"],
+    },
+    {
+        id: "spec-writer",
+        title: "Spec Writer",
+        summary: "Writes precise implementation specifications",
+        icon: "📐",
+        category: "support",
+        responsibilities: ["Draft technical specs and acceptance criteria", "Maintain requirement traceability"],
+        abilityBoundaries: ["Do not merge code while acting as spec role"],
+        handoffProtocol: ["Publish spec revisions with explicit delta notes"],
+        protocol: ["Keep specs testable and unambiguous"],
+    },
+    {
+        id: "product-designer",
+        title: "Product Designer",
+        summary: "Designs product interaction and visual systems",
+        icon: "🎨",
+        category: "design",
+        responsibilities: ["Define interaction patterns and states", "Ensure UX consistency across flows"],
+        abilityBoundaries: ["Do not ship final frontend behavior without review"],
+        handoffProtocol: ["Provide annotated design intent for implementers"],
+        protocol: ["Balance usability, clarity, and implementation effort"],
+    },
+    {
+        id: "ux-designer",
+        title: "UX Designer",
+        summary: "Focuses on usability and user journey quality",
+        icon: "🧭",
+        category: "design",
+        responsibilities: ["Validate information architecture", "Improve workflow friction points"],
+        abilityBoundaries: ["Do not bypass accessibility review"],
+        handoffProtocol: ["Share rationale for UX decisions with acceptance checks"],
+        protocol: ["Prioritize clarity and accessibility in interaction flows"],
+    },
+    {
+        id: "ux-researcher",
+        title: "UX Researcher",
+        summary: "Conducts discovery and usability research",
+        icon: "🧪",
+        category: "design",
+        responsibilities: ["Run qualitative/quantitative UX research", "Translate findings into product insights"],
+        abilityBoundaries: ["Do not overfit decisions to limited samples"],
+        handoffProtocol: ["Deliver findings with evidence level and confidence"],
+        protocol: ["Keep recommendations tied to observed behavior"],
+    },
 ];
 
 const ROLES_PREFIX = "roles.";
@@ -178,6 +486,7 @@ const ROLE_POOL_PREFIX = "role_pool.";
 const ROLE_REVIEW_PREFIX = "role_review.";
 const TEAM_REVIEW_PREFIX = "team_review.";
 const TEAM_SCORE_PREFIX = "team_score.";
+const TEAM_RATING_PREFIX = "rating_record.";
 
 type CustomRole = z.infer<typeof CustomRoleSchema>;
 type PublicRole = z.infer<typeof PublicRoleSchema>;
@@ -187,6 +496,8 @@ type RoleReview = z.infer<typeof RoleReviewSchema>;
 type TeamReviewInput = z.infer<typeof TeamReviewInputSchema>;
 type TeamReview = z.infer<typeof TeamReviewSchema>;
 type TeamScorecard = z.infer<typeof TeamScorecardSchema>;
+type RatingRecord = z.infer<typeof RatingRecordSchema>;
+type CreateRatingInput = z.infer<typeof CreateRatingInputSchema>;
 type SourceScoreTotals = z.infer<typeof SourceScoreTotalsSchema>;
 type SourceScoreInput = z.infer<typeof SourceScoreInputSchema>;
 
@@ -281,6 +592,7 @@ function normalizeRoleStats(input?: Partial<RoleStats>): RoleStats {
 
 function normalizeRole(role: Partial<CustomRole>, roleId: string, ownerId: string): CustomRole {
     const now = Date.now();
+    const visibility = role.visibility ?? (role.isPublic === false ? "private" : "public");
 
     return {
         id: roleId,
@@ -297,7 +609,8 @@ function normalizeRole(role: Partial<CustomRole>, roleId: string, ownerId: strin
         protocol: role.protocol || [],
         isTemplate: role.isTemplate ?? false,
         templateSource: role.templateSource,
-        visibility: role.visibility ?? "public",
+        visibility,
+        isPublic: visibility === "public",
         ownerId,
         createdAt: role.createdAt ?? now,
         updatedAt: role.updatedAt ?? now,
@@ -374,6 +687,32 @@ function parseTeamScorecard(value: string): TeamScorecard | null {
 
     const candidate = TeamScorecardSchema.safeParse(parsed);
     return candidate.success ? candidate.data : null;
+}
+
+function parseRatingRecord(value: string): RatingRecord | null {
+    const parsed = parseJson<unknown>(value);
+    if (!parsed) {
+        return null;
+    }
+
+    const candidate = RatingRecordSchema.safeParse(parsed);
+    return candidate.success ? candidate.data : null;
+}
+
+function resolveInputRating(input: CreateRatingInput): number {
+    if (input.rating) {
+        return input.rating;
+    }
+
+    const values = [input.userRating, input.masterRating, input.systemRating]
+        .filter((value): value is number => typeof value === "number");
+
+    if (values.length === 0) {
+        return 0;
+    }
+
+    const avg = values.reduce((sum, value) => sum + value, 0) / values.length;
+    return Number(avg.toFixed(3));
 }
 
 function toSourceScoreDelta(source: z.infer<typeof ReviewSourceSchema>, rating: number, scores?: SourceScoreInput): SourceScoreTotals {
@@ -497,6 +836,7 @@ async function syncRoleToPublicPool(role: CustomRole, ownerId: string): Promise<
         id: role.id,
         ownerId,
         visibility: "public",
+        isPublic: true,
         stats: normalizedStats,
         publishedAt: existing?.publishedAt || role.publishedAt || Date.now(),
         updatedAt: Date.now(),
@@ -547,6 +887,54 @@ export function roleRoutes(app: Fastify) {
         }
     }, async (request, reply) => {
         return reply.send({ roles: DEFAULT_ROLE_TEMPLATES });
+    });
+
+    // GET /v1/roles/public - Alias for /v1/roles/pool (PRD backward compatibility)
+    app.get("/v1/roles/public", {
+        preHandler: app.authenticate,
+        schema: {
+            querystring: z.object({
+                limit: z.coerce.number().int().min(1).max(200).default(100),
+                search: z.string().optional(),
+            }),
+            response: {
+                200: z.object({
+                    roles: z.array(PublicRoleSchema),
+                    total: z.number(),
+                }),
+                500: z.object({
+                    error: z.literal("Failed to list public roles")
+                })
+            }
+        }
+    }, async (request, reply) => {
+        // Delegate to /v1/roles/pool handler logic
+        const { limit, search } = request.query as { limit: number; search?: string };
+        try {
+            const caches = await db.simpleCache.findMany({
+                where: { key: { startsWith: ROLE_POOL_PREFIX } },
+                orderBy: { updatedAt: "desc" },
+                take: 1000
+            });
+            const normalizedSearch = search?.toLowerCase().trim();
+            const parsedRoles = caches
+                .map((entry) => parsePublicRole(entry.value))
+                .filter((role): role is PublicRole => Boolean(role))
+                .filter((role) => {
+                    if (!normalizedSearch) return true;
+                    const haystack = `${role.title} ${role.summary || ""} ${role.id}`.toLowerCase();
+                    return haystack.includes(normalizedSearch);
+                })
+                .sort((a, b) => {
+                    const ratingDiff = b.stats.averageRating - a.stats.averageRating;
+                    if (ratingDiff !== 0) return ratingDiff;
+                    return (b.stats.reviewCount - a.stats.reviewCount) || (b.updatedAt || 0) - (a.updatedAt || 0);
+                });
+            return reply.send({ roles: parsedRoles.slice(0, limit), total: parsedRoles.length });
+        } catch (error) {
+            log({ module: "role-routes", level: "error" }, `Failed to list public roles: ${error}`);
+            return reply.code(500).send({ error: "Failed to list public roles" });
+        }
     });
 
     // GET /v1/roles/pool - Public role pool ("角色池")
@@ -805,7 +1193,7 @@ export function roleRoutes(app: Fastify) {
             const role = normalizeRole({
                 ...roleData,
                 id: roleId,
-                visibility: roleData.visibility ?? "public",
+                visibility: roleData.visibility ?? (roleData.isPublic === false ? "private" : "public"),
             }, roleId, userId);
 
             await kvMutate({ uid: userId }, [{
@@ -1347,6 +1735,370 @@ export function roleRoutes(app: Fastify) {
         } catch (error) {
             log({ module: "role-routes", level: "error" }, `Failed to get team score: ${error}`);
             return reply.code(500).send({ error: "Failed to get team score" });
+        }
+    });
+
+    // POST /v1/ratings - Create a unified rating record (PRD compatibility)
+    app.post("/v1/ratings", {
+        preHandler: app.authenticate,
+        schema: {
+            body: CreateRatingInputSchema,
+            response: {
+                200: z.object({
+                    success: z.literal(true),
+                    rating: RatingRecordSchema,
+                }),
+                400: z.object({
+                    error: z.string(),
+                }),
+                500: z.object({
+                    error: z.literal("Failed to create rating"),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const reviewerId = request.userId;
+        const payload = request.body as CreateRatingInput;
+
+        try {
+            const ratingValue = resolveInputRating(payload);
+            if (!(ratingValue >= 1 && ratingValue <= 5)) {
+                return reply.code(400).send({
+                    error: "Provide rating or at least one of userRating/masterRating/systemRating",
+                });
+            }
+
+            const now = Date.now();
+            const record: RatingRecord = {
+                id: `rating-${randomUUID().slice(0, 10)}`,
+                teamId: payload.teamId,
+                roleId: payload.roleId,
+                taskId: payload.taskId,
+                rating: ratingValue,
+                userRating: payload.userRating,
+                masterRating: payload.masterRating,
+                systemRating: payload.systemRating,
+                codeLines: payload.codeLines ?? 0,
+                commits: payload.commits ?? 0,
+                bugsCount: payload.bugsCount ?? 0,
+                qualityScore: payload.qualityScore ?? 0,
+                source: payload.source ?? "system",
+                reviewerId,
+                comment: payload.comment,
+                createdAt: now,
+            };
+
+            await db.simpleCache.upsert({
+                where: { key: `${TEAM_RATING_PREFIX}${record.teamId}.${record.id}` },
+                update: {
+                    value: JSON.stringify(record),
+                },
+                create: {
+                    key: `${TEAM_RATING_PREFIX}${record.teamId}.${record.id}`,
+                    value: JSON.stringify(record),
+                },
+            });
+
+            return reply.send({
+                success: true,
+                rating: record,
+            });
+        } catch (error) {
+            log({ module: "role-routes", level: "error" }, `Failed to create rating: ${error}`);
+            return reply.code(500).send({ error: "Failed to create rating" });
+        }
+    });
+
+    // POST /v1/ratings/system/calculate - System auto-rating algorithm
+    app.post("/v1/ratings/system/calculate", {
+        preHandler: app.authenticate,
+        schema: {
+            body: SystemRatingMetricsSchema,
+            response: {
+                200: z.object({
+                    success: z.literal(true),
+                    result: z.object({
+                        rating: z.number().min(1).max(5),
+                        codeScore: z.number(),
+                        qualityScore: z.number(),
+                        systemScore: z.number(),
+                        breakdown: z.object({
+                            codeLinesScore: z.number(),
+                            commitsScore: z.number(),
+                            bugsScore: z.number(),
+                            qualityBonus: z.number(),
+                        }),
+                    }),
+                    persisted: z.boolean(),
+                }),
+                500: z.object({
+                    error: z.literal("Failed to calculate system rating"),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const payload = request.body as z.infer<typeof SystemRatingMetricsSchema>;
+
+        try {
+            const result = calculateSystemRating({
+                codeLines: payload.codeLines,
+                commits: payload.commits,
+                bugsCount: payload.bugsCount,
+                filesChanged: payload.filesChanged,
+                reviewComments: payload.reviewComments,
+                testCoverage: payload.testCoverage,
+            });
+
+            let persisted = false;
+            if (payload.persist) {
+                const persistResult = await submitSystemRating(payload.roleId, {
+                    codeLines: payload.codeLines,
+                    commits: payload.commits,
+                    bugsCount: payload.bugsCount,
+                    filesChanged: payload.filesChanged,
+                    reviewComments: payload.reviewComments,
+                    testCoverage: payload.testCoverage,
+                }, payload.teamId);
+                persisted = persistResult.success;
+            }
+
+            return reply.send({
+                success: true,
+                result,
+                persisted,
+            });
+        } catch (error) {
+            log({ module: "role-routes", level: "error" }, `Failed to calculate system rating: ${error}`);
+            return reply.code(500).send({ error: "Failed to calculate system rating" });
+        }
+    });
+
+    // GET /v1/ratings/system/role/:roleId - Snapshot system rating derived from role stats
+    app.get("/v1/ratings/system/role/:roleId", {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                roleId: z.string(),
+            }),
+            response: {
+                200: z.object({
+                    success: z.literal(true),
+                    result: z.object({
+                        rating: z.number().min(1).max(5),
+                        codeScore: z.number(),
+                        qualityScore: z.number(),
+                        systemScore: z.number(),
+                        breakdown: z.object({
+                            codeLinesScore: z.number(),
+                            commitsScore: z.number(),
+                            bugsScore: z.number(),
+                            qualityBonus: z.number(),
+                        }),
+                    }).nullable(),
+                }),
+                500: z.object({
+                    error: z.literal("Failed to get role system rating"),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const { roleId } = request.params as { roleId: string };
+
+        try {
+            const result = await getRoleSystemRating(roleId);
+            return reply.send({
+                success: true,
+                result,
+            });
+        } catch (error) {
+            log({ module: "role-routes", level: "error" }, `Failed to get role system rating: ${error}`);
+            return reply.code(500).send({ error: "Failed to get role system rating" });
+        }
+    });
+
+    // GET /v1/ratings/:teamId - Team rating history
+    app.get("/v1/ratings/:teamId", {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                teamId: z.string(),
+            }),
+            querystring: z.object({
+                limit: z.coerce.number().int().min(1).max(500).default(200),
+            }).optional(),
+            response: {
+                200: z.object({
+                    ratings: z.array(RatingRecordSchema),
+                    total: z.number(),
+                }),
+                500: z.object({
+                    error: z.literal("Failed to list ratings"),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const { teamId } = request.params as { teamId: string };
+        const { limit = 200 } = (request.query || {}) as { limit?: number };
+
+        try {
+            const rows = await db.simpleCache.findMany({
+                where: { key: { startsWith: `${TEAM_RATING_PREFIX}${teamId}.` } },
+                orderBy: { updatedAt: "desc" },
+                take: 2000,
+            });
+
+            const ratings = rows
+                .map((row) => parseRatingRecord(row.value))
+                .filter((record): record is RatingRecord => Boolean(record))
+                .sort((a, b) => b.createdAt - a.createdAt);
+
+            return reply.send({
+                ratings: ratings.slice(0, limit),
+                total: ratings.length,
+            });
+        } catch (error) {
+            log({ module: "role-routes", level: "error" }, `Failed to list ratings: ${error}`);
+            return reply.code(500).send({ error: "Failed to list ratings" });
+        }
+    });
+
+    // GET /v1/ratings/:teamId/role/:roleId - Role rating history within a team
+    app.get("/v1/ratings/:teamId/role/:roleId", {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                teamId: z.string(),
+                roleId: z.string(),
+            }),
+            querystring: z.object({
+                limit: z.coerce.number().int().min(1).max(500).default(200),
+            }).optional(),
+            response: {
+                200: z.object({
+                    ratings: z.array(RatingRecordSchema),
+                    total: z.number(),
+                }),
+                500: z.object({
+                    error: z.literal("Failed to list role ratings"),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const { teamId, roleId } = request.params as { teamId: string; roleId: string };
+        const { limit = 200 } = (request.query || {}) as { limit?: number };
+
+        try {
+            const rows = await db.simpleCache.findMany({
+                where: { key: { startsWith: `${TEAM_RATING_PREFIX}${teamId}.` } },
+                orderBy: { updatedAt: "desc" },
+                take: 2000,
+            });
+
+            const ratings = rows
+                .map((row) => parseRatingRecord(row.value))
+                .filter((record): record is RatingRecord => Boolean(record))
+                .filter((record) => record.roleId === roleId)
+                .sort((a, b) => b.createdAt - a.createdAt);
+
+            return reply.send({
+                ratings: ratings.slice(0, limit),
+                total: ratings.length,
+            });
+        } catch (error) {
+            log({ module: "role-routes", level: "error" }, `Failed to list role ratings: ${error}`);
+            return reply.code(500).send({ error: "Failed to list role ratings" });
+        }
+    });
+
+    // GET /v1/ratings/:teamId/analytics - Team rating analytics snapshot
+    app.get("/v1/ratings/:teamId/analytics", {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                teamId: z.string(),
+            }),
+            response: {
+                200: TeamRatingAnalyticsSchema,
+                500: z.object({
+                    error: z.literal("Failed to get rating analytics"),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const { teamId } = request.params as { teamId: string };
+
+        try {
+            const rows = await db.simpleCache.findMany({
+                where: { key: { startsWith: `${TEAM_RATING_PREFIX}${teamId}.` } },
+                orderBy: { updatedAt: "desc" },
+                take: 5000,
+            });
+
+            const ratings = rows
+                .map((row) => parseRatingRecord(row.value))
+                .filter((record): record is RatingRecord => Boolean(record));
+
+            if (ratings.length === 0) {
+                return reply.send({
+                    teamId,
+                    totalRatings: 0,
+                    averageRating: 0,
+                    totalCodeLines: 0,
+                    totalCommits: 0,
+                    totalBugs: 0,
+                    averageQualityScore: 0,
+                    roleBreakdown: [],
+                });
+            }
+
+            const totalRatings = ratings.length;
+            const totalRatingScore = ratings.reduce((sum, rating) => sum + rating.rating, 0);
+            const totalCodeLines = ratings.reduce((sum, rating) => sum + rating.codeLines, 0);
+            const totalCommits = ratings.reduce((sum, rating) => sum + rating.commits, 0);
+            const totalBugs = ratings.reduce((sum, rating) => sum + rating.bugsCount, 0);
+            const totalQuality = ratings.reduce((sum, rating) => sum + rating.qualityScore, 0);
+
+            const byRole = new Map<string, RatingRecord[]>();
+            for (const rating of ratings) {
+                const bucket = byRole.get(rating.roleId) || [];
+                bucket.push(rating);
+                byRole.set(rating.roleId, bucket);
+            }
+
+            const roleBreakdown = Array.from(byRole.entries())
+                .map(([roleId, roleRatings]) => {
+                    const count = roleRatings.length;
+                    const roleTotalRating = roleRatings.reduce((sum, rating) => sum + rating.rating, 0);
+                    const roleTotalCodeLines = roleRatings.reduce((sum, rating) => sum + rating.codeLines, 0);
+                    const roleTotalCommits = roleRatings.reduce((sum, rating) => sum + rating.commits, 0);
+                    const roleTotalBugs = roleRatings.reduce((sum, rating) => sum + rating.bugsCount, 0);
+                    const roleTotalQuality = roleRatings.reduce((sum, rating) => sum + rating.qualityScore, 0);
+
+                    return {
+                        roleId,
+                        totalRatings: count,
+                        averageRating: Number((roleTotalRating / count).toFixed(3)),
+                        totalCodeLines: roleTotalCodeLines,
+                        totalCommits: roleTotalCommits,
+                        totalBugs: roleTotalBugs,
+                        averageQualityScore: Number((roleTotalQuality / count).toFixed(3)),
+                    };
+                })
+                .sort((a, b) => b.averageRating - a.averageRating || b.totalRatings - a.totalRatings);
+
+            return reply.send({
+                teamId,
+                totalRatings,
+                averageRating: Number((totalRatingScore / totalRatings).toFixed(3)),
+                totalCodeLines,
+                totalCommits,
+                totalBugs,
+                averageQualityScore: Number((totalQuality / totalRatings).toFixed(3)),
+                roleBreakdown,
+            });
+        } catch (error) {
+            log({ module: "role-routes", level: "error" }, `Failed to get rating analytics: ${error}`);
+            return reply.code(500).send({ error: "Failed to get rating analytics" });
         }
     });
 
