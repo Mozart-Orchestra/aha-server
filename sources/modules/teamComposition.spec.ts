@@ -50,4 +50,48 @@ describe('generateTeamCompositionPlan', () => {
         expect(plan.teams[0]?.roleCounts.implementer).toBeGreaterThanOrEqual(1);
         expect(plan.teams[0]?.branchSuggestion.startsWith('feat/v2-')).toBe(true);
     });
+
+    it('builds version release gates with three-end checks for wow deployment', () => {
+        const plan = generateTeamCompositionPlan({
+            goal: '在 wow 上做 v1/v2 双轨发布，要求同版本三端调试后才能关分支',
+            mode: 'multi',
+            deploymentTarget: 'wow',
+        });
+
+        expect(plan.releaseGates.length).toBeGreaterThanOrEqual(2);
+        for (const gate of plan.releaseGates) {
+            expect(gate.completionRule).toContain('三端调试');
+            expect(gate.requiredChecks.map((check) => check.component)).toEqual([
+                'aha-cli',
+                'happy-server',
+                'kanban',
+            ]);
+            for (const check of gate.requiredChecks) {
+                expect(check.environments).toEqual(['uv1', 'uv2', 'wow']);
+                expect(check.status).toBe('pending');
+            }
+        }
+    });
+
+    it('attaches evoMap scores for each recommended team', () => {
+        const plan = generateTeamCompositionPlan({
+            goal: '多团队推进前后端与发布联调',
+            mode: 'multi',
+            evolutionSignals: {
+                readyPingRatio: 0.32,
+                coordinatorMessageRatio: 0.46,
+                deploymentIncidentRatio: 0.15,
+                historySampleSize: 180,
+            },
+        });
+
+        expect(plan.teams.length).toBeGreaterThan(0);
+        for (const team of plan.teams) {
+            expect(team.evoMap.score).toBeGreaterThanOrEqual(1);
+            expect(team.evoMap.score).toBeLessThanOrEqual(5);
+            expect(['S', 'A', 'B', 'C']).toContain(team.evoMap.tier);
+            expect(['up', 'flat', 'down']).toContain(team.evoMap.trend);
+            expect(team.evoMap.highlights.length).toBeGreaterThan(0);
+        }
+    });
 });

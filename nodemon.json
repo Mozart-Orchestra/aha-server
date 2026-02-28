@@ -1,0 +1,22 @@
+{
+  "ext": "ts,js,json",
+  "watch": ["./sources"],
+  "ignore": [
+    "./sources/**/*.spec.ts",
+    "./sources/**/*.test.ts",
+    "./node_modules/",
+    "./dist/",
+    "./.git/"
+  ],
+  "exec": "tsx --env-file=.env --env-file=.env.dev ./sources/main.ts",
+  "events": {
+    "restart": "echo \"Restarting server...\"",
+    "stop": "echo \"Server stopped\"",
+    "crash": "echo \"Server crashed, attempting restart...\""
+  },
+  "delay": 500,
+  "port": 0,
+  "signal": "SIGTERM",
+  "recursive": true,
+  "verbose": false
+}

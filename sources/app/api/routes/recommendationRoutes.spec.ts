@@ -274,9 +274,18 @@ async function buildApp(defaultUserId = 'user-1') {
     app.setSerializerCompiler(serializerCompiler);
 
     const typed = app.withTypeProvider<ZodTypeProvider>() as unknown as TypedFastify;
+
+    // Register authentication decorator that sets request.user from x-user-id header
     typed.decorate('authenticate', async (request: any) => {
         const headerUserId = request.headers['x-user-id'];
         request.user = { id: typeof headerUserId === 'string' ? headerUserId : defaultUserId };
+    });
+
+    // Register the authentication decorator as a hook
+    typed.addHook('preHandler', async (request: any) => {
+        if (request.authenticate) {
+            await request.authenticate(request);
+        }
     });
 
     recommendationRoutes(typed);

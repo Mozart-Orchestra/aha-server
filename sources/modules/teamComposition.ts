@@ -1,11 +1,18 @@
 export type VersionTrack = 'v1' | 'v2' | 'dual';
 export type TeamPlanMode = 'single' | 'multi';
-export type DeploymentTarget = 'wow' | 'local' | 'generic';
+export type DeploymentTarget = 'wow' | 'uv1' | 'uv2' | 'local' | 'generic';
+export type ReleaseEnvironment = 'uv1' | 'uv2' | 'wow' | 'local';
+export type TeamEvoTier = 'S' | 'A' | 'B' | 'C';
+export type TeamEvoTrend = 'up' | 'flat' | 'down';
 
 export interface TeamEvolutionSignals {
     readyPingRatio?: number;
     coordinatorMessageRatio?: number;
     deploymentIncidentRatio?: number;
+    idleStatusRatio?: number;
+    cliFocusRatio?: number;
+    serverFocusRatio?: number;
+    kanbanFocusRatio?: number;
     historySampleSize?: number;
 }
 
@@ -19,6 +26,13 @@ export interface TeamCompositionRequest {
     evolutionSignals?: TeamEvolutionSignals;
 }
 
+export interface TeamEvolutionMap {
+    score: number;
+    tier: TeamEvoTier;
+    trend: TeamEvoTrend;
+    highlights: string[];
+}
+
 export interface TeamPlanSlice {
     key: string;
     name: string;
@@ -26,8 +40,22 @@ export interface TeamPlanSlice {
     versionTrack: 'v1' | 'v2' | 'shared';
     branchSuggestion: string;
     roleCounts: Record<string, number>;
+    evoMap: TeamEvolutionMap;
     rationale: string[];
     risks: string[];
+}
+
+export interface VersionReleaseGateCheck {
+    component: 'aha-cli' | 'happy-server' | 'kanban';
+    environments: ReleaseEnvironment[];
+    status: 'pending' | 'passed' | 'failed';
+}
+
+export interface VersionReleaseGate {
+    versionTrack: 'v1' | 'v2' | 'shared';
+    branch: string;
+    completionRule: string;
+    requiredChecks: VersionReleaseGateCheck[];
 }
 
 export interface TeamCompositionPlan {
@@ -39,11 +67,14 @@ export interface TeamCompositionPlan {
     recommendations: string[];
     signalsUsed: Required<TeamEvolutionSignals>;
     teams: TeamPlanSlice[];
+    releaseGates: VersionReleaseGate[];
 }
 
 const READY_PING_HIGH = 0.25;
 const COORDINATOR_CHAT_HIGH = 0.4;
 const DEPLOY_INCIDENT_HIGH = 0.08;
+const IDLE_STATUS_HIGH = 0.35;
+const FOCUS_RATIO_STRONG = 0.1;
 
 function hasKeyword(text: string, keywords: string[]): boolean {
     return keywords.some((keyword) => text.includes(keyword));
@@ -53,7 +84,7 @@ function detectFocus(goal: string, context?: string): string[] {
     const text = `${goal} ${context || ''}`.toLowerCase();
     const focus = new Set<string>();
 
-    if (hasKeyword(text, ['deploy', '部署', '发布', 'ssh', 'wow', 'nginx', 'pm2', '上线', 'api/v2', 'webappv2'])) {
+    if (hasKeyword(text, ['deploy', '部署', '发布', 'ssh', 'wow', 'nginx', 'pm2', '上线', 'api/v2', 'webappv2', 'uv1', 'uv2'])) {
         focus.add('deployment');
     }
     if (hasKeyword(text, ['api', 'server', 'backend', 'route', 'prisma', 'redis', 'db', '数据库', '后端'])) {
@@ -120,6 +151,10 @@ function normalizeSignals(signals?: TeamEvolutionSignals): Required<TeamEvolutio
         readyPingRatio: Math.max(0, Math.min(1, signals?.readyPingRatio ?? 0)),
         coordinatorMessageRatio: Math.max(0, Math.min(1, signals?.coordinatorMessageRatio ?? 0)),
         deploymentIncidentRatio: Math.max(0, Math.min(1, signals?.deploymentIncidentRatio ?? 0)),
+        idleStatusRatio: Math.max(0, Math.min(1, signals?.idleStatusRatio ?? 0)),
+        cliFocusRatio: Math.max(0, Math.min(1, signals?.cliFocusRatio ?? 0)),
+        serverFocusRatio: Math.max(0, Math.min(1, signals?.serverFocusRatio ?? 0)),
+        kanbanFocusRatio: Math.max(0, Math.min(1, signals?.kanbanFocusRatio ?? 0)),
         historySampleSize: Math.max(0, Math.floor(signals?.historySampleSize ?? 0)),
     };
 }
@@ -145,6 +180,15 @@ function buildBranchSuggestion(versionTrack: 'v1' | 'v2' | 'shared', key: string
     return `feat/v1v2-${slug}`;
 }
 
+function emptyEvoMap(): TeamEvolutionMap {
+    return {
+        score: 3,
+        tier: 'B',
+        trend: 'flat',
+        highlights: ['等待历史信号回填以生成更精准评分'],
+    };
+}
+
 function buildSingleTeam(versionTrack: VersionTrack, inferredFocus: string[]): TeamPlanSlice {
     const backendHeavy = inferredFocus.includes('backend');
     const frontendHeavy = inferredFocus.includes('frontend');
@@ -165,9 +209,12 @@ function buildSingleTeam(versionTrack: VersionTrack, inferredFocus: string[]): T
             orchestrator: orchestrationHeavy ? 1 : 0,
             architect: backendHeavy || frontendHeavy || qualityHeavy ? 1 : 0,
             implementer: Math.min(3, implementerCount),
+            builder: backendHeavy ? 1 : 0,
+            framer: frontendHeavy ? 1 : 0,
             'qa-engineer': qualityHeavy ? 1 : 0,
             researcher: researchHeavy ? 1 : 0,
         }),
+        evoMap: emptyEvoMap(),
         rationale: [
             '单团队模式优先缩短沟通链路',
             '按后端/前端负载自动调整 implementer 数量',
@@ -180,6 +227,8 @@ function buildSingleTeam(versionTrack: VersionTrack, inferredFocus: string[]): T
 
 function buildDualTrackTeams(inferredFocus: string[]): TeamPlanSlice[] {
     const deploymentHeavy = inferredFocus.includes('deployment');
+    const backendHeavy = inferredFocus.includes('backend');
+    const frontendHeavy = inferredFocus.includes('frontend');
 
     const v1Guard: TeamPlanSlice = {
         key: 'v1-guard',
@@ -191,8 +240,11 @@ function buildDualTrackTeams(inferredFocus: string[]): TeamPlanSlice[] {
             master: 1,
             architect: 1,
             implementer: 1,
+            builder: backendHeavy ? 1 : 0,
+            framer: frontendHeavy ? 1 : 0,
             'qa-engineer': 1,
         }),
+        evoMap: emptyEvoMap(),
         rationale: [
             'V1 以稳定性为先，避免引入多余角色噪声',
             '以最小团队守住兼容与回归验证',
@@ -213,9 +265,12 @@ function buildDualTrackTeams(inferredFocus: string[]): TeamPlanSlice[] {
             orchestrator: 1,
             architect: 1,
             implementer: inferredFocus.includes('frontend') && inferredFocus.includes('backend') ? 3 : 2,
+            builder: backendHeavy ? 1 : 0,
+            framer: frontendHeavy ? 1 : 0,
             'qa-engineer': 1,
             researcher: inferredFocus.includes('research') ? 1 : 0,
         }),
+        evoMap: emptyEvoMap(),
         rationale: [
             'V2 组承接主要功能增量与实验性改造',
             '保留 orchestrator 处理并行任务编排',
@@ -240,6 +295,7 @@ function buildDualTrackTeams(inferredFocus: string[]): TeamPlanSlice[] {
                 implementer: 1,
                 'qa-engineer': 1,
             }),
+            evoMap: emptyEvoMap(),
             rationale: [
                 '将发布联调从功能开发中解耦，缩短问题定位路径',
             ],
@@ -270,6 +326,7 @@ function buildMultiTeams(versionTrack: VersionTrack, inferredFocus: string[]): T
             'qa-engineer': 1,
             implementer: 1,
         }),
+        evoMap: emptyEvoMap(),
         rationale: [
             '拆分质量护栏组可降低主实现组被测试上下文打断',
         ],
@@ -281,12 +338,53 @@ function buildMultiTeams(versionTrack: VersionTrack, inferredFocus: string[]): T
     return [core, qualityBridge];
 }
 
+function clamp(value: number, min: number, max: number): number {
+    return Math.min(max, Math.max(min, value));
+}
+
+function applyComponentSignals(
+    teams: TeamPlanSlice[],
+    signals: Required<TeamEvolutionSignals>,
+    recommendations: string[]
+): void {
+    if (signals.serverFocusRatio >= FOCUS_RATIO_STRONG) {
+        for (const team of teams) {
+            if (team.versionTrack === 'v2' || team.versionTrack === 'shared') {
+                team.roleCounts.builder = Math.max(team.roleCounts.builder || 0, 1);
+            }
+            team.roleCounts = trimZeroRoles(team.roleCounts);
+        }
+        recommendations.push('日志显示后端关注度较高，已为 V2/共享团队补齐 builder 角色。');
+    }
+
+    if (signals.kanbanFocusRatio >= FOCUS_RATIO_STRONG) {
+        for (const team of teams) {
+            if (team.versionTrack === 'v2' || team.versionTrack === 'shared') {
+                team.roleCounts.framer = Math.max(team.roleCounts.framer || 0, 1);
+            }
+            team.roleCounts = trimZeroRoles(team.roleCounts);
+        }
+        recommendations.push('日志显示 Kanban 前端关注度较高，已为 V2/共享团队补齐 framer 角色。');
+    }
+
+    if (signals.cliFocusRatio >= FOCUS_RATIO_STRONG / 2) {
+        for (const team of teams) {
+            team.roleCounts.implementer = Math.max(team.roleCounts.implementer || 0, 1);
+            team.roleCounts['qa-engineer'] = Math.max(team.roleCounts['qa-engineer'] || 0, 1);
+            team.roleCounts = trimZeroRoles(team.roleCounts);
+        }
+        recommendations.push('日志显示 CLI 协作链路活跃，已强化 implementer + qa-engineer 基线配置。');
+    }
+}
+
 function applyEvolutionSignals(
     teams: TeamPlanSlice[],
     signals: Required<TeamEvolutionSignals>,
     recommendations: string[]
 ): void {
-    const noisy = signals.readyPingRatio >= READY_PING_HIGH || signals.coordinatorMessageRatio >= COORDINATOR_CHAT_HIGH;
+    const noisy = signals.readyPingRatio >= READY_PING_HIGH
+        || signals.coordinatorMessageRatio >= COORDINATOR_CHAT_HIGH
+        || signals.idleStatusRatio >= IDLE_STATUS_HIGH;
 
     if (noisy) {
         for (const team of teams) {
@@ -303,7 +401,7 @@ function applyEvolutionSignals(
             team.roleCounts = trimZeroRoles(team.roleCounts);
         }
 
-        recommendations.push('检测到历史“ready/standby”噪声偏高，已自动收敛协调角色数量并禁用 observer 默认编入。');
+        recommendations.push('检测到历史 ready/standby 噪声偏高，已自动收敛协调角色数量并禁用 observer 默认编入。');
     }
 
     if (signals.deploymentIncidentRatio >= DEPLOY_INCIDENT_HIGH) {
@@ -319,6 +417,137 @@ function applyEvolutionSignals(
     if (signals.historySampleSize < 20) {
         recommendations.push('历史样本较少，建议先按当前编组执行 1~2 个迭代并回填数据后再自动进化。');
     }
+}
+
+function buildTeamEvoMap(
+    team: TeamPlanSlice,
+    signals: Required<TeamEvolutionSignals>,
+    deploymentTarget: DeploymentTarget
+): TeamEvolutionMap {
+    const implementerCount = team.roleCounts.implementer || 0;
+    const builderCount = team.roleCounts.builder || 0;
+    const framerCount = team.roleCounts.framer || 0;
+    const qaCount = team.roleCounts['qa-engineer'] || 0;
+    const architectCount = team.roleCounts.architect || 0;
+    const orchestratorCount = team.roleCounts.orchestrator || 0;
+
+    const idlePenalty = signals.idleStatusRatio * 18 + signals.readyPingRatio * 10;
+    const incidentPenalty = signals.deploymentIncidentRatio * 28;
+    const coordinatorPenalty = signals.coordinatorMessageRatio * 16;
+
+    const deliveryScore = clamp(
+        45 + (implementerCount + builderCount + framerCount) * 10 - idlePenalty,
+        0,
+        100
+    );
+    const qualityScore = clamp(
+        40 + qaCount * 22 + architectCount * 15 - incidentPenalty,
+        0,
+        100
+    );
+    const collaborationScore = clamp(
+        65 + orchestratorCount * 6 - coordinatorPenalty - signals.readyPingRatio * 8,
+        0,
+        100
+    );
+    const releaseScore = clamp(
+        48 + qaCount * 18 + architectCount * 14 + (deploymentTarget === 'wow' ? 8 : 0) - incidentPenalty,
+        0,
+        100
+    );
+
+    const average100 = (deliveryScore + qualityScore + collaborationScore + releaseScore) / 4;
+    const score = Number(clamp(average100 / 20, 1, 5).toFixed(1));
+    const tier: TeamEvoTier = score >= 4.5 ? 'S' : score >= 4 ? 'A' : score >= 3.2 ? 'B' : 'C';
+
+    let trend: TeamEvoTrend = 'flat';
+    if (signals.deploymentIncidentRatio >= 0.12 || signals.idleStatusRatio >= 0.45) {
+        trend = 'down';
+    } else if (signals.deploymentIncidentRatio <= 0.05 && signals.idleStatusRatio <= 0.25) {
+        trend = 'up';
+    }
+
+    const highlights: string[] = [];
+    if (qaCount > 0 && architectCount > 0) {
+        highlights.push('质量护栏完整（architect + qa-engineer）');
+    }
+    if (builderCount > 0 || framerCount > 0) {
+        highlights.push('覆盖三端实现角色（builder/framer）');
+    }
+    if (signals.deploymentIncidentRatio >= DEPLOY_INCIDENT_HIGH) {
+        highlights.push('部署风险偏高，建议加密 uv1/uv2 预发布回归');
+    }
+    if (highlights.length === 0) {
+        highlights.push('建议继续回填评分与交付数据，提升 EvoMap 可信度');
+    }
+
+    return {
+        score,
+        tier,
+        trend,
+        highlights,
+    };
+}
+
+function attachTeamEvoMap(
+    teams: TeamPlanSlice[],
+    signals: Required<TeamEvolutionSignals>,
+    deploymentTarget: DeploymentTarget,
+    recommendations: string[]
+): void {
+    for (const team of teams) {
+        team.evoMap = buildTeamEvoMap(team, signals, deploymentTarget);
+    }
+
+    if (teams.some((team) => team.evoMap.tier === 'C')) {
+        recommendations.push('EvoMap 显示存在 C 级团队，建议先补齐角色与发布门禁再推进大规模并行开发。');
+    }
+}
+
+function resolveEnvironmentMatrix(target: DeploymentTarget): ReleaseEnvironment[] {
+    if (target === 'wow') {
+        return ['uv1', 'uv2', 'wow'];
+    }
+    if (target === 'uv1') {
+        return ['uv1'];
+    }
+    if (target === 'uv2') {
+        return ['uv2'];
+    }
+    if (target === 'local') {
+        return ['local'];
+    }
+    return ['uv2', 'wow'];
+}
+
+function buildReleaseGates(teams: TeamPlanSlice[], deploymentTarget: DeploymentTarget): VersionReleaseGate[] {
+    const seen = new Set<'v1' | 'v2' | 'shared'>();
+    const orderedTracks: Array<'v1' | 'v2' | 'shared'> = ['v1', 'v2', 'shared'];
+    for (const team of teams) {
+        seen.add(team.versionTrack);
+    }
+
+    const environments = resolveEnvironmentMatrix(deploymentTarget);
+    const gates: VersionReleaseGate[] = [];
+
+    for (const track of orderedTracks) {
+        if (!seen.has(track)) {
+            continue;
+        }
+        const branch = track === 'shared' ? 'release/v1v2-integration' : `release/${track}-integration`;
+        gates.push({
+            versionTrack: track,
+            branch,
+            completionRule: '同版本分支必须完成三端调试（aha-cli/happy-server/kanban）后才能关闭分支',
+            requiredChecks: [
+                { component: 'aha-cli', environments, status: 'pending' },
+                { component: 'happy-server', environments, status: 'pending' },
+                { component: 'kanban', environments, status: 'pending' },
+            ],
+        });
+    }
+
+    return gates;
 }
 
 export function generateTeamCompositionPlan(request: TeamCompositionRequest): TeamCompositionPlan {
@@ -337,8 +566,12 @@ export function generateTeamCompositionPlan(request: TeamCompositionRequest): Te
     const constraints: string[] = [];
     if (deploymentTarget === 'wow') {
         constraints.push('wow 当前采用 V1(3005,/webapp) + V2(3006,/api/v2,/webappv2) 双通道部署。');
+        constraints.push('发布验证顺序固定为 uv1 -> uv2 -> wow。');
+    } else if (deploymentTarget === 'uv1' || deploymentTarget === 'uv2') {
+        constraints.push(`${deploymentTarget} 作为预发布环境，仅允许对应阶段调试通过后再推进下一阶段。`);
     }
     constraints.push('默认关闭 observer 的自动编入，避免团队状态噪声放大。');
+    constraints.push('同一版本分支必须完成 aha-cli/happy-server/kanban 三端调试后，才可标记完成。');
 
     const recommendations: string[] = [];
 
@@ -346,12 +579,15 @@ export function generateTeamCompositionPlan(request: TeamCompositionRequest): Te
         ? buildMultiTeams(versionTrack, inferredFocus)
         : [buildSingleTeam(versionTrack, inferredFocus)];
 
+    applyComponentSignals(initialTeams, signals, recommendations);
     applyEvolutionSignals(initialTeams, signals, recommendations);
 
     const teams = initialTeams.slice(0, maxTeams);
     if (initialTeams.length > maxTeams) {
         recommendations.push(`已根据 maxTeams=${maxTeams} 截断建议团队数量。`);
     }
+
+    attachTeamEvoMap(teams, signals, deploymentTarget, recommendations);
 
     if (deploymentTarget === 'wow' && versionTrack === 'dual') {
         recommendations.push('发布顺序建议：先 V2 灰度验证，再执行 V1 回归，最后统一刷新 Nginx/PM2 观测。');
@@ -366,5 +602,6 @@ export function generateTeamCompositionPlan(request: TeamCompositionRequest): Te
         recommendations,
         signalsUsed: signals,
         teams,
+        releaseGates: buildReleaseGates(teams, deploymentTarget),
     };
 }

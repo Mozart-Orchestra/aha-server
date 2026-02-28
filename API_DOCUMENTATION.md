@@ -26,6 +26,9 @@
 15. [Roles](#15-roles)
 16. [Ratings](#16-ratings)
 17. [OpenAPI / Swagger](#17-openapi--swagger)
+18. [V1/V2 API Compatibility](#18-v1v2-api-compatibility)
+19. [Troubleshooting Guide](#19-troubleshooting-guide)
+20. [V6 Features](#20-v6-features)
 
 ---
 
@@ -1211,6 +1214,545 @@ paths:
 
 ---
 
+## 18. V1/V2 API Compatibility
+
+### Architecture Overview
+
+The Aha system supports **V1 and V2 API endpoints** running simultaneously:
+- **V1 API**: `http://localhost:3005` (production baseline)
+- **V2 API**: `http://localhost:3005/api/v2` (rating system endpoints)
+
+**Deployment**:
+- V1 Server: Port 3005 (PM2: `happy-server`)
+- V2 Server: Port 3006 (PM2: `happy-server-v2`)
+
+### Automatic Fallback Mechanism
+
+The Kanban client implements **automatic V1↔V2 fallback** for seamless migration:
+
+#### Implementation Details
+
+```typescript
+// Location: kanban/sources/sync/apiRoles.ts
+
+// Step 1: Generate candidate endpoints
+function getRatingApiBaseCandidates(apiEndpoint: string): string[] {
+    const base = apiEndpoint.replace(/\/+$/, '');
+    if (base.includes('/api/v2')) {
+        return [base];  // V2 endpoint already specified
+    }
+    return [base, `${base}/api/v2`];  // Try V1 first, fallback to V2
+}
+
+// Step 2: Build URL candidates for each endpoint
+function buildRatingUrlCandidates(apiEndpoint: string, path: string): string[] {
+    const bases = getRatingApiBaseCandidates(apiEndpoint);
+    return bases.map(base => `${base}${path}`);
+}
+
+// Step 3: Try each candidate with automatic fallback
+async function fetchJsonWithStatusFallback<T>(
+    urlCandidates: string[],
+    options?: RequestInit
+): Promise<T> {
+    for (const url of urlCandidates) {
+        try {
+            const response = await fetch(url, options);
+
+            // Auto-fallback on 404 or 405 (endpoint not found)
+            if (response.status === 404 || response.status === 405) {
+                continue;  // Try next candidate
+            }
+
+            if (!response.ok) {
+                throw new Error(`Request failed: ${response.status}`);
+            }
+
+            return await response.json() as T;
+        } catch (error) {
+            // Continue to next candidate on error
+            continue;
+        }
+    }
+    throw new Error('All API endpoints failed');
+}
+```
+
+#### Usage Example
+
+```typescript
+// Example: Fetch role ratings with V1→V2 fallback
+const apiEndpoint = 'http://localhost:3005';  // V1 base URL
+const urlCandidates = buildRatingUrlCandidates(
+    apiEndpoint,
+    '/v1/roles/role-abc/ratings'
+);
+
+// Tries in order:
+// 1. http://localhost:3005/v1/roles/role-abc/ratings (V1)
+// 2. http://localhost:3005/api/v2/v1/roles/role-abc/ratings (V2)
+
+const ratings = await fetchJsonWithStatusFallback<RoleRating[]>(urlCandidates);
+```
+
+### Fallback Behavior
+
+| Endpoint Status | Action | Retry? |
+|----------------|--------|--------|
+| 200 OK | Return response | ✅ Complete |
+| 404 Not Found | Try next candidate | 🔄 Retry |
+| 405 Method Not Allowed | Try next candidate | 🔄 Retry |
+| 500 Server Error | Try next candidate | 🔄 Retry |
+| All candidates failed | Throw error | ❌ Fail |
+
+### Rating API Endpoints with Fallback
+
+The following rating endpoints use V1/V2 fallback:
+
+1. **Role Ratings**: `GET /v1/roles/:id/ratings`
+2. **Team Ratings**: `GET /v1/teams/:teamId/ratings`
+3. **Rating Analytics**: `GET /v1/ratings/:teamId/analytics`
+4. **System Rating**: `POST /v1/ratings/system/calculate`
+
+### Migration Path
+
+**Phase 1**: V1 and V2 coexist
+- V1 provides baseline features
+- V2 adds rating system endpoints
+- Clients fallback from V1→V2 for new features
+
+**Phase 2**: Gradual migration
+- New clients default to V2 endpoints
+- Legacy clients continue using V1
+- Both versions supported in parallel
+
+**Phase 3**: V1 deprecation (future)
+- V1 endpoints deprecated
+- All clients migrated to V2
+- V1 server shutdown
+
+### Testing V1/V2 Compatibility
+
+Run the closed-loop integration test:
+
+```bash
+# From project root
+npm run v1v2:closed-loop
+
+# This script:
+# 1. Starts V1 server (port 3005)
+# 2. Starts V2 server (port 3006)
+# 3. Tests V1→V2 fallback for rating endpoints
+# 4. Verifies data consistency
+```
+
+### Documentation References
+
+- **V1/V2 Architecture**: `/DOC/ADR_ROLE_RATING_SYSTEM.md`
+- **API Implementation**: `/kanban/sources/sync/apiRoles.ts`
+- **Test Suite**: `/kanban/sources/sync/apiRoles.test.ts`
+- **Closed-Loop Script**: `/scripts/v1v2_closed_loop.sh`
+
+---
+
+## 19. Troubleshooting Guide
+
+### Common V1/V2 Migration Issues
+
+#### Issue 1: 404 Errors on Rating Endpoints
+
+**Symptom**: `GET /v1/roles/:id/ratings` returns 404
+
+**Cause**: V1 server doesn't have rating endpoints, only V2
+
+**Solution**:
+```typescript
+// Ensure fallback is enabled
+const urlCandidates = buildRatingUrlCandidates(
+  'http://localhost:3005',  // V1 base
+  '/v1/roles/role-123/ratings'
+);
+// Will try: V1 endpoint first, then V2 endpoint
+```
+
+#### Issue 2: CORS Errors During Migration
+
+**Symptom**: CORS preflight failures when switching between V1/V2
+
+**Solution**: Ensure both servers have matching CORS configurations:
+```javascript
+// V1 and V2 server config should match
+app.register(cors, {
+  origin: ['https://top1vibe.com', 'http://localhost:3005'],
+  credentials: true
+});
+```
+
+#### Issue 3: Authentication Token Incompatibility
+
+**Symptom**: 401 Unauthorized when switching API versions
+
+**Cause**: Tokens issued by V1 may not be valid for V2 endpoints
+
+**Solution**: Use version-agnostic token validation:
+```typescript
+// Both V1 and V2 should validate tokens the same way
+const token = req.headers.authorization?.replace('Bearer ', '');
+const user = await verifyToken(token);  // Shared verification
+```
+
+#### Issue 4: Data Format Differences
+
+**Symptom**: V2 returns different field names than V1
+
+**Example**:
+```json
+// V1 format
+{ "averageRating": 4.5 }
+
+// V2 format (different field name)
+{ "avgRating": 4.5 }
+```
+
+**Solution**: Use transformation layer:
+```typescript
+function normalizeRating(response: any) {
+  return {
+    averageRating: response.averageRating || response.avgRating,
+    // ... other fields
+  };
+}
+```
+
+### Performance Optimization Tips
+
+#### Tip 1: Cache Fallback Results
+
+```typescript
+const fallbackCache = new Map();
+
+async function fetchWithCachedFallback(urlCandidates: string[]) {
+  const cacheKey = urlCandidates.join(',');
+  if (fallbackCache.has(cacheKey)) {
+    return fallbackCache.get(cacheKey);
+  }
+
+  const result = await fetchJsonWithStatusFallback(urlCandidates);
+  fallbackCache.set(cacheKey, result);
+  setTimeout(() => fallbackCache.delete(cacheKey), 60000); // 60s TTL
+
+  return result;
+}
+```
+
+#### Tip 2: Prioritize V2 for New Features
+
+```typescript
+function getRatingApiBaseCandidates(apiEndpoint: string): string[] {
+  const base = apiEndpoint.replace(/\/+$/, '');
+  if (base.includes('/api/v2')) {
+    return [base];
+  }
+  // For new features, try V2 first
+  return [`${base}/api/v2`, base];  // V2 first for new features
+}
+```
+
+### Debugging Commands
+
+```bash
+# Check V1 server health
+curl http://localhost:3005/health
+
+# Check V2 server health
+curl http://localhost:3006/health
+
+# Test V1 rating endpoint (should 404)
+curl -I http://localhost:3005/v1/roles/test/ratings
+
+# Test V2 rating endpoint (should 200 or 401)
+curl -I http://localhost:3006/api/v2/v1/roles/test/ratings
+
+# Run compatibility test
+npm run v1v2:closed-loop
+
+# Check server logs
+pm2 logs happy-server
+pm2 logs happy-server-v2
+```
+
+### Getting Help
+
+- **Team Channel**: @master for task assignments
+- **Documentation**: `/DOC/ADR_ROLE_RATING_SYSTEM.md`
+- **Implementation**: `/kanban/sources/sync/apiRoles.ts`
+- **Tests**: `/kanban/sources/sync/apiRoles.test.ts`
+
+---
+
 **Last Updated:** 2026-02-28
 **API Version:** 1.0.0
-**Documentation Version:** 3.0.0
+**Documentation Version:** 3.3.0 (Added V6 Release Gates & Team Evolution Score)
+
+---
+
+## 20. V6 Features
+
+### 20.1 Release Gates API
+
+Version gate enforcement API for three-endpoint synchronization.
+
+#### GET /api/v2/release-gates
+
+Get release gate status for current branch.
+
+**Response (200):**
+```json
+{
+  "versionTrack": "v1" | "v2" | "shared",
+  "branch": "dev1119-v1v2-core-iteration",
+  "requiredChecks": ["aha-cli", "happy-server", "kanban"],
+  "environments": ["uv1", "uv2", "wow"],
+  "completionRule": "同版本三端调试全通过才可完成分支",
+  "status": "pending" | "passing" | "failing",
+  "checks": {
+    "aha-cli": {
+      "passed": true,
+      "timestamp": 1740700000000,
+      "commit": "abc123"
+    },
+    "happy-server": {
+      "passed": true,
+      "timestamp": 1740700000000,
+      "commit": "def456"
+    },
+    "kanban": {
+      "passed": true,
+      "timestamp": 1740700000000,
+      "commit": "ghi789"
+    }
+  }
+}
+```
+
+#### POST /api/v2/release-gates/trigger
+
+Manually trigger release gate checks.
+
+**Request Body:**
+```json
+{
+  "environments": ["uv1", "uv2", "wow"]
+}
+```
+
+**Response (200):**
+```json
+{
+  "taskid": "gate-check-123",
+  "status": "processing",
+  "expectedCompletion": "2026-02-28T16:30:00Z"
+}
+```
+
+---
+
+### 20.2 Team Evolution Score API
+
+Team evolution scoring API with Dianping-style (大众点评) metrics.
+
+#### GET /api/v2/teams/evolution
+
+Get evolution scores for all teams.
+
+**Query Parameters:**
+- `limit` (number, optional, default `20`)
+- `sort` (string, optional: `score`, `trend`, `tier`)
+
+**Response (200):**
+```json
+{
+  "teams": [
+    {
+      "teamId": "team-123",
+      "teamName": "EvoMap Agents",
+      "evolutionScore": 4.7,
+      "tier": "A",
+      "trend": "up",
+      "highlights": ["Excellent coordination", "Quick iteration"],
+      "signals": {
+        "idleStatusRatio": 0.12,
+        "cliFocusRatio": 0.35,
+        "serverFocusRatio": 0.42,
+        "kanbanFocusRatio": 0.28,
+        "readyPingRatio": 0.15,
+        "coordinatorMessageRatio": 0.38,
+        "deploymentIncidentRatio": 0.05,
+        "historySampleSize": 152
+      },
+      "scoreComponents": {
+        "responsiveness": 4.8,
+        "focusDistribution": 4.5,
+        "coordination": 4.9,
+        "stability": 4.6
+      }
+    }
+  ],
+  "total": 3
+}
+```
+
+#### GET /api/v2/teams/:teamId/evolution
+
+Get evolution score for a specific team.
+
+**Response (200):**
+```json
+{
+  "teamId": "team-123",
+  "teamName": "EvoMap Agents",
+  "evolutionScore": 4.7,
+  "tier": "A",
+  "trend": "up",
+  "highlights": ["Excellent coordination", "Quick iteration"],
+  "signals": {
+    "idleStatusRatio": 0.12,
+    "cliFocusRatio": 0.35,
+    "serverFocusRatio": 0.42,
+    "kanbanFocusRatio": 0.28,
+    "readyPingRatio": 0.15,
+    "coordinatorMessageRatio": 0.38,
+    "deploymentIncidentRatio": 0.05,
+    "historySampleSize": 152
+  }
+}
+```
+
+#### GET /api/v2/teams/evolution/tiers
+
+Get team tier distribution.
+
+**Response (200):**
+```json
+{
+  "tiers": {
+    "S": 0,
+    "A": 2,
+    "B": 1,
+    "C": 0
+  },
+  "averageScore": 4.3
+}
+```
+
+#### GET /api/v2/teams/evolution/trends
+
+Get team evolution trends over time.
+
+**Query Parameters:**
+- `period` (string, optional: `7d`, `14d`, `30d`)
+- `teamId` (string, optional)
+
+**Response (200):**
+```json
+{
+  "teamId": "team-123",
+  "trendData": [
+    {
+      "date": "2026-02-21",
+      "score": 4.5,
+      "tier": "B"
+    },
+    {
+      "date": "2026-02-22",
+      "score": 4.6,
+      "tier": "B"
+    },
+    {
+      "date": "2026-02-28",
+      "score": 4.7,
+      "tier": "A"
+    }
+  ],
+  "overallTrend": "up"
+}
+```
+
+---
+
+### 20.3 Deployment Pipeline Status
+
+#### GET /api/v2/deployment/pipeline
+
+Get deployment pipeline status across all environments.
+
+**Response (200):**
+```json
+{
+  "uv1": {
+    "status": "healthy",
+    "version": "v2.0.1",
+    "lastDeploy": "2026-02-28T15:00:00Z",
+    "testsPassed": true
+  },
+  "uv2": {
+    "status": "healthy",
+    "version": "v2.0.1",
+    "lastDeploy": "2026-02-28T15:15:00Z",
+    "testsPassed": true
+  },
+  "wow": {
+    "status": "healthy",
+    "versions": {
+      "v1": { "port": 3005, "running": true },
+      "v2": { "port": 3006, "running": true }
+    },
+    "lastDeploy": "2026-02-28T15:30:00Z"
+  }
+}
+```
+
+---
+
+### 20.4 Multi-Team Composition API
+
+#### POST /api/v2/teams/compose
+
+Automatically compose teams based on task requirements.
+
+**Request Body:**
+```json
+{
+  "requirements": {
+    "skillTypes": ["typescript", "react", "api"],
+    "teamSize": 5,
+    "timeline": "2 weeks"
+  },
+  "signals": {
+    "idleStatusRatio": 0.12,
+    "readyPingRatio": 0.15,
+    "coordinatorMessageRatio": 0.38
+  }
+}
+```
+
+**Response (200):**
+```json
+{
+  "compositionId": "comp-123",
+  "teams": [
+    {
+      "teamId": "team-123",
+      "teamName": "EvoMap Agents",
+      "roles": ["master", "architect", "implementer", "implementer", "observer"],
+      "evolutionScore": 4.7,
+      "tier": "A",
+      "matchScore": 0.92
+    }
+  ],
+  "recommendations": [
+    "Consider adding QA engineer for V2 deployment",
+    "Team shows strong coordination - good for complex tasks"
+  ]
+}
+```

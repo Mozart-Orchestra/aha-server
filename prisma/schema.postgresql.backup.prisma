@@ -360,4 +360,7 @@ model UserKVStore {
 
     @@unique([accountId, key])
     @@index([accountId])
+    @@index([key])
+    @@index([updatedAt(sort: Desc)])
+    @@index([key, updatedAt(sort: Desc)])
 }

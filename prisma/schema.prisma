@@ -360,4 +360,24 @@ model UserKVStore {
 
     @@unique([accountId, key])
     @@index([accountId])
+    @@index([key])
+    @@index([updatedAt(sort: Desc)])
+    @@index([key, updatedAt(sort: Desc)])
+}
+
+//
+// V5 - Intelligent Search with pgvector
+//
+
+model RoleEmbedding {
+    id          String   @id @default(cuid())
+    accountId   String
+    roleKey     String   // References UserKVStore.key (format: "roles.<roleId>")
+    description String   // Plain text description for search (not encrypted)
+    embedding   String   // JSON array of floats (vector embedding)
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+
+    @@unique([accountId, roleKey])
+    @@index([accountId])
 }

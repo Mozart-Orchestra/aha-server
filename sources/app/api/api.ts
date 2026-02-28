@@ -29,6 +29,10 @@ import { teamManagementRoutes } from "./routes/teamManagementRoutes";
 import { roleRoutes } from "./routes/roleRoutes";
 import { channelRoutes } from "./routes/channelRoutes";
 import { teamCompositionRoutes } from "./routes/teamCompositionRoutes";
+import { recommendationRoutes } from "./routes/recommendationRoutes";
+import { searchRoutes } from "./routes/searchRoutes";
+import { suggestionRoutes } from "./routes/suggestionRoutes";
+import { insightsRoutes } from "./routes/insightsRoutes";
 import { getCorsConfig } from "./utils/corsConfig";
 import { getDefaultRateLimitConfig } from "./utils/rateLimitConfig";
 
@@ -171,6 +175,10 @@ export async function startApi() {
     roleRoutes(typed);
     channelRoutes(typed);
     teamCompositionRoutes(typed);
+    recommendationRoutes(typed);
+    searchRoutes(typed);
+    suggestionRoutes(typed);
+    insightsRoutes(typed);
 
     // Start HTTP 
     const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3005;

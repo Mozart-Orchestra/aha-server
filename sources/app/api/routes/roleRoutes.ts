@@ -2297,6 +2297,18 @@ export function roleRoutes(app: Fastify) {
                         sharedAt: z.number(),
                         sharedBy: z.string()
                     })
+                }),
+                401: z.object({
+                    success: z.boolean(),
+                    error: z.string()
+                }),
+                404: z.object({
+                    success: z.boolean(),
+                    error: z.string()
+                }),
+                500: z.object({
+                    success: z.boolean(),
+                    error: z.string()
                 })
             }
         }
@@ -2323,7 +2335,7 @@ export function roleRoutes(app: Fastify) {
 
             await kvMutate({
                 uid: userId
-            }, {
+            }, [{
                 key: shareKey,
                 value: JSON.stringify({
                     roleId,
@@ -2331,14 +2343,16 @@ export function roleRoutes(app: Fastify) {
                     permission,
                     sharedAt,
                     sharedBy: userId
-                })
-            });
+                }),
+                version: -1
+            }]);
 
             // Increment share count
             const countKey = `${ROLE_SHARE_COUNT_PREFIX}${roleId}`;
             const existingCount = await kvGet({ uid: userId }, countKey);
-            const newCount = (existingCount ? JSON.parse(existingCount).count : 0) + 1;
-            await kvMutate({ uid: userId }, { key: countKey, value: JSON.stringify({ count: newCount }) });
+            const parsedCount = existingCount ? decodeKVJson<{ count?: number }>(existingCount.value) : null;
+            const newCount = (parsedCount?.count ?? 0) + 1;
+            await kvMutate({ uid: userId }, [{ key: countKey, value: JSON.stringify({ count: newCount }), version: -1 }]);
 
             return reply.send({
                 success: true,
@@ -2375,6 +2389,14 @@ export function roleRoutes(app: Fastify) {
                         permission: z.string(),
                         sharedAt: z.number()
                     }))
+                }),
+                401: z.object({
+                    success: z.boolean(),
+                    error: z.string()
+                }),
+                500: z.object({
+                    success: z.boolean(),
+                    error: z.string()
                 })
             }
         }
@@ -2420,6 +2442,14 @@ export function roleRoutes(app: Fastify) {
                 200: z.object({
                     success: z.boolean(),
                     roles: z.array(z.any())
+                }),
+                401: z.object({
+                    success: z.boolean(),
+                    error: z.string()
+                }),
+                500: z.object({
+                    success: z.boolean(),
+                    error: z.string()
                 })
             }
         }
@@ -2434,7 +2464,8 @@ export function roleRoutes(app: Fastify) {
             // Get user's team ID from session or settings
             const userSettingsKey = "settings";
             const userSettings = await kvGet({ uid: userId }, userSettingsKey);
-            const userTeamId = userSettings ? JSON.parse(userSettings).teamId : null;
+            const parsedSettings = userSettings ? decodeKVJson<{ teamId?: string }>(userSettings.value) : null;
+            const userTeamId = parsedSettings?.teamId ?? null;
 
             if (!userTeamId) {
                 return reply.send({ success: true, roles: [] });
@@ -2464,8 +2495,12 @@ export function roleRoutes(app: Fastify) {
                 const roleKey = `${ROLES_PREFIX}${share.roleId}`;
                 const roleData = await kvGet({ uid: userId }, roleKey);
                 if (roleData) {
+                    const parsedRoleData = parseRole(roleData.value);
+                    if (!parsedRoleData) {
+                        continue;
+                    }
                     roles.push({
-                        ...JSON.parse(roleData),
+                        ...parsedRoleData,
                         shareInfo: {
                             permission: share.permission,
                             sharedAt: share.sharedAt
@@ -2503,6 +2538,14 @@ export function roleRoutes(app: Fastify) {
                         viewCount: z.number().optional(),
                         useCount: z.number().optional()
                     })
+                }),
+                401: z.object({
+                    success: z.boolean(),
+                    error: z.string()
+                }),
+                500: z.object({
+                    success: z.boolean(),
+                    error: z.string()
                 })
             }
         }
@@ -2517,7 +2560,8 @@ export function roleRoutes(app: Fastify) {
 
             const countKey = `${ROLE_SHARE_COUNT_PREFIX}${roleId}`;
             const countData = await kvGet({ uid: userId }, countKey);
-            const shareCount = countData ? JSON.parse(countData).count : 0;
+            const parsedCount = countData ? decodeKVJson<{ count?: number }>(countData.value) : null;
+            const shareCount = parsedCount?.count ?? 0;
 
             return reply.send({
                 success: true,
