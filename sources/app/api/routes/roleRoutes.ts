@@ -8,6 +8,8 @@ import { log } from "@/utils/log";
 import { randomUUID } from "node:crypto";
 import * as privacyKit from "privacy-kit";
 import { calculateSystemRating, submitSystemRating, getRoleSystemRating } from "@/services/systemRatingService";
+import { ApiErrors, sendErrorResponse } from "@/errors/errorHandler";
+import { ErrorCode } from "@/errors/errorCodes";
 
 /**
  * Custom Role Routes - User-defined Role Management API
@@ -1242,10 +1244,10 @@ export function roleRoutes(app: Fastify) {
                 return reply.send(publicRole);
             }
 
-            return reply.code(404).send({ error: "Role not found" });
-        } catch (error) {
+            return sendErrorResponse(reply, ApiErrors.roleNotFound(id));
+        } catch (error: any) {
             log({ module: "role-routes", level: "error" }, `Failed to get role: ${error}`);
-            return reply.code(500).send({ error: "Failed to get role" });
+            return sendErrorResponse(reply, error);
         }
     });
 
@@ -1278,7 +1280,7 @@ export function roleRoutes(app: Fastify) {
             const roleId = roleData.id || generateRoleId();
             const existing = await kvGet({ uid: userId }, `${ROLES_PREFIX}${roleId}`);
             if (existing) {
-                return reply.code(409).send({ error: "Role with this ID already exists" });
+                return sendErrorResponse(reply, ApiErrors.duplicateEntry("id", roleId));
             }
 
             const role = normalizeRole({
@@ -1298,9 +1300,9 @@ export function roleRoutes(app: Fastify) {
 
             log({ module: "role-routes", roleId }, "Custom role created");
             return reply.send({ success: true, role });
-        } catch (error) {
+        } catch (error: any) {
             log({ module: "role-routes", level: "error" }, `Failed to create role: ${error}`);
-            return reply.code(500).send({ error: "Failed to create role" });
+            return sendErrorResponse(reply, error);
         }
     });
 
@@ -1407,7 +1409,7 @@ export function roleRoutes(app: Fastify) {
         try {
             const existing = await loadUserRole(userId, id);
             if (!existing) {
-                return reply.code(404).send({ error: "Role not found" });
+                return sendErrorResponse(reply, ApiErrors.roleNotFound(id));
             }
 
             await kvMutate({ uid: userId }, [{
@@ -1428,9 +1430,9 @@ export function roleRoutes(app: Fastify) {
 
             log({ module: "role-routes", roleId: id }, "Custom role deleted");
             return reply.send({ success: true });
-        } catch (error) {
+        } catch (error: any) {
             log({ module: "role-routes", level: "error" }, `Failed to delete role: ${error}`);
-            return reply.code(500).send({ error: "Failed to delete role" });
+            return sendErrorResponse(reply, error);
         }
     });
 
@@ -2262,5 +2264,271 @@ export function roleRoutes(app: Fastify) {
         }
     }, async (request, reply) => {
         return reply.send({ templates: DEFAULT_ROLE_TEMPLATES });
+    });
+
+    // ============================================================
+    // V5-COLLABORATION-001: Cross-Team Role Sharing
+    // ============================================================
+
+    const ROLE_SHARE_PREFIX = "role_share.";
+    const ROLE_SHARE_COUNT_PREFIX = "role_share_count.";
+
+    /**
+     * POST /v1/roles/:roleId/share
+     * Share a role with another team
+     */
+    app.post("/v1/roles/:roleId/share", {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                roleId: z.string()
+            }),
+            body: z.object({
+                targetTeamId: z.string(),
+                permission: z.enum(["view", "use", "edit"]).default("use")
+            }),
+            response: {
+                200: z.object({
+                    success: z.boolean(),
+                    share: z.object({
+                        roleId: z.string(),
+                        targetTeamId: z.string(),
+                        permission: z.string(),
+                        sharedAt: z.number(),
+                        sharedBy: z.string()
+                    })
+                })
+            }
+        }
+    }, async (request, reply) => {
+        try {
+            const { roleId } = request.params as { roleId: string };
+            const { targetTeamId, permission } = request.body as { targetTeamId: string; permission: string };
+            const userId = (request as any).user?.id;
+
+            if (!userId) {
+                return reply.status(401).send({ success: false, error: "Unauthorized" });
+            }
+
+            // Verify the role exists and user has access
+            const roleKey = `${ROLES_PREFIX}${roleId}`;
+            const role = await kvGet({ uid: userId }, roleKey);
+
+            if (!role) {
+                return reply.status(404).send({ success: false, error: "Role not found" });
+            }
+
+            const shareKey = `${ROLE_SHARE_PREFIX}${roleId}.${targetTeamId}`;
+            const sharedAt = Date.now();
+
+            await kvMutate({
+                uid: userId
+            }, {
+                key: shareKey,
+                value: JSON.stringify({
+                    roleId,
+                    targetTeamId,
+                    permission,
+                    sharedAt,
+                    sharedBy: userId
+                })
+            });
+
+            // Increment share count
+            const countKey = `${ROLE_SHARE_COUNT_PREFIX}${roleId}`;
+            const existingCount = await kvGet({ uid: userId }, countKey);
+            const newCount = (existingCount ? JSON.parse(existingCount).count : 0) + 1;
+            await kvMutate({ uid: userId }, { key: countKey, value: JSON.stringify({ count: newCount }) });
+
+            return reply.send({
+                success: true,
+                share: {
+                    roleId,
+                    targetTeamId,
+                    permission,
+                    sharedAt,
+                    sharedBy: userId
+                }
+            });
+        } catch (error) {
+            log({ module: "role-routes", level: "error" }, `Failed to share role: ${error}`);
+            return reply.status(500).send({ success: false, error: "Failed to share role" });
+        }
+    });
+
+    /**
+     * GET /v1/roles/:roleId/shared-teams
+     * Get teams this role is shared with
+     */
+    app.get("/v1/roles/:roleId/shared-teams", {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                roleId: z.string()
+            }),
+            response: {
+                200: z.object({
+                    success: z.boolean(),
+                    shares: z.array(z.object({
+                        roleId: z.string(),
+                        targetTeamId: z.string(),
+                        permission: z.string(),
+                        sharedAt: z.number()
+                    }))
+                })
+            }
+        }
+    }, async (request, reply) => {
+        try {
+            const { roleId } = request.params as { roleId: string };
+            const userId = (request as any).user?.id;
+
+            if (!userId) {
+                return reply.status(401).send({ success: false, error: "Unauthorized" });
+            }
+
+            // List all shares for this role
+            const sharePrefix = `${ROLE_SHARE_PREFIX}${roleId}.`;
+            const shares = await kvList({ uid: userId }, { prefix: sharePrefix, limit: 100 });
+
+            const shareList = shares.items.map(item => {
+                try {
+                    return JSON.parse(item.value);
+                } catch {
+                    return null;
+                }
+            }).filter(Boolean);
+
+            return reply.send({
+                success: true,
+                shares: shareList
+            });
+        } catch (error) {
+            log({ module: "role-routes", level: "error" }, `Failed to get shared teams: ${error}`);
+            return reply.status(500).send({ success: false, error: "Failed to get shared teams" });
+        }
+    });
+
+    /**
+     * GET /v1/roles/shared-with-me
+     * Get roles shared with current user's team
+     */
+    app.get("/v1/roles/shared-with-me", {
+        preHandler: app.authenticate,
+        schema: {
+            response: {
+                200: z.object({
+                    success: z.boolean(),
+                    roles: z.array(z.any())
+                })
+            }
+        }
+    }, async (request, reply) => {
+        try {
+            const userId = (request as any).user?.id;
+
+            if (!userId) {
+                return reply.status(401).send({ success: false, error: "Unauthorized" });
+            }
+
+            // Get user's team ID from session or settings
+            const userSettingsKey = "settings";
+            const userSettings = await kvGet({ uid: userId }, userSettingsKey);
+            const userTeamId = userSettings ? JSON.parse(userSettings).teamId : null;
+
+            if (!userTeamId) {
+                return reply.send({ success: true, roles: [] });
+            }
+
+            // Find all roles shared with this team
+            const allShares = await kvList({ uid: userId }, { prefix: ROLE_SHARE_PREFIX, limit: 1000 });
+            const sharedRoles = allShares.items
+                .map(item => {
+                    try {
+                        return JSON.parse(item.value);
+                    } catch {
+                        return null;
+                    }
+                })
+                .filter(share => share && share.targetTeamId === userTeamId)
+                .map(share => ({
+                    roleId: share.roleId,
+                    permission: share.permission,
+                    sharedAt: share.sharedAt,
+                    sharedBy: share.sharedBy
+                }));
+
+            // Fetch role details
+            const roles = [];
+            for (const share of sharedRoles) {
+                const roleKey = `${ROLES_PREFIX}${share.roleId}`;
+                const roleData = await kvGet({ uid: userId }, roleKey);
+                if (roleData) {
+                    roles.push({
+                        ...JSON.parse(roleData),
+                        shareInfo: {
+                            permission: share.permission,
+                            sharedAt: share.sharedAt
+                        }
+                    });
+                }
+            }
+
+            return reply.send({
+                success: true,
+                roles
+            });
+        } catch (error) {
+            log({ module: "role-routes", level: "error" }, `Failed to get shared roles: ${error}`);
+            return reply.status(500).send({ success: false, error: "Failed to get shared roles" });
+        }
+    });
+
+    /**
+     * GET /v1/roles/:roleId/usage-stats
+     * Get role usage statistics (reuse count)
+     */
+    app.get("/v1/roles/:roleId/usage-stats", {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                roleId: z.string()
+            }),
+            response: {
+                200: z.object({
+                    success: z.boolean(),
+                    stats: z.object({
+                        roleId: z.string(),
+                        shareCount: z.number(),
+                        viewCount: z.number().optional(),
+                        useCount: z.number().optional()
+                    })
+                })
+            }
+        }
+    }, async (request, reply) => {
+        try {
+            const { roleId } = request.params as { roleId: string };
+            const userId = (request as any).user?.id;
+
+            if (!userId) {
+                return reply.status(401).send({ success: false, error: "Unauthorized" });
+            }
+
+            const countKey = `${ROLE_SHARE_COUNT_PREFIX}${roleId}`;
+            const countData = await kvGet({ uid: userId }, countKey);
+            const shareCount = countData ? JSON.parse(countData).count : 0;
+
+            return reply.send({
+                success: true,
+                stats: {
+                    roleId,
+                    shareCount
+                }
+            });
+        } catch (error) {
+            log({ module: "role-routes", level: "error" }, `Failed to get usage stats: ${error}`);
+            return reply.status(500).send({ success: false, error: "Failed to get usage stats" });
+        }
     });
 }
