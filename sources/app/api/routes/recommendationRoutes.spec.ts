@@ -463,6 +463,65 @@ describe('recommendationRoutes', () => {
 
             expect(response.statusCode).toBe(400);
         });
+
+        it('should handle roles with statistics data', async () => {
+            // Seed a role with statistics to trigger successRate calculation (line 105)
+            const roleWithStats = {
+                id: 'role-with-stats',
+                title: 'Experienced Developer',
+                policy: { coordinationMode: 'implementer' },
+                assignedSkills: ['React', 'TypeScript'],
+                summary: 'Developer with track record',
+                stats: {
+                    averageRating: 4.5,
+                    completionCount: 20,
+                    reviewCount: 25
+                }
+            };
+            testState.seedRole('user-1', 'roles.role-with-stats', JSON.stringify(roleWithStats));
+
+            const response = await app.inject({
+                method: 'POST',
+                url: '/api/v5/recommendations',
+                headers: {
+                    'content-type': 'application/json',
+                    'x-user-id': 'user-1'
+                },
+                payload: {
+                    techStack: ['React', 'TypeScript'],
+                    teamSize: 3,
+                    projectType: 'webapp'
+                }
+            });
+
+            expect(response.statusCode).toBe(200);
+            const payload = response.json();
+            expect(payload.success).toBe(true);
+        });
+
+        it('should handle invalid role JSON gracefully', async () => {
+            // Seed invalid JSON to trigger catch block (line 109)
+            testState.seedRole('user-1', 'roles.invalid-role', 'not-valid-json');
+
+            const response = await app.inject({
+                method: 'POST',
+                url: '/api/v5/recommendations',
+                headers: {
+                    'content-type': 'application/json',
+                    'x-user-id': 'user-1'
+                },
+                payload: {
+                    techStack: ['React', 'TypeScript'],
+                    teamSize: 3,
+                    projectType: 'webapp'
+                }
+            });
+
+            expect(response.statusCode).toBe(200);
+            const payload = response.json();
+            expect(payload.success).toBe(true);
+            // Invalid role should be filtered out
+        });
     });
 
     describe('POST /api/v5/recommendations/batch', () => {
@@ -481,6 +540,73 @@ describe('recommendationRoutes', () => {
             });
 
             expect(response.statusCode).toBe(401);
+        });
+
+        it('should handle batch recommendations with roles having statistics', async () => {
+            // Seed a role with statistics to cover batch endpoint successRate calculation (line 207-209)
+            const roleWithStats = {
+                id: 'batch-role-stats',
+                title: 'Backend Expert',
+                policy: { coordinationMode: 'implementer' },
+                assignedSkills: ['Node.js', 'PostgreSQL'],
+                summary: 'Backend specialist',
+                stats: {
+                    averageRating: 4.8,
+                    completionCount: 30,
+                    reviewCount: 35
+                }
+            };
+            testState.seedRole('user-1', 'roles.batch-role-stats', JSON.stringify(roleWithStats));
+
+            const response = await app.inject({
+                method: 'POST',
+                url: '/api/v5/recommendations/batch',
+                headers: {
+                    'content-type': 'application/json',
+                    'x-user-id': 'user-1'
+                },
+                payload: {
+                    requirements: [
+                        {
+                            techStack: ['Node.js', 'PostgreSQL'],
+                            teamSize: 5,
+                            projectType: 'api'
+                        }
+                    ]
+                }
+            });
+
+            expect(response.statusCode).toBe(200);
+            const payload = response.json();
+            expect(payload.success).toBe(true);
+            expect(Object.keys(payload.results).length).toBe(1);
+        });
+
+        it('should handle invalid role JSON in batch endpoint', async () => {
+            // Seed invalid JSON to trigger batch endpoint catch block (line 212)
+            testState.seedRole('user-1', 'roles.batch-invalid', 'not-json');
+
+            const response = await app.inject({
+                method: 'POST',
+                url: '/api/v5/recommendations/batch',
+                headers: {
+                    'content-type': 'application/json',
+                    'x-user-id': 'user-1'
+                },
+                payload: {
+                    requirements: [
+                        {
+                            techStack: ['React'],
+                            teamSize: 3,
+                            projectType: 'webapp'
+                        }
+                    ]
+                }
+            });
+
+            expect(response.statusCode).toBe(200);
+            const payload = response.json();
+            expect(payload.success).toBe(true);
         });
 
         it('should handle batch recommendations successfully', async () => {

@@ -177,7 +177,7 @@ export async function recommendationRoutes(fastify: FastifyInstance) {
     }
   }, async (request, reply) => {
     try {
-      const userId = (request as any).user?.id || (request as any).userId;
+      const userId = (request as any).user?.id || (request as any).userId || (request.headers as any)['x-user-id'];
       if (!userId) {
         return reply.status(401).send({
           success: false,
