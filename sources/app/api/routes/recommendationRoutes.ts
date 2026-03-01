@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { RecommendationEngine, ProjectRequirement, Role, RoleRecommendation } from '../../../services/ai/RecommendationEngine';
 import { kvList } from '@/app/kv/kvList';
 import { kvMutate } from '@/app/kv/kvMutate';
+import { auth } from '@/app/auth/auth';
 import { log } from '@/utils/log';
 
 // 请求 schema
@@ -45,6 +46,33 @@ const RecommendationResponseSchema = z.object({
   }))
 });
 
+async function resolveUserId(request: any): Promise<string | null> {
+  const requestUserId = request?.user?.id || request?.userId;
+  if (typeof requestUserId === 'string' && requestUserId.trim().length > 0) {
+    return requestUserId;
+  }
+
+  const headerUserId = request?.headers?.['x-user-id'];
+  if (typeof headerUserId === 'string' && headerUserId.trim().length > 0) {
+    return headerUserId;
+  }
+
+  const authHeader = request?.headers?.authorization;
+  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.slice(7).trim();
+    if (!token) {
+      return null;
+    }
+
+    const verified = await auth.verifyToken(token);
+    if (verified?.userId) {
+      return verified.userId;
+    }
+  }
+
+  return null;
+}
+
 export async function recommendationRoutes(fastify: FastifyInstance) {
   const engine = new RecommendationEngine();
 
@@ -74,8 +102,7 @@ export async function recommendationRoutes(fastify: FastifyInstance) {
       };
 
       // 从数据库获取可用角色
-      // Support both authenticated user and x-user-id header for flexibility
-      const userId = (request as any).user?.id || (request as any).userId || (request.headers as any)['x-user-id'];
+      const userId = await resolveUserId(request);
       if (!userId) {
         return reply.status(401).send({
           success: false,
@@ -177,7 +204,7 @@ export async function recommendationRoutes(fastify: FastifyInstance) {
     }
   }, async (request, reply) => {
     try {
-      const userId = (request as any).user?.id || (request as any).userId || (request.headers as any)['x-user-id'];
+      const userId = await resolveUserId(request);
       if (!userId) {
         return reply.status(401).send({
           success: false,
@@ -273,8 +300,7 @@ export async function recommendationRoutes(fastify: FastifyInstance) {
     }
   }, async (request, reply) => {
     try {
-      // Support both authenticated user and x-user-id header for flexibility
-      const userId = (request as any).user?.id || (request as any).userId || (request.headers as any)['x-user-id'];
+      const userId = await resolveUserId(request);
       if (!userId) {
         return reply.status(401).send({
           success: false,
@@ -402,8 +428,7 @@ export async function recommendationRoutes(fastify: FastifyInstance) {
     }
   }, async (request, reply) => {
     try {
-      // Support both authenticated user and x-user-id header for flexibility
-      const userId = (request as any).user?.id || (request as any).userId || (request.headers as any)['x-user-id'];
+      const userId = await resolveUserId(request);
       if (!userId) {
         return reply.status(401).send({
           success: false,
