@@ -1,6 +1,6 @@
 import fastify from "fastify";
 import { log, logger } from "@/utils/log";
-import { serializerCompiler, validatorCompiler, ZodTypeProvider } from "fastify-type-provider-zod";
+import { jsonSchemaTransform, serializerCompiler, validatorCompiler, ZodTypeProvider } from "fastify-type-provider-zod";
 import { onShutdown } from "@/utils/shutdown";
 import { Fastify } from "./types";
 import { authRoutes } from "./routes/authRoutes";
@@ -113,7 +113,8 @@ export async function startApi() {
                     bearerAuth: []
                 }
             ]
-        }
+        },
+        transform: jsonSchemaTransform
     });
 
     await app.register(await import('@fastify/swagger-ui'), {

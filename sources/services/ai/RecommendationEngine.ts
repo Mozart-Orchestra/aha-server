@@ -8,6 +8,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { log } from '@/utils/log';
 
 const anthropic = new Anthropic();
 
@@ -50,18 +51,39 @@ export class RecommendationEngine {
     availableRoles: Role[],
     maxRecommendations: number = 5
   ): Promise<RoleRecommendation[]> {
+    if (availableRoles.length === 0) {
+      return [];
+    }
+
+    if (!process.env.ANTHROPIC_API_KEY) {
+      log({ module: 'recommendation-engine', level: 'warn' }, 'ANTHROPIC_API_KEY missing, using heuristic recommendations');
+      return this.recommendRolesWithHeuristics(requirement, availableRoles, maxRecommendations);
+    }
+
+    try {
     // Step 1: 使用 Claude 分析项目需求
     const projectAnalysis = await this.analyzeProjectRequirement(requirement);
 
     // Step 2: 计算每个角色的匹配度
     const recommendations = await Promise.all(
-      availableRoles.map(role => this.calculateMatchScore(projectAnalysis, role))
+      availableRoles.map(async (role) => {
+        try {
+          return await this.calculateMatchScore(projectAnalysis, role);
+        } catch (error) {
+          log({ module: 'recommendation-engine', level: 'warn' }, `Claude scoring failed for role ${role.id}, fallback to heuristic`);
+          return this.buildHeuristicRecommendation(requirement, role);
+        }
+      })
     );
 
     // Step 3: 排序并返回 top N 推荐
     return recommendations
       .sort((a, b) => b.matchScore - a.matchScore)
       .slice(0, maxRecommendations);
+    } catch (error) {
+      log({ module: 'recommendation-engine', level: 'warn' }, 'Claude analysis failed, fallback to heuristic recommendations');
+      return this.recommendRolesWithHeuristics(requirement, availableRoles, maxRecommendations);
+    }
   }
 
   /**
@@ -183,6 +205,78 @@ ${role.successRate ? `- 成功率: ${(role.successRate * 100).toFixed(0)}%` : ''
     );
 
     return results;
+  }
+
+  private recommendRolesWithHeuristics(
+    requirement: ProjectRequirement,
+    availableRoles: Role[],
+    maxRecommendations: number
+  ): RoleRecommendation[] {
+    return availableRoles
+      .map((role) => this.buildHeuristicRecommendation(requirement, role))
+      .sort((a, b) => b.matchScore - a.matchScore)
+      .slice(0, maxRecommendations);
+  }
+
+  private buildHeuristicRecommendation(
+    requirement: ProjectRequirement,
+    role: Role
+  ): RoleRecommendation {
+    const requiredSkills = requirement.techStack.map((skill) => skill.trim()).filter(Boolean);
+    const roleSkills = role.assignedSkills.map((skill) => skill.trim()).filter(Boolean);
+
+    const matched = requiredSkills.filter((required) =>
+      roleSkills.some((skill) => this.containsSkill(skill, required))
+    );
+    const missing = requiredSkills.filter((required) =>
+      !matched.some((skill) => this.containsSkill(skill, required))
+    );
+    const bonus = roleSkills.filter((skill) =>
+      !requiredSkills.some((required) => this.containsSkill(skill, required))
+    );
+
+    const requiredCount = Math.max(requiredSkills.length, 1);
+    const matchedRatio = matched.length / requiredCount;
+    const baseScore = matchedRatio * 70;
+    const ratingScore = ((role.rating ?? 0) / 5) * 10;
+    const successScore = (role.successRate ?? 0) * 10;
+    const throughputScore = Math.min(Math.log2((role.completedTasks ?? 0) + 1) * 3, 10);
+
+    const matchScore = this.clampScore(Math.round(baseScore + ratingScore + successScore + throughputScore));
+
+    const reasons: string[] = [];
+    if (matched.length > 0) {
+      reasons.push(`Matched skills: ${matched.join(', ')}`);
+    } else {
+      reasons.push('No direct skill matches, selected as general fallback');
+    }
+    if (missing.length > 0) {
+      reasons.push(`Missing skills: ${missing.join(', ')}`);
+    }
+    if ((role.rating ?? 0) > 0) {
+      reasons.push(`Role rating ${role.rating?.toFixed(1)}/5`);
+    }
+
+    return {
+      role,
+      matchScore,
+      reasons,
+      skillMatch: {
+        matched,
+        missing,
+        bonus
+      }
+    };
+  }
+
+  private containsSkill(skill: string, target: string): boolean {
+    return skill.toLowerCase().includes(target.toLowerCase()) || target.toLowerCase().includes(skill.toLowerCase());
+  }
+
+  private clampScore(score: number): number {
+    if (score < 0) return 0;
+    if (score > 100) return 100;
+    return score;
   }
 }
 
