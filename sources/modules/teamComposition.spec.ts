@@ -92,6 +92,112 @@ describe('generateTeamCompositionPlan', () => {
             expect(['S', 'A', 'B', 'C']).toContain(team.evoMap.tier);
             expect(['up', 'flat', 'down']).toContain(team.evoMap.trend);
             expect(team.evoMap.highlights.length).toBeGreaterThan(0);
+
+            // V7-IMPL-005: Validate dimensions are included
+            expect(team.evoMap.dimensions).toBeDefined();
+            expect(team.evoMap.dimensions.delivery).toBeGreaterThanOrEqual(0);
+            expect(team.evoMap.dimensions.delivery).toBeLessThanOrEqual(100);
+            expect(team.evoMap.dimensions.quality).toBeGreaterThanOrEqual(0);
+            expect(team.evoMap.dimensions.quality).toBeLessThanOrEqual(100);
+            expect(team.evoMap.dimensions.collaboration).toBeGreaterThanOrEqual(0);
+            expect(team.evoMap.dimensions.collaboration).toBeLessThanOrEqual(100);
+            expect(team.evoMap.dimensions.release).toBeGreaterThanOrEqual(0);
+            expect(team.evoMap.dimensions.release).toBeLessThanOrEqual(100);
         }
+    });
+
+    it('calculates EvoMap dimensions correctly based on team composition', () => {
+        const plan = generateTeamCompositionPlan({
+            goal: '高质量团队测试',
+            mode: 'single',
+            evolutionSignals: {
+                readyPingRatio: 0.1,
+                coordinatorMessageRatio: 0.2,
+                deploymentIncidentRatio: 0.05,
+                idleStatusRatio: 0.15,
+            },
+        });
+
+        const team = plan.teams[0];
+        expect(team).toBeDefined();
+
+        // Verify dimensions affect overall score
+        const avgDimensions =
+            (team.evoMap.dimensions.delivery +
+                team.evoMap.dimensions.quality +
+                team.evoMap.dimensions.collaboration +
+                team.evoMap.dimensions.release) /
+            4;
+        const expectedScore = Number((avgDimensions / 20).toFixed(1));
+        expect(team.evoMap.score).toBeCloseTo(expectedScore, 1);
+    });
+
+    it('applies delivery penalties for high idle ratio', () => {
+        const planHighIdle = generateTeamCompositionPlan({
+            goal: '高闲置率团队测试',
+            mode: 'single',
+            evolutionSignals: {
+                idleStatusRatio: 0.6,
+                readyPingRatio: 0.3,
+            },
+        });
+
+        const planLowIdle = generateTeamCompositionPlan({
+            goal: '低闲置率团队测试',
+            mode: 'single',
+            evolutionSignals: {
+                idleStatusRatio: 0.1,
+                readyPingRatio: 0.1,
+            },
+        });
+
+        const highIdleDelivery = planHighIdle.teams[0].evoMap.dimensions.delivery;
+        const lowIdleDelivery = planLowIdle.teams[0].evoMap.dimensions.delivery;
+
+        expect(highIdleDelivery).toBeLessThan(lowIdleDelivery);
+    });
+
+    it('applies quality and release penalties for deployment incidents', () => {
+        const planWithIncidents = generateTeamCompositionPlan({
+            goal: '高事故率团队测试',
+            mode: 'single',
+            evolutionSignals: {
+                deploymentIncidentRatio: 0.25,
+            },
+        });
+
+        const planClean = generateTeamCompositionPlan({
+            goal: '低事故率团队测试',
+            mode: 'single',
+            evolutionSignals: {
+                deploymentIncidentRatio: 0.02,
+            },
+        });
+
+        const withIncidents = planWithIncidents.teams[0].evoMap.dimensions;
+        const clean = planClean.teams[0].evoMap.dimensions;
+
+        expect(withIncidents.quality).toBeLessThan(clean.quality);
+        expect(withIncidents.release).toBeLessThan(clean.release);
+    });
+
+    it('awards bonus for wow deployment target in release dimension', () => {
+        const planWow = generateTeamCompositionPlan({
+            goal: 'WoW 部署测试',
+            mode: 'single',
+            deploymentTarget: 'wow',
+        });
+
+        const planLocal = generateTeamCompositionPlan({
+            goal: '本地部署测试',
+            mode: 'single',
+            deploymentTarget: 'local',
+        });
+
+        const wowRelease = planWow.teams[0].evoMap.dimensions.release;
+        const localRelease = planLocal.teams[0].evoMap.dimensions.release;
+
+        expect(wowRelease).toBeGreaterThan(localRelease);
+        expect(wowRelease - localRelease).toBe(8); // +8 bonus for wow
     });
 });

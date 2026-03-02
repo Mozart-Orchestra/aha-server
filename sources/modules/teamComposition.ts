@@ -31,6 +31,12 @@ export interface TeamEvolutionMap {
     tier: TeamEvoTier;
     trend: TeamEvoTrend;
     highlights: string[];
+    dimensions: {
+        delivery: number;
+        quality: number;
+        collaboration: number;
+        release: number;
+    };
 }
 
 export interface TeamPlanSlice {
@@ -486,6 +492,12 @@ function buildTeamEvoMap(
         tier,
         trend,
         highlights,
+        dimensions: {
+            delivery: deliveryScore,
+            quality: qualityScore,
+            collaboration: collaborationScore,
+            release: releaseScore,
+        },
     };
 }
 
