@@ -33,6 +33,10 @@ import { recommendationRoutes } from "./routes/recommendationRoutes";
 import { searchRoutes } from "./routes/searchRoutes";
 import { suggestionRoutes } from "./routes/suggestionRoutes";
 import { insightsRoutes } from "./routes/insightsRoutes";
+import { teamStatsRoutes } from "./routes/teamStatsRoutes";
+import { runtimeAgentRoutes } from "./routes/runtimeAgentRoutes";
+import { deviceCodeRoutes } from "./routes/deviceCodeRoutes";
+import { autoRatingRoutes } from "./routes/autoRatingRoutes";
 import { getCorsConfig } from "./utils/corsConfig";
 import { getDefaultRateLimitConfig } from "./utils/rateLimitConfig";
 
@@ -96,7 +100,8 @@ export async function startApi() {
                 { name: 'Roles', description: 'Custom role definition and management' },
                 { name: 'Channels', description: 'Multi-provider API channel management' },
                 { name: 'Team Planning', description: 'Adaptive team composition planning' },
-                { name: 'Dev', description: 'Development and debugging endpoints' }
+                { name: 'Dev', description: 'Development and debugging endpoints' },
+                { name: 'Runtime Agents', description: 'Runtime agent lifecycle management (R6)' }
             ],
             components: {
                 securitySchemes: {
@@ -179,6 +184,10 @@ export async function startApi() {
     searchRoutes(typed);
     suggestionRoutes(typed);
     insightsRoutes(typed);
+    teamStatsRoutes(typed);
+    runtimeAgentRoutes(typed);
+    deviceCodeRoutes(typed);
+    autoRatingRoutes(typed);
 
     // Start HTTP 
     const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3005;
