@@ -11,6 +11,7 @@ import { encryptString, decryptString } from "@/modules/encrypt";
 import { teamMessagesCounter, teamTaskOperationsCounter, teamBroadcastEfficiencyGauge } from "@/app/monitoring/metrics2";
 import * as privacyKit from "privacy-kit";
 import { ensureSessionLinkedToTeam } from "@/utils/teamArtifacts";
+import { appendTeamEvidence } from "@/services/evolutionEvidenceService";
 
 /**
  * Team Messages Routes
@@ -289,6 +290,22 @@ export function teamMessagesRoutes(app: Fastify) {
                 value: serializedMessage,
                 version: -1
             }]);
+
+            await appendTeamEvidence({
+                teamId,
+                category: 'collaboration',
+                source: 'team-message',
+                title: `${message.type} message`,
+                summary: message.shortContent || message.content.slice(0, 150),
+                actor: message.fromDisplayName || message.fromRole || message.fromSessionId,
+                refs: [{ type: 'message', id: message.id }],
+                metadata: {
+                    fromRole: message.fromRole || null,
+                    fromSessionId: message.fromSessionId || null,
+                    type: message.type,
+                },
+                timestamp: message.timestamp,
+            });
 
             // HOTFIX: Auto-link session to team artifact if not already linked
             // This ensures agents that join via messages (not session creation) are registered
