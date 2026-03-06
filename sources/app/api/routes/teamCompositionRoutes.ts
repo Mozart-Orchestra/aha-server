@@ -1,7 +1,10 @@
 import { z } from 'zod';
 import { Fastify } from '../types';
-import { generateTeamCompositionPlan } from '@/modules/teamComposition';
+import { buildRoleMarketSnapshot } from '@/modules/roleMarket';
+import { detectFocus, generateTeamCompositionPlan } from '@/modules/teamComposition';
 import { log } from '@/utils/log';
+import { META_CONTRACT_VERSION, TeamBlueprintSchema } from './metaContractSchemas';
+import { DEFAULT_ROLE_TEMPLATES, listPublicRoles, listUserRoles } from './roleRoutes';
 
 const EvolutionSignalsSchema = z.object({
     readyPingRatio: z.number().min(0).max(1).optional(),
@@ -54,7 +57,43 @@ const TeamReleaseGateSchema = z.object({
     })),
 });
 
+const MarketRecommendationSchema = z.object({
+    id: z.string(),
+    title: z.string(),
+    summary: z.string(),
+    source: z.enum(['default', 'custom', 'public']),
+    assignedSkills: z.array(z.string()),
+    score: z.number().min(0).max(100),
+    why: z.array(z.string()),
+    goalMatches: z.array(z.string()),
+    variant: z.object({
+        id: z.string(),
+        label: z.string(),
+        source: z.enum(['server-template', 'workspace-custom', 'public-market']),
+        detail: z.string(),
+    }),
+    access: z.object({
+        key: z.enum(['defaults', 'workspace-private', 'workspace-shared', 'market-public']),
+        label: z.string(),
+    }),
+    stats: z.object({
+        reviewCount: z.number().int().nonnegative(),
+        completionCount: z.number().int().nonnegative(),
+        totalRating: z.number().nonnegative(),
+        averageRating: z.number().min(0).max(5),
+        cumulativeCode: z.number().nonnegative(),
+        cumulativeQuality: z.number().nonnegative(),
+        sourceScoreTotals: z.object({
+            user: z.number().nonnegative(),
+            master: z.number().nonnegative(),
+            system: z.number().nonnegative(),
+        }),
+        lastReviewedAt: z.number().optional(),
+    }).optional(),
+});
+
 const TeamCompositionResponseSchema = z.object({
+    metaContractVersion: z.string(),
     mode: z.enum(['single', 'multi']),
     versionTrack: z.enum(['v1', 'v2', 'dual']),
     deploymentTarget: z.enum(['wow', 'uv1', 'uv2', 'local', 'generic']),
@@ -73,6 +112,8 @@ const TeamCompositionResponseSchema = z.object({
     }),
     releaseGates: z.array(TeamReleaseGateSchema),
     teams: z.array(TeamPlanSliceSchema),
+    blueprintSeeds: z.array(TeamBlueprintSchema),
+    marketRecommendations: z.array(MarketRecommendationSchema),
 });
 
 export function teamCompositionRoutes(app: Fastify): void {
@@ -89,6 +130,53 @@ export function teamCompositionRoutes(app: Fastify): void {
     }, async (request, reply) => {
         const payload = TeamCompositionRequestSchema.parse(request.body);
         const plan = generateTeamCompositionPlan(payload);
+        const inferredFocus = detectFocus(payload.goal, payload.context);
+        const [customRoles, publicRoles] = await Promise.all([
+            listUserRoles(request.userId, { includeTemplates: false, includePrivate: true, limit: 200 }),
+            listPublicRoles(),
+        ]);
+        const market = buildRoleMarketSnapshot({
+            goal: payload.goal,
+            context: payload.context,
+            inferredFocus,
+            limit: 4,
+            candidates: [
+                ...DEFAULT_ROLE_TEMPLATES.map((role) => ({
+                    id: role.id,
+                    title: role.title,
+                    summary: role.summary,
+                    icon: role.icon,
+                    source: 'default' as const,
+                    assignedSkills: role.responsibilities,
+                    templateSource: role.category,
+                })),
+                ...customRoles.map((role) => ({
+                    id: role.id || '',
+                    title: role.title,
+                    summary: role.summary,
+                    icon: role.icon,
+                    ownerId: role.ownerId,
+                    source: 'custom' as const,
+                    visibility: role.visibility,
+                    assignedSkills: role.assignedSkills,
+                    stats: role.stats,
+                })),
+                ...publicRoles.map((role) => ({
+                    id: role.id,
+                    title: role.title,
+                    summary: role.summary,
+                    icon: role.icon,
+                    ownerId: role.ownerId,
+                    source: 'public' as const,
+                    visibility: role.visibility,
+                    assignedSkills: role.assignedSkills,
+                    stats: role.stats,
+                })),
+            ],
+        });
+        const marketHeadline = market.recommendations.length > 0
+            ? [`角色市场优先建议：${market.recommendations.slice(0, 3).map((role) => `${role.title} (${role.score})`).join(' / ')}`]
+            : [];
 
         log(
             {
@@ -101,6 +189,28 @@ export function teamCompositionRoutes(app: Fastify): void {
             'Generated team composition plan'
         );
 
-        return reply.send(plan);
+        const blueprintSeeds = plan.teams.map((slice) => TeamBlueprintSchema.parse({
+            schemaVersion: META_CONTRACT_VERSION,
+            id: `team-blueprint:${slice.key}`,
+            title: slice.name,
+            summary: slice.objective,
+            coordinationMode: plan.mode === 'multi' ? 'weak' : 'strong',
+            members: Object.entries(slice.roleCounts)
+                .filter(([, count]) => count > 0)
+                .map(([roleId, count], index) => ({
+                    id: `member:${slice.key}:${index}:${roleId}`,
+                    roleId,
+                    title: roleId,
+                    count,
+                })),
+        }));
+
+        return reply.send({
+            ...plan,
+            recommendations: [...marketHeadline, ...plan.recommendations],
+            metaContractVersion: META_CONTRACT_VERSION,
+            blueprintSeeds,
+            marketRecommendations: market.recommendations,
+        });
     });
 }

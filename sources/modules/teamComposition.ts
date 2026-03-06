@@ -86,7 +86,7 @@ function hasKeyword(text: string, keywords: string[]): boolean {
     return keywords.some((keyword) => text.includes(keyword));
 }
 
-function detectFocus(goal: string, context?: string): string[] {
+export function detectFocus(goal: string, context?: string): string[] {
     const text = `${goal} ${context || ''}`.toLowerCase();
     const focus = new Set<string>();
 
@@ -192,6 +192,12 @@ function emptyEvoMap(): TeamEvolutionMap {
         tier: 'B',
         trend: 'flat',
         highlights: ['等待历史信号回填以生成更精准评分'],
+        dimensions: {
+            delivery: 60,
+            quality: 60,
+            collaboration: 60,
+            release: 60,
+        },
     };
 }
 

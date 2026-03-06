@@ -709,4 +709,54 @@ describe('roleRoutes', () => {
         expect(parsedRole.title).toBe('Legacy Role');
         expect(parsedRole.stats.reviewCount).toBe(0);
     });
+
+    it('builds a goal-aware role market with why, access, and variant metadata', async () => {
+        const createResponse = await app.inject({
+            method: 'POST',
+            url: '/v1/roles',
+            headers: { 'content-type': 'application/json', 'x-user-id': 'market-owner' },
+            payload: {
+                id: 'quality-reviewer',
+                title: 'Quality Reviewer',
+                summary: 'Reviews pull requests and regression risk.',
+                assignedSkills: ['qa', 'review', 'regression'],
+                visibility: 'public',
+            },
+        });
+
+        expect(createResponse.statusCode).toBe(200);
+
+        const reviewResponse = await app.inject({
+            method: 'POST',
+            url: '/v1/roles/quality-reviewer/reviews',
+            headers: { 'content-type': 'application/json', 'x-user-id': 'market-rater' },
+            payload: {
+                rating: 5,
+                codeScore: 92,
+                qualityScore: 97,
+                comment: 'Excellent review coverage',
+            },
+        });
+
+        expect(reviewResponse.statusCode).toBe(200);
+
+        const marketResponse = await app.inject({
+            method: 'GET',
+            url: '/v1/roles/market?goal=Need QA review guardrails for the release',
+            headers: { 'x-user-id': 'market-owner' },
+        });
+
+        expect(marketResponse.statusCode).toBe(200);
+
+        const marketPayload = marketResponse.json();
+        const reviewer = marketPayload.roles.find((role: { id: string }) => role.id === 'quality-reviewer');
+
+        expect(marketPayload.recommendations.length).toBeGreaterThan(0);
+        expect(reviewer).toBeDefined();
+        expect(reviewer.score).toBeGreaterThan(0);
+        expect(reviewer.why.length).toBeGreaterThan(0);
+        expect(reviewer.goalMatches).toContain('quality');
+        expect(reviewer.access.label).toBe('My published role');
+        expect(reviewer.variant.source).toBe('workspace-custom');
+    });
 });

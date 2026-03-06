@@ -10,6 +10,8 @@ import * as privacyKit from "privacy-kit";
 import { calculateSystemRating, submitSystemRating, getRoleSystemRating } from "@/services/systemRatingService";
 import { ApiErrors, sendErrorResponse } from "@/errors/errorHandler";
 import { ErrorCode } from "@/errors/errorCodes";
+import { buildRoleMarketSnapshot } from "@/modules/roleMarket";
+import { detectFocus } from "@/modules/teamComposition";
 
 /**
  * Custom Role Routes - User-defined Role Management API
@@ -106,6 +108,42 @@ const PublicRoleSchema = CustomRoleSchema.extend({
     visibility: z.literal("public"),
     stats: RoleStatsSchema,
     publishedAt: z.number(),
+});
+
+const RoleMarketVariantSchema = z.object({
+    id: z.string(),
+    label: z.string(),
+    source: z.enum(["server-template", "workspace-custom", "public-market"]),
+    detail: z.string(),
+});
+
+const RoleMarketAccessSchema = z.object({
+    key: z.enum(["defaults", "workspace-private", "workspace-shared", "market-public"]),
+    label: z.string(),
+});
+
+const RoleMarketRoleSchema = z.object({
+    id: z.string(),
+    title: z.string(),
+    summary: z.string(),
+    icon: z.string().optional(),
+    ownerId: z.string().optional(),
+    source: z.enum(["default", "custom", "public"]),
+    assignedSkills: z.array(z.string()),
+    stats: RoleStatsSchema.optional(),
+    score: z.number().min(0).max(100),
+    why: z.array(z.string()),
+    goalMatches: z.array(z.string()),
+    variant: RoleMarketVariantSchema,
+    access: RoleMarketAccessSchema,
+});
+
+const RoleMarketResponseSchema = z.object({
+    goal: z.string(),
+    inferredFocus: z.array(z.string()),
+    recommendations: z.array(RoleMarketRoleSchema),
+    roles: z.array(RoleMarketRoleSchema),
+    total: z.number().int().nonnegative(),
 });
 
 const RoleExportSchema = z.object({
@@ -238,7 +276,7 @@ const RoleTemplateSchema = z.object({
     protocol: z.array(z.string()).default([]),
 });
 
-const DEFAULT_ROLE_TEMPLATES: z.infer<typeof RoleTemplateSchema>[] = [
+export const DEFAULT_ROLE_TEMPLATES: z.infer<typeof RoleTemplateSchema>[] = [
     {
         id: "master",
         title: "Master",
@@ -501,9 +539,10 @@ type RolePoolListCacheEntry = {
 
 const rolePoolListCache = new Map<string, RolePoolListCacheEntry>();
 
-type CustomRole = z.infer<typeof CustomRoleSchema>;
-type PublicRole = z.infer<typeof PublicRoleSchema>;
-type RoleStats = z.infer<typeof RoleStatsSchema>;
+export type RoleTemplate = z.infer<typeof RoleTemplateSchema>;
+export type CustomRole = z.infer<typeof CustomRoleSchema>;
+export type PublicRole = z.infer<typeof PublicRoleSchema>;
+export type RoleStats = z.infer<typeof RoleStatsSchema>;
 type RoleReviewInput = z.infer<typeof RoleReviewInputSchema>;
 type RoleReview = z.infer<typeof RoleReviewSchema>;
 type TeamReviewInput = z.infer<typeof TeamReviewInputSchema>;
@@ -889,7 +928,7 @@ async function loadPublicRoleMap(roleIds: string[]): Promise<Map<string, PublicR
     return roleMap;
 }
 
-async function listPublicRoles(search?: string): Promise<PublicRole[]> {
+export async function listPublicRoles(search?: string): Promise<PublicRole[]> {
     const cached = readRolePoolListCache(search);
     if (cached) {
         return cached;
@@ -985,6 +1024,53 @@ async function mergeWithPublicStats(
         publishedAt: publicRole.publishedAt,
         updatedAt: Math.max(role.updatedAt || 0, publicRole.updatedAt || 0),
     };
+}
+
+export async function listUserRoles(
+    userId: string,
+    options?: {
+        includeTemplates?: boolean;
+        includePrivate?: boolean;
+        limit?: number;
+    },
+): Promise<CustomRole[]> {
+    const includeTemplates = options?.includeTemplates ?? false;
+    const includePrivate = options?.includePrivate ?? true;
+    const limit = options?.limit ?? 50;
+
+    const result = await kvList({ uid: userId }, { prefix: ROLES_PREFIX, limit: 1000 });
+    const normalizedRoles: CustomRole[] = [];
+
+    for (const item of result.items) {
+        const parsed = parseRole(item.value);
+        if (!parsed || !parsed.id) {
+            continue;
+        }
+        normalizedRoles.push(normalizeRole(parsed, parsed.id, parsed.ownerId || userId));
+    }
+
+    const publicRoleMap = await loadPublicRoleMap(
+        normalizedRoles
+            .filter((role) => role.visibility === "public" && Boolean(role.id))
+            .map((role) => role.id as string),
+    );
+
+    const roles: CustomRole[] = [];
+
+    for (const normalizedRole of normalizedRoles) {
+        const role = await mergeWithPublicStats(normalizedRole, publicRoleMap);
+
+        if (!includeTemplates && role.isTemplate) {
+            continue;
+        }
+        if (!includePrivate && role.visibility === "private") {
+            continue;
+        }
+
+        roles.push(role);
+    }
+
+    return roles.slice(0, limit);
 }
 
 export function roleRoutes(app: Fastify) {
@@ -1141,6 +1227,92 @@ export function roleRoutes(app: Fastify) {
         }
     });
 
+    app.get("/v1/roles/market", {
+        preHandler: app.authenticate,
+        schema: {
+            querystring: z.object({
+                goal: z.string().optional(),
+                context: z.string().optional(),
+                search: z.string().optional(),
+                limit: z.coerce.number().int().min(1).max(20).default(4),
+            }).optional(),
+            response: {
+                200: RoleMarketResponseSchema,
+                500: z.object({
+                    error: z.literal("Failed to build role market"),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { goal = "", context, search, limit = 4 } = (request.query || {}) as {
+            goal?: string;
+            context?: string;
+            search?: string;
+            limit?: number;
+        };
+
+        try {
+            const [customRoles, publicRoles] = await Promise.all([
+                listUserRoles(userId, { includeTemplates: false, includePrivate: true, limit: 200 }),
+                listPublicRoles(),
+            ]);
+
+            const inferredFocus = detectFocus(goal || context || "delivery", context);
+            const market = buildRoleMarketSnapshot({
+                goal,
+                context,
+                inferredFocus,
+                limit,
+                search,
+                candidates: [
+                    ...DEFAULT_ROLE_TEMPLATES.map((role) => ({
+                        id: role.id,
+                        title: role.title,
+                        summary: role.summary,
+                        icon: role.icon,
+                        source: "default" as const,
+                        assignedSkills: role.responsibilities,
+                        templateSource: role.category,
+                    })),
+                    ...customRoles.map((role) => ({
+                        id: role.id || "",
+                        title: role.title,
+                        summary: role.summary,
+                        icon: role.icon,
+                        ownerId: role.ownerId,
+                        source: "custom" as const,
+                        visibility: role.visibility,
+                        assignedSkills: role.assignedSkills,
+                        stats: role.stats,
+                    })),
+                    ...publicRoles.map((role) => ({
+                        id: role.id,
+                        title: role.title,
+                        summary: role.summary,
+                        icon: role.icon,
+                        ownerId: role.ownerId,
+                        source: "public" as const,
+                        visibility: role.visibility,
+                        assignedSkills: role.assignedSkills,
+                        stats: role.stats,
+                    })),
+                ],
+            });
+
+            return reply.send({
+                goal,
+                inferredFocus: market.inferredFocus,
+                recommendations: market.recommendations,
+                roles: market.roles,
+                total: market.roles.length,
+            });
+        } catch (error) {
+            log({ module: "role-routes", level: "error" }, `Failed to build role market: ${error}`);
+            return reply.code(500).send({ error: "Failed to build role market" });
+        }
+    });
+
     // GET /v1/roles - List user's custom roles
     app.get("/v1/roles", {
         preHandler: app.authenticate,
@@ -1169,40 +1341,14 @@ export function roleRoutes(app: Fastify) {
         };
 
         try {
-            const result = await kvList({ uid: userId }, { prefix: ROLES_PREFIX, limit: 1000 });
-            const normalizedRoles: CustomRole[] = [];
-
-            for (const item of result.items) {
-                const parsed = parseRole(item.value);
-                if (!parsed || !parsed.id) {
-                    continue;
-                }
-                normalizedRoles.push(normalizeRole(parsed, parsed.id, parsed.ownerId || userId));
-            }
-
-            const publicRoleMap = await loadPublicRoleMap(
-                normalizedRoles
-                    .filter((role) => role.visibility === "public" && Boolean(role.id))
-                    .map((role) => role.id as string),
-            );
-
-            const roles: CustomRole[] = [];
-
-            for (const normalizedRole of normalizedRoles) {
-                const role = await mergeWithPublicStats(normalizedRole, publicRoleMap);
-
-                if (!includeTemplates && role.isTemplate) {
-                    continue;
-                }
-                if (!includePrivate && role.visibility === "private") {
-                    continue;
-                }
-
-                roles.push(role);
-            }
+            const roles = await listUserRoles(userId, {
+                includeTemplates,
+                includePrivate,
+                limit,
+            });
 
             return reply.send({
-                roles: roles.slice(0, limit),
+                roles,
                 total: roles.length,
             });
         } catch (error) {
