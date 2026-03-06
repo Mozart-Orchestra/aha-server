@@ -14,6 +14,7 @@ import { machineUpdateHandler } from "./socket/machineUpdateHandler";
 import { artifactUpdateHandler } from "./socket/artifactUpdateHandler";
 import { accessKeyHandler } from "./socket/accessKeyHandler";
 import { getSocketCorsConfig } from "./utils/corsConfig";
+import { registerDaemonControlSocket, unregisterDaemonControlSocket } from "@/app/api/socket/daemonControlRegistry";
 
 export function startSocket(app: Fastify) {
     const io = new Server(app.server, {
@@ -99,6 +100,8 @@ export function startSocket(app: Fastify) {
 
         // Broadcast daemon online status
         if (connection.connectionType === 'machine-scoped') {
+            registerDaemonControlSocket(userId, machineId!, socket);
+
             // Broadcast daemon online
             const machineActivity = buildMachineActivityEphemeral(machineId!, true, Date.now());
             eventRouter.emitEphemeral({
@@ -119,6 +122,8 @@ export function startSocket(app: Fastify) {
 
             // Broadcast daemon offline status
             if (connection.connectionType === 'machine-scoped') {
+                unregisterDaemonControlSocket(userId, connection.machineId, socket);
+
                 const machineActivity = buildMachineActivityEphemeral(connection.machineId, false, Date.now());
                 eventRouter.emitEphemeral({
                     userId,
