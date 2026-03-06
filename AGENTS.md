@@ -48,3 +48,4 @@ Do not begin by scanning the whole workspace.
 - Prefer durable backend rules in code or shared contracts, not one-off docs
 - Keep root-level historical reports in `../docs/archive`, not in this repo
 - For machine-scoped lifecycle routes, treat daemon-control ACKs as the source of truth: pass the target `machineId` through the control payload and avoid flipping DB session state before the daemon responds
+- For team usage surfaces, keep `/v1/teams/:teamId/stats` as the canonical summary payload and share aggregation helpers with `/info` and `/usage/models` instead of recomputing token/model fields independently
