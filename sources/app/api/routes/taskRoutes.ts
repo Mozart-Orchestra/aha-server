@@ -2,6 +2,7 @@ import { Fastify } from "../types";
 import { z } from "zod";
 import { log } from "@/utils/log";
 import { taskOrchestrator } from "@/app/task/taskOrchestrator";
+import { TaskItemSchema } from "./metaContractSchemas";
 
 /**
  * Task Routes - Server-Driven Task Management API
@@ -25,6 +26,8 @@ const TaskSchema = z.object({
     reporterId: z.string().optional(),
     parentTaskId: z.string().nullable().optional(),
     labels: z.array(z.string()).optional(),
+    dueDate: z.number().nullable().optional(),
+    dependencies: z.array(z.string()).optional(),
     approvalStatus: z.enum(['pending', 'approved', 'rejected']).optional()
 });
 
@@ -32,6 +35,17 @@ const BlockerSchema = z.object({
     type: z.enum(['dependency', 'question', 'resource', 'technical']),
     description: z.string().min(1).max(1000)
 });
+
+function normalizeTask(teamId: string, task: unknown) {
+    return TaskItemSchema.parse({
+        ...(task as Record<string, unknown>),
+        teamId,
+    });
+}
+
+function normalizeTaskList(teamId: string, tasks: unknown[]) {
+    return tasks.map((task) => normalizeTask(teamId, task));
+}
 
 export function taskRoutes(app: Fastify) {
     log({ module: 'api' }, 'Registering taskRoutes...');
@@ -49,7 +63,7 @@ export function taskRoutes(app: Fastify) {
             }),
             response: {
                 200: z.object({
-                    tasks: z.array(z.any()),
+                    tasks: z.array(TaskItemSchema),
                     version: z.number()
                 }),
                 404: z.object({
@@ -67,7 +81,7 @@ export function taskRoutes(app: Fastify) {
 
         try {
             const result = await taskOrchestrator.listTasks(userId, teamId, { status, assigneeId });
-            return reply.send(result);
+            return reply.send({ ...result, tasks: normalizeTaskList(teamId, result.tasks) });
         } catch (error: any) {
             if (error.message === 'Team not found') {
                 return reply.code(404).send({ error: 'Team not found' });
@@ -86,7 +100,7 @@ export function taskRoutes(app: Fastify) {
                 taskId: z.string()
             }),
             response: {
-                200: z.any(),
+                200: TaskItemSchema,
                 404: z.object({
                     error: z.string()
                 }),
@@ -104,7 +118,7 @@ export function taskRoutes(app: Fastify) {
             if (!task) {
                 return reply.code(404).send({ error: 'Task not found' });
             }
-            return reply.send(task);
+            return reply.send(normalizeTask(teamId, task));
         } catch (error) {
             log({ module: 'task-routes', level: 'error' }, `Failed to get task: ${error}`);
             return reply.code(500).send({ error: 'Failed to get task' });
@@ -122,7 +136,7 @@ export function taskRoutes(app: Fastify) {
             response: {
                 200: z.object({
                     success: z.literal(true),
-                    task: z.any()
+                    task: TaskItemSchema
                 }),
                 400: z.object({
                     error: z.string()
@@ -143,10 +157,13 @@ export function taskRoutes(app: Fastify) {
         try {
             const task = await taskOrchestrator.createTask(userId, teamId, taskData);
             log({ module: 'task-routes', teamId, taskId: task.id }, 'Task created');
-            return reply.send({ success: true, task });
+            return reply.send({ success: true, task: normalizeTask(teamId, task) });
         } catch (error: any) {
             if (error.message === 'Team not found') {
                 return reply.code(404).send({ error: 'Team not found' });
+            }
+            if (error.message?.includes('Unknown assigneeId') || error.message?.includes('Ambiguous assigneeId')) {
+                return reply.code(400).send({ error: error.message });
             }
             if (error.message?.includes('Maximum nesting depth')) {
                 return reply.code(400).send({ error: error.message });
@@ -168,7 +185,7 @@ export function taskRoutes(app: Fastify) {
             response: {
                 200: z.object({
                     success: z.literal(true),
-                    task: z.any()
+                    task: TaskItemSchema
                 }),
                 404: z.object({
                     error: z.string()
@@ -186,10 +203,13 @@ export function taskRoutes(app: Fastify) {
         try {
             const task = await taskOrchestrator.updateTask(userId, teamId, taskId, updates);
             log({ module: 'task-routes', teamId, taskId }, 'Task updated');
-            return reply.send({ success: true, task });
+            return reply.send({ success: true, task: normalizeTask(teamId, task) });
         } catch (error: any) {
             if (error.message === 'Task not found' || error.message === 'Team not found') {
                 return reply.code(404).send({ error: error.message });
+            }
+            if (error.message?.includes('Unknown assigneeId') || error.message?.includes('Ambiguous assigneeId')) {
+                return reply.code(400).send({ error: error.message });
             }
             log({ module: 'task-routes', level: 'error' }, `Failed to update task: ${error}`);
             return reply.code(500).send({ error: 'Failed to update task' });
@@ -248,7 +268,7 @@ export function taskRoutes(app: Fastify) {
             response: {
                 200: z.object({
                     success: z.literal(true),
-                    task: z.any()
+                    task: TaskItemSchema
                 }),
                 400: z.object({
                     error: z.string()
@@ -269,7 +289,7 @@ export function taskRoutes(app: Fastify) {
         try {
             const task = await taskOrchestrator.startTask(userId, teamId, taskId, sessionId, role);
             log({ module: 'task-routes', teamId, taskId, sessionId }, 'Task started');
-            return reply.send({ success: true, task });
+            return reply.send({ success: true, task: normalizeTask(teamId, task) });
         } catch (error: any) {
             if (error.message === 'Task not found' || error.message === 'Team not found') {
                 return reply.code(404).send({ error: error.message });
@@ -296,7 +316,7 @@ export function taskRoutes(app: Fastify) {
             response: {
                 200: z.object({
                     success: z.literal(true),
-                    task: z.any()
+                    task: TaskItemSchema
                 }),
                 400: z.object({
                     error: z.string()
@@ -317,7 +337,7 @@ export function taskRoutes(app: Fastify) {
         try {
             const task = await taskOrchestrator.completeTask(userId, teamId, taskId, sessionId);
             log({ module: 'task-routes', teamId, taskId, sessionId }, 'Task completed');
-            return reply.send({ success: true, task });
+            return reply.send({ success: true, task: normalizeTask(teamId, task) });
         } catch (error: any) {
             if (error.message === 'Task not found' || error.message === 'Team not found') {
                 return reply.code(404).send({ error: error.message });
@@ -345,7 +365,7 @@ export function taskRoutes(app: Fastify) {
             response: {
                 200: z.object({
                     success: z.literal(true),
-                    task: z.any()
+                    task: TaskItemSchema
                 }),
                 404: z.object({
                     error: z.string()
@@ -373,13 +393,61 @@ export function taskRoutes(app: Fastify) {
                 { type, description }
             );
             log({ module: 'task-routes', teamId, taskId }, 'Blocker reported');
-            return reply.send({ success: true, task });
+            return reply.send({ success: true, task: normalizeTask(teamId, task) });
         } catch (error: any) {
             if (error.message === 'Task not found' || error.message === 'Team not found') {
                 return reply.code(404).send({ error: error.message });
             }
             log({ module: 'task-routes', level: 'error' }, `Failed to report blocker: ${error}`);
             return reply.code(500).send({ error: 'Failed to report blocker' });
+        }
+    });
+
+    // POST /v1/teams/:teamId/tasks/reorder - Reorder tasks (drag-and-drop)
+    app.post('/v1/teams/:teamId/tasks/reorder', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                teamId: z.string()
+            }),
+            body: z.object({
+                orders: z.array(z.object({
+                    taskId: z.string(),
+                    status: z.enum(['todo', 'in-progress', 'review', 'blocked', 'done']).optional(),
+                    order: z.number().optional()
+                })).min(1).max(100)
+            }),
+            response: {
+                200: z.object({
+                    success: z.literal(true),
+                    updatedCount: z.number()
+                }),
+                400: z.object({
+                    error: z.string()
+                }),
+                404: z.object({
+                    error: z.literal('Team not found')
+                }),
+                500: z.object({
+                    error: z.literal('Failed to reorder tasks')
+                })
+            }
+        }
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { teamId } = request.params as { teamId: string };
+        const { orders } = request.body as { orders: Array<{ taskId: string; status?: string; order?: number }> };
+
+        try {
+            const result = await taskOrchestrator.reorderTasks(userId, teamId, orders);
+            log({ module: 'task-routes', teamId }, `Reordered ${result.updatedCount} tasks`);
+            return reply.send(result);
+        } catch (error: any) {
+            if (error.message === 'Team not found' || error.message.includes('Team not initialized')) {
+                return reply.code(404).send({ error: 'Team not found' });
+            }
+            log({ module: 'task-routes', level: 'error' }, `Failed to reorder tasks: ${error}`);
+            return reply.code(500).send({ error: 'Failed to reorder tasks' });
         }
     });
 
@@ -399,7 +467,7 @@ export function taskRoutes(app: Fastify) {
             response: {
                 200: z.object({
                     success: z.literal(true),
-                    task: z.any()
+                    task: TaskItemSchema
                 }),
                 404: z.object({
                     error: z.string()
@@ -428,7 +496,7 @@ export function taskRoutes(app: Fastify) {
                 resolution
             );
             log({ module: 'task-routes', teamId, taskId, blockerId }, 'Blocker resolved');
-            return reply.send({ success: true, task });
+            return reply.send({ success: true, task: normalizeTask(teamId, task) });
         } catch (error: any) {
             if (error.message === 'Task not found' ||
                 error.message === 'Team not found' ||
@@ -437,6 +505,101 @@ export function taskRoutes(app: Fastify) {
             }
             log({ module: 'task-routes', level: 'error' }, `Failed to resolve blocker: ${error}`);
             return reply.code(500).send({ error: 'Failed to resolve blocker' });
+        }
+    });
+
+    // POST /v1/teams/:teamId/tasks/:taskId/refine - AI refine task description
+    app.post('/v1/teams/:teamId/tasks/:taskId/refine', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                teamId: z.string(),
+                taskId: z.string()
+            }),
+            body: z.object({
+                context: z.string().optional()
+            }),
+            response: {
+                200: z.object({
+                    success: z.literal(true),
+                    task: TaskItemSchema,
+                    refinement: z.object({
+                        originalDescription: z.string(),
+                        refinedDescription: z.string(),
+                        suggestions: z.array(z.string())
+                    })
+                }),
+                404: z.object({
+                    error: z.string()
+                }),
+                500: z.object({
+                    error: z.literal('Failed to refine task')
+                })
+            }
+        }
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { teamId, taskId } = request.params as { teamId: string; taskId: string };
+        const { context } = request.body as { context?: string };
+
+        try {
+            const result = await taskOrchestrator.refineTask(userId, teamId, taskId, context);
+            log({ module: 'task-routes', teamId, taskId }, 'Task refined');
+            return reply.send({ ...result, task: normalizeTask(teamId, result.task) });
+        } catch (error: any) {
+            if (error.message === 'Task not found' || error.message === 'Team not found') {
+                return reply.code(404).send({ error: error.message });
+            }
+            log({ module: 'task-routes', level: 'error' }, `Failed to refine task: ${error}`);
+            return reply.code(500).send({ error: 'Failed to refine task' });
+        }
+    });
+
+    // POST /v1/teams/:teamId/tasks/:taskId/rewrite - AI rewrite task title/description
+    app.post('/v1/teams/:teamId/tasks/:taskId/rewrite', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                teamId: z.string(),
+                taskId: z.string()
+            }),
+            body: z.object({
+                style: z.enum(['concise', 'detailed', 'technical', 'user-friendly']).optional()
+            }),
+            response: {
+                200: z.object({
+                    success: z.literal(true),
+                    task: TaskItemSchema,
+                    rewrite: z.object({
+                        originalTitle: z.string(),
+                        rewrittenTitle: z.string(),
+                        originalDescription: z.string(),
+                        rewrittenDescription: z.string()
+                    })
+                }),
+                404: z.object({
+                    error: z.string()
+                }),
+                500: z.object({
+                    error: z.literal('Failed to rewrite task')
+                })
+            }
+        }
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { teamId, taskId } = request.params as { teamId: string; taskId: string };
+        const { style } = request.body as { style?: string };
+
+        try {
+            const result = await taskOrchestrator.rewriteTask(userId, teamId, taskId, style);
+            log({ module: 'task-routes', teamId, taskId }, 'Task rewritten');
+            return reply.send({ ...result, task: normalizeTask(teamId, result.task) });
+        } catch (error: any) {
+            if (error.message === 'Task not found' || error.message === 'Team not found') {
+                return reply.code(404).send({ error: error.message });
+            }
+            log({ module: 'task-routes', level: 'error' }, `Failed to rewrite task: ${error}`);
+            return reply.code(500).send({ error: 'Failed to rewrite task' });
         }
     });
 }

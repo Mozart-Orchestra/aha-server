@@ -5,6 +5,7 @@ import { allocateUserSeq } from "@/storage/seq";
 import { randomKeyNaked } from "@/utils/randomKeyNaked";
 import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
 import * as privacyKit from "privacy-kit";
+import Anthropic from "@anthropic-ai/sdk";
 
 /**
  * Server-side Task Orchestration Engine
@@ -60,6 +61,8 @@ export interface KanbanTask {
     executionLinks?: TaskExecutionLink[];
     blockers?: TaskBlocker[];
     labels?: string[];
+    dueDate?: number | null;
+    dependencies?: string[];
     approvalStatus?: 'pending' | 'approved' | 'rejected';
 }
 
@@ -92,6 +95,63 @@ const DEFAULT_COLUMNS: KanbanColumn[] = [
 // === Task Orchestrator Class ===
 
 export class TaskOrchestrator {
+    private isSameSessionId(a?: string | null, b?: string | null): boolean {
+        if (!a || !b) return false;
+        if (a === b) return true;
+        return a.startsWith(b) || b.startsWith(a);
+    }
+
+    /**
+     * Extract known team member session IDs from board payload.
+     * Supports both:
+     * - board.team.members[].sessionId
+     * - board.members[].sessionId (legacy shape)
+     */
+    private getTeamMemberSessionIds(board: KanbanBoard): string[] {
+        const teamMembers = Array.isArray((board as any)?.team?.members) ? (board as any).team.members : [];
+        const legacyMembers = Array.isArray((board as any)?.members) ? (board as any).members : [];
+
+        const sessionIds = [...teamMembers, ...legacyMembers]
+            .map((member: any) => member?.sessionId)
+            .filter((sid: unknown): sid is string => typeof sid === 'string' && sid.length > 0);
+
+        return Array.from(new Set(sessionIds));
+    }
+
+    /**
+     * Canonicalize assignee ID against current team member roster.
+     * - exact / prefix match => canonical full ID
+     * - unknown / ambiguous => explicit error
+     */
+    private normalizeAssigneeId(board: KanbanBoard, assigneeId?: string | null): string | null | undefined {
+        if (assigneeId === undefined) return undefined;
+        if (assigneeId === null) return null;
+
+        const raw = assigneeId.trim();
+        if (!raw) return null;
+
+        const memberIds = this.getTeamMemberSessionIds(board);
+        if (memberIds.length === 0) {
+            // If team roster is not present in artifact, keep backward-compatible behavior.
+            return raw;
+        }
+
+        const exactOrTolerant = memberIds.find((sid) => this.isSameSessionId(sid, raw));
+        if (exactOrTolerant) {
+            return exactOrTolerant;
+        }
+
+        const prefixMatches = memberIds.filter((sid) => sid.startsWith(raw));
+        if (prefixMatches.length === 1) {
+            return prefixMatches[0];
+        }
+        if (prefixMatches.length > 1) {
+            throw new Error(`Ambiguous assigneeId "${raw}"`);
+        }
+
+        throw new Error(`Unknown assigneeId "${raw}"`);
+    }
+
     /**
      * Get board from artifact body
      * If artifact doesn't exist, automatically creates it (lazy initialization)
@@ -248,7 +308,7 @@ export class TaskOrchestrator {
             tasks = tasks.filter(t => t.status === filters.status);
         }
         if (filters?.assigneeId) {
-            tasks = tasks.filter(t => t.assigneeId === filters.assigneeId);
+            tasks = tasks.filter(t => this.isSameSessionId(t.assigneeId, filters.assigneeId!));
         }
 
         return { tasks, version: board.version || 1 };
@@ -274,8 +334,11 @@ export class TaskOrchestrator {
         const board = await this.getBoard(userId, teamId);
         if (!board) throw new Error('Team not initialized. Please create/open this team in Kanban dashboard first. See DOC/TEAM_CREATION_WORKFLOW.md for details.');
 
+        const normalizedAssigneeId = this.normalizeAssigneeId(board, task.assigneeId);
+
         const newTask: KanbanTask = {
             ...task,
+            assigneeId: normalizedAssigneeId,
             id: randomKeyNaked(12),
             status: task.status || 'todo',
             createdAt: Date.now(),
@@ -328,10 +391,16 @@ export class TaskOrchestrator {
         const task = board.tasks[taskIndex];
         const previousStatus = task.status;
 
+        const normalizedAssigneeId = this.normalizeAssigneeId(board, updates.assigneeId);
+        const normalizedUpdates: Partial<KanbanTask> = {
+            ...updates,
+            ...(updates.assigneeId !== undefined ? { assigneeId: normalizedAssigneeId ?? null } : {})
+        };
+
         // Apply updates (preserve id, createdAt)
         const updatedTask: KanbanTask = {
             ...task,
-            ...updates,
+            ...normalizedUpdates,
             id: taskId,
             createdAt: task.createdAt,
             updatedAt: Date.now()
@@ -563,6 +632,70 @@ export class TaskOrchestrator {
         return task;
     }
 
+    /**
+     * Reorder tasks - batch update task positions (for drag-and-drop)
+     */
+    async reorderTasks(
+        userId: string,
+        teamId: string,
+        orders: Array<{ taskId: string; status?: string; order?: number }>
+    ): Promise<{ success: true; updatedCount: number }> {
+        const board = await this.getBoard(userId, teamId);
+        if (!board) throw new Error('Team not initialized. Please create/open this team in Kanban dashboard first. See DOC/TEAM_CREATION_WORKFLOW.md for details.');
+
+        let updatedCount = 0;
+
+        for (const update of orders) {
+            const taskIndex = board.tasks.findIndex(t => t.id === update.taskId);
+            if (taskIndex !== -1) {
+                const task = board.tasks[taskIndex];
+                if (update.status !== undefined) {
+                    task.status = update.status;
+                }
+                task.updatedAt = Date.now();
+                updatedCount++;
+            }
+        }
+
+        if (updatedCount > 0) {
+            board.version = (board.version || 0) + 1;
+            board.updatedAt = Date.now();
+
+            const bodyBuffer = new Uint8Array(Buffer.from(JSON.stringify(board)));
+
+            await db.artifact.update({
+                where: { id: teamId },
+                data: {
+                    body: bodyBuffer,
+                    bodyVersion: { increment: 1 },
+                    updatedAt: new Date()
+                }
+            });
+
+            // Broadcast reorder event
+            const updSeq = await allocateUserSeq(userId);
+            eventRouter.emitUpdate({
+                userId,
+                payload: {
+                    id: randomKeyNaked(12),
+                    seq: updSeq,
+                    body: {
+                        t: 'task-updated' as const,
+                        teamId,
+                        taskId: 'reorder',
+                        task: { orders }
+                    },
+                    createdAt: Date.now()
+                },
+                recipientFilter: { type: 'all-user-authenticated-connections' }
+            });
+
+            log({ module: 'task-orchestrator', teamId }, `Reordered ${updatedCount} tasks`);
+        }
+
+        return { success: true as const, updatedCount };
+    }
+
     // === Helper Methods ===
 
     private getTaskDepth(board: KanbanBoard, parentId: string | null | undefined): number {
@@ -634,6 +767,184 @@ export class TaskOrchestrator {
 
         // Recurse up
         this.updateParentBlockedStatus(board, parent.parentTaskId);
+    }
+
+    /**
+     * Refine task using AI - adds more detail and structure
+     */
+    async refineTask(
+        userId: string,
+        teamId: string,
+        taskId: string,
+        context?: string
+    ): Promise<{
+        success: true;
+        task: KanbanTask;
+        refinement: {
+            originalDescription: string;
+            refinedDescription: string;
+            suggestions: string[];
+        };
+    }> {
+        const board = await this.getBoard(userId, teamId);
+        if (!board) throw new Error('Team not initialized');
+
+        const taskIndex = board.tasks.findIndex(t => t.id === taskId);
+        if (taskIndex === -1) throw new Error('Task not found');
+
+        const task = board.tasks[taskIndex];
+        const originalDescription = task.description || '';
+
+        // Call Claude to refine the task
+        const anthropic = new Anthropic();
+        const prompt = `You are a task refinement assistant. Given a task title and description, create a more detailed, actionable version with clear acceptance criteria.
+
+Task Title: ${task.title}
+${originalDescription ? `Current Description: ${originalDescription}` : ''}
+${context ? `Additional Context: ${context}` : ''}
+
+Please provide:
+1. A refined, more detailed description
+2. A list of specific suggestions for improvement (as JSON array)
+
+Respond in JSON format:
+{
+  "refinedDescription": "...",
+  "suggestions": ["...", "..."]
+}`;
+
+        const message = await anthropic.messages.create({
+            model: 'claude-3-5-sonnet-20241022',
+            max_tokens: 1024,
+            messages: [{ role: 'user', content: prompt }]
+        });
+
+        const content = message.content[0];
+        let refinedDescription = originalDescription;
+        let suggestions: string[] = [];
+
+        if (content.type === 'text') {
+            try {
+                const parsed = JSON.parse(content.text);
+                refinedDescription = parsed.refinedDescription || originalDescription;
+                suggestions = parsed.suggestions || [];
+            } catch {
+                // If parsing fails, use the raw text as refined description
+                refinedDescription = content.text;
+            }
+        }
+
+        // Update the task
+        task.description = refinedDescription;
+        task.updatedAt = Date.now();
+        board.tasks[taskIndex] = task;
+
+        await this.saveBoard(userId, teamId, board, 'task-updated', taskId, task);
+
+        log({ module: 'task-orchestrator', teamId, taskId }, 'Task refined');
+        return {
+            success: true,
+            task,
+            refinement: {
+                originalDescription,
+                refinedDescription,
+                suggestions
+            }
+        };
+    }
+
+    /**
+     * Rewrite task using AI - improves clarity and style
+     */
+    async rewriteTask(
+        userId: string,
+        teamId: string,
+        taskId: string,
+        style?: string
+    ): Promise<{
+        success: true;
+        task: KanbanTask;
+        rewrite: {
+            originalTitle: string;
+            rewrittenTitle: string;
+            originalDescription: string;
+            rewrittenDescription: string;
+        };
+    }> {
+        const board = await this.getBoard(userId, teamId);
+        if (!board) throw new Error('Team not initialized');
+
+        const taskIndex = board.tasks.findIndex(t => t.id === taskId);
+        if (taskIndex === -1) throw new Error('Task not found');
+
+        const task = board.tasks[taskIndex];
+        const originalTitle = task.title;
+        const originalDescription = task.description || '';
+
+        const styleInstructions: Record<string, string> = {
+            'concise': 'Make it short and to the point. Remove unnecessary words.',
+            'detailed': 'Add comprehensive details and context.',
+            'technical': 'Use technical terminology and be precise about implementation details.',
+            'user-friendly': 'Use simple language that non-technical stakeholders can understand.'
+        };
+
+        const styleGuide = styleInstructions[style || 'concise'] || styleInstructions['concise'];
+
+        // Call Claude to rewrite the task
+        const anthropic = new Anthropic();
+        const prompt = `You are a task rewriting assistant. Rewrite the following task to improve clarity.
+
+Style: ${styleGuide}
+
+Current Title: ${task.title}
+${originalDescription ? `Current Description: ${originalDescription}` : ''}
+
+Please rewrite both the title and description to be clearer and more effective.
+Respond in JSON format:
+{
+  "rewrittenTitle": "...",
+  "rewrittenDescription": "..."
+}`;
+
+        const message = await anthropic.messages.create({
+            model: 'claude-3-5-sonnet-20241022',
+            max_tokens: 1024,
+            messages: [{ role: 'user', content: prompt }]
+        });
+
+        const content = message.content[0];
+        let rewrittenTitle = originalTitle;
+        let rewrittenDescription = originalDescription;
+
+        if (content.type === 'text') {
+            try {
+                const parsed = JSON.parse(content.text);
+                rewrittenTitle = parsed.rewrittenTitle || originalTitle;
+                rewrittenDescription = parsed.rewrittenDescription || originalDescription;
+            } catch {
+                // If parsing fails, keep originals
+            }
+        }
+
+        // Update the task
+        task.title = rewrittenTitle;
+        task.description = rewrittenDescription;
+        task.updatedAt = Date.now();
+        board.tasks[taskIndex] = task;
+
+        await this.saveBoard(userId, teamId, board, 'task-updated', taskId, task);
+
+        log({ module: 'task-orchestrator', teamId, taskId }, 'Task rewritten');
+        return {
+            success: true,
+            task,
+            rewrite: {
+                originalTitle,
+                rewrittenTitle,
+                originalDescription,
+                rewrittenDescription
+            }
+        };
     }
 }
 

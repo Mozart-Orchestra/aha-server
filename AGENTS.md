@@ -45,6 +45,7 @@ Do not begin by scanning the whole workspace.
 
 - Changes to API response shape are cross-repo changes by default
 - If you change role IDs, task payloads, or board payloads, update `../docs/context/01-contracts.md`
+- Treat `dueDate` and `dependencies` as canonical task-route fields: extend `taskRoutes.ts`, `metaContractSchemas.ts`, and downstream task types together before shipping schedule UI.
 - Prefer durable backend rules in code or shared contracts, not one-off docs
 - Keep root-level historical reports in `../docs/archive`, not in this repo
 - For machine-scoped lifecycle routes, treat daemon-control ACKs as the source of truth: pass the target `machineId` through the control payload and avoid flipping DB session state before the daemon responds
