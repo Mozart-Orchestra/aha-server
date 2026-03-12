@@ -318,6 +318,12 @@ export function runtimeAgentRoutes(app: Fastify) {
         teamId: z.string().optional(),
         error: z.string().optional(),
         timestamp: z.number().int().optional(),
+        bypassResult: z.object({
+            fitnessScore: z.number().min(0).max(100).optional(),
+            summary: z.string().optional(),
+            recommendation: z.string().optional(),
+            targetAgent: z.string().optional(),
+        }).optional(),
         metrics: z.object({
             tokenUsed: z.number().int().min(0).optional(),
             cpuPercent: z.number().min(0).max(100).optional(),
@@ -452,6 +458,14 @@ export function runtimeAgentRoutes(app: Fastify) {
                 bypassProfile: z.enum(['audit', 'init', 'repair']).optional(),
                 autoTerminate: z.boolean().optional(),
                 bypassPrompt: z.string().optional(),
+                genomeId: z.string().optional(),
+                taskProfile: z.object({
+                    domain: z.array(z.string()),
+                    stage: z.string(),
+                    risk: z.string().optional(),
+                    constraints: z.array(z.string()).optional(),
+                }).optional(),
+                parentSessionId: z.string().optional(),
             }).superRefine((value, ctx) => {
                 if (value.executionPlane === 'bypass' && !value.bypass && !value.oneShotBypass) {
                     ctx.addIssue({
@@ -468,6 +482,7 @@ export function runtimeAgentRoutes(app: Fastify) {
         const {
             roleId, mode, machineId, rootPath, displayName, count, executionPlane, bypass,
             oneShotBypass, bypassProfile: oneShotProfile, autoTerminate: oneShotAutoTerminate, bypassPrompt,
+            genomeId, taskProfile, parentSessionId,
         } = request.body as {
             roleId: string;
             mode: AgentMode;
@@ -489,6 +504,9 @@ export function runtimeAgentRoutes(app: Fastify) {
             bypassProfile?: OneShotBypassProfile;
             autoTerminate?: boolean;
             bypassPrompt?: string;
+            genomeId?: string;
+            taskProfile?: { domain: string[]; stage: string; risk?: string; constraints?: string[] };
+            parentSessionId?: string;
         };
 
         // F-023: one-shot bypass shorthand — synthesize a full bypass spec
@@ -698,6 +716,9 @@ export function runtimeAgentRoutes(app: Fastify) {
                             executionPlane: normalizedExecutionPlane,
                             ...(normalizedBypass ? { bypass: normalizedBypass } : {}),
                             ...(oneShotMeta ? { oneShot: oneShotMeta } : {}),
+                            ...(genomeId ? { genomeId } : {}),
+                            ...(taskProfile ? { taskProfile } : {}),
+                            ...(parentSessionId ? { parentSessionId } : {}),
                         }),
                         metadataVersion: 1,
                         displayName: effectiveDisplayName,
@@ -1401,7 +1422,7 @@ export function runtimeAgentRoutes(app: Fastify) {
                 const isBypass = parsedMeta?.executionPlane === 'bypass';
                 if (isBypass) {
                     const profile = parsedMeta?.oneShot?.profile ?? parsedMeta?.bypass?.profile ?? 'custom';
-                    const result = parsedMeta?.bypassResult;
+                    const result = body.bypassResult ?? parsedMeta?.bypassResult;
 
                     void emitBypassCompleteSystemMessage({
                         userId: session.accountId,
@@ -1433,6 +1454,69 @@ export function runtimeAgentRoutes(app: Fastify) {
             active,
             updatedAt: safeTimestamp
         });
+    });
+
+    // === POST /v1/sessions/:sessionId/bypass-result ===
+    // Called by bypass agents via the report_bypass_result MCP tool to persist
+    // evaluation results before the session stop callback fires.
+
+    app.post('/v1/sessions/:sessionId/bypass-result', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ sessionId: z.string() }),
+            body: z.object({
+                fitnessScore: z.number().min(0).max(100),
+                summary: z.string(),
+                recommendation: z.string(),
+                directive: z.enum(['suggest', 'kill', 'resurrect', 'replace', 'pause_new_assignments']).optional(),
+                targetAgent: z.string().optional(),
+            }),
+        },
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { sessionId } = request.params as { sessionId: string };
+        const body = request.body as {
+            fitnessScore: number;
+            summary: string;
+            recommendation: string;
+            directive?: string;
+            targetAgent?: string;
+        };
+
+        const session = await db.session.findFirst({
+            where: { id: sessionId, accountId: userId },
+            select: { id: true, metadata: true },
+        });
+        if (!session) {
+            return reply.code(404).send({ error: 'session_not_found' });
+        }
+
+        let existingMeta: Record<string, unknown> = {};
+        if (typeof session.metadata === 'string' && session.metadata.trim()) {
+            try {
+                existingMeta = JSON.parse(session.metadata) as Record<string, unknown>;
+            } catch {
+                // Ignore parse error — start fresh
+            }
+        }
+
+        const updatedMeta = {
+            ...existingMeta,
+            bypassResult: {
+                fitnessScore: body.fitnessScore,
+                summary: body.summary,
+                recommendation: body.recommendation,
+                ...(body.directive ? { directive: body.directive } : {}),
+                ...(body.targetAgent ? { targetAgent: body.targetAgent } : {}),
+            },
+        };
+
+        await db.session.update({
+            where: { id: sessionId },
+            data: { metadata: JSON.stringify(updatedMeta) },
+        });
+
+        return reply.send({ ok: true });
     });
 
     // === WebSocket: Handle agent status callbacks from daemons ===

@@ -11,8 +11,8 @@ generator json {
 }
 
 datasource db {
-    provider = "sqlite"
-    url      = "file:./local.db"
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
 }
 
 //
@@ -22,6 +22,7 @@ datasource db {
 model Account {
     id              String      @id @default(cuid())
     publicKey       String      @unique
+    googleId        String?     @unique
     seq             Int         @default(0)
     feedSeq         String      @default("0")
     createdAt       DateTime    @default(now())
@@ -52,6 +53,8 @@ model Account {
     AccessKey           AccessKey[]
     UserFeedItem        UserFeedItem[]
     UserKVStore         UserKVStore[]
+    RuntimeAgent        RuntimeAgent[]
+    DeviceCode          DeviceCode[]
 }
 
 model TerminalAuthRequest {
@@ -105,12 +108,24 @@ model Session {
     lastActiveAt      DateTime         @default(now())
     createdAt         DateTime         @default(now())
     updatedAt         DateTime         @updatedAt
-    messages          SessionMessage[]
-    usageReports      UsageReport[]
-    accessKeys        AccessKey[]
+
+    // V2 - Team runtime fields
+    displayName String?
+    machineId   String?
+    mode        String?
+    roleId      String?
+    rootPathHash String?
+
+    messages     SessionMessage[]
+    usageReports UsageReport[]
+    accessKeys   AccessKey[]
+    teamMembers  TeamMember[]
 
     @@unique([accountId, tag])
     @@index([accountId, updatedAt(sort: Desc)])
+    @@index([mode])
+    @@index([machineId])
+    @@index([roleId])
 }
 
 model SessionMessage {
@@ -366,7 +381,7 @@ model UserKVStore {
 }
 
 //
-// V5 - Intelligent Search with pgvector
+// V5 - Intelligent Search
 //
 
 model RoleEmbedding {
@@ -380,4 +395,202 @@ model RoleEmbedding {
 
     @@unique([accountId, roleKey])
     @@index([accountId])
+}
+
+//
+// Device Code Auth (OAuth device flow)
+//
+
+model DeviceCode {
+    id         String   @id @default(cuid())
+    userCode   String   @unique
+    deviceCode String   @unique
+    accountId  String?
+    account    Account? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+    status     String   @default("pending")
+    publicKey  String?
+    expiresAt  DateTime
+    createdAt  DateTime @default(now())
+    updatedAt  DateTime @updatedAt
+
+    @@index([userCode])
+    @@index([deviceCode])
+    @@index([status, expiresAt])
+}
+
+//
+// Teams
+//
+
+model Team {
+    id        String   @id @default(cuid())
+    accountId String
+    name      String
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    roles    TeamRole[]
+    members  TeamMember[]
+    tasks    TeamTask[]
+    messages TeamMessage[]
+
+    @@index([accountId])
+}
+
+model TeamRole {
+    id        String   @id @default(cuid())
+    teamId    String
+    team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+    name      String
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@unique([teamId, id])
+    @@index([teamId])
+}
+
+model TeamMember {
+    teamId      String
+    team        Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+    sessionId   String
+    session     Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+    roleId      String
+    displayName String?
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+
+    @@id([teamId, sessionId])
+    @@index([teamId])
+    @@index([sessionId])
+    @@index([roleId])
+}
+
+//
+// Runtime Agents
+//
+
+model RuntimeAgent {
+    id               String    @id @default(cuid())
+    sessionId        String    @unique
+    teamId           String
+    accountId        String
+    account          Account   @relation(fields: [accountId], references: [id])
+    roleId           String
+    mode             String
+    machineId        String
+    displayName      String?
+    status           String    @default("spawning")
+    currentTaskId    String?
+    tokenUsed        Int       @default(0)
+    cpuPercent        Float     @default(0)
+    memoryMb         Int       @default(0)
+    error            String?
+    rootPath         String?
+    spawnedAt        DateTime  @default(now())
+    lastHeartbeatAt  DateTime
+    stoppedAt        DateTime?
+
+    @@index([teamId])
+    @@index([teamId, status])
+    @@index([accountId])
+    @@index([machineId])
+    @@index([status])
+    @@index([spawnedAt])
+}
+
+//
+// Team Tasks (Kanban)
+//
+
+model TeamTask {
+    id          String    @id @default(cuid())
+    teamId      String
+    team        Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+    title       String
+    description String?
+    status      String    @default("todo")
+    priority    Int       @default(0)
+    assigneeId  String?
+    createdById String
+    dueDate     DateTime?
+    order       Int       @default(0)
+    createdAt   DateTime  @default(now())
+    updatedAt   DateTime  @updatedAt
+
+    @@index([teamId])
+    @@index([teamId, status])
+    @@index([assigneeId])
+    @@index([createdById])
+}
+
+//
+// Team Messages
+//
+
+model TeamMessage {
+    id        String   @id @default(cuid())
+    teamId    String
+    team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+    senderId  String
+    content   Json
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@index([teamId])
+    @@index([senderId])
+    @@index([createdAt])
+}
+
+//
+// Agent Genome (Evolution System)
+//
+
+model AgentGenome {
+    id              String    @id @default(cuid())
+    teamId          String
+    roleId          String?
+    roleName        String?
+
+    // Genome core
+    genomeType      String    @default("seed") // seed | derived | variant
+    parentGenomeId  String?
+    generation      Int       @default(0)
+    variantOf       String?
+
+    // Configuration (JSON blobs)
+    runtime         Json?     // GenomeRuntimeConfig
+    prompt          Json?     // GenomePromptConfig
+    tools           Json?     // GenomeToolConfig
+    permissions     Json?     // GenomePermissionConfig
+    budgets         Json?     // GenomeBudgetConfig
+    memory          Json?     // GenomeMemoryConfig
+    evaluation      Json?     // GenomeEvaluationConfig
+
+    // Fitness and evolution data
+    fitnessScore       Float?
+    fitnessFactors     Json?     // FitnessFactors
+    reliabilityScore   Float?
+    tokenEfficiency    Float?
+    taskCompletionRate Float?
+
+    // Status
+    status          String    @default("active") // active | archived | promoted | rejected
+    isCurrent       Boolean   @default(true)
+
+    // Timestamps
+    createdAt       DateTime  @default(now())
+    updatedAt       DateTime  @updatedAt
+    lastUsedAt      DateTime?
+
+    // Lineage tracking
+    promotedFrom    String?
+    rejectedAt      DateTime?
+    rejectionReason String?
+
+    @@index([teamId])
+    @@index([teamId, roleId])
+    @@index([teamId, status])
+    @@index([teamId, isCurrent])
+    @@index([fitnessScore])
+    @@index([parentGenomeId])
 }

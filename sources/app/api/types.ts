@@ -54,8 +54,37 @@ declare module 'fastify' {
     interface FastifyRequest {
         userId: string;
         startTime?: number;
+        metaActionContext?: MetaActionContext;
     }
     interface FastifyInstance {
         authenticate: any;
     }
+}
+
+export interface MetaActionContext {
+    actor: { sessionId: string; userId: string };
+    permissions: {
+        roleId: string;
+        operation: string;
+        allowed: boolean;
+        requiresConfirmation: boolean;
+        permissionMode: string;
+        accessLevel: string;
+    };
+    audit: {
+        id: string;
+        schemaVersion: string;
+        eventType: string;
+        timestamp: number;
+        actor: { sessionId: string; userId: string };
+        permissions: {
+            roleId: string;
+            operation: string;
+            allowed: boolean;
+            requiresConfirmation: boolean;
+            permissionMode: string;
+            accessLevel: string;
+        };
+        payload?: Record<string, unknown>;
+    };
 }

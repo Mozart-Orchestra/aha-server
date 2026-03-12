@@ -3,7 +3,7 @@ import { log } from "@/utils/log";
 import { awaitShutdown, onShutdown } from "@/utils/shutdown";
 import { db } from './storage/db';
 import { startTimeout } from "./app/presence/timeout";
-import { redis } from "./storage/redis";
+import { redis, closeRedis } from "./storage/redis";
 import { startMetricsServer } from "@/app/monitoring/metrics";
 import { activityCache } from "@/app/presence/sessionCache";
 import { auth } from "./app/auth/auth";
@@ -23,6 +23,9 @@ async function main() {
         activityCache.shutdown();
     });
     await redis.ping();
+    onShutdown('redis', async () => {
+        await closeRedis();
+    });
 
     // Initialize auth module
     await initEncrypt();

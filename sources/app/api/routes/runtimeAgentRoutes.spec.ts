@@ -83,6 +83,20 @@ const testState = vi.hoisted(() => {
     };
 });
 
+const teamSystemMessageMock = vi.hoisted(() => ({
+    emitAgentSpawnSystemMessage: vi.fn(async () => {}),
+    emitBypassSpawnSystemMessage: vi.fn(async () => {}),
+    emitBypassAuditSystemMessage: vi.fn(async () => {}),
+    emitBypassRepairSystemMessage: vi.fn(async () => {}),
+    emitBypassCompleteSystemMessage: vi.fn(async () => {}),
+    emitBypassRecommendationSystemMessage: vi.fn(async () => {}),
+    emitTeamCreateSystemMessage: vi.fn(async () => {}),
+}));
+
+const agentGenomeMock = vi.hoisted(() => ({
+    updateAgentGenomeFitness: vi.fn(async () => {}),
+}));
+
 vi.mock('@/storage/db', () => ({
     db: {
         session: {
@@ -110,6 +124,7 @@ vi.mock('@/storage/db', () => ({
                 if (!session) throw new Error('Session not found');
                 if (data.active !== undefined) session.active = data.active;
                 if (data.lastActiveAt !== undefined) session.lastActiveAt = data.lastActiveAt;
+                if (data.metadata !== undefined) session.metadata = data.metadata;
                 return session;
             }),
             findMany: vi.fn(async ({ where, select }: any) => {
@@ -134,7 +149,10 @@ vi.mock('@/storage/db', () => ({
                 });
             }),
             findFirst: vi.fn(async ({ where }: any) => {
-                return testState.sessions.get(where.id) || null;
+                const session = testState.sessions.get(where.id) || null;
+                if (!session) return null;
+                if (where.accountId && session.accountId !== where.accountId) return null;
+                return session;
             })
         },
         team: {
@@ -196,6 +214,10 @@ vi.mock('@/storage/db', () => ({
         teamRole: {
             findFirst: vi.fn(async ({ where }: any) => {
                 return testState.teamRoles.get(`${where.teamId}-${where.id}`) || null;
+            }),
+            findMany: vi.fn(async ({ where }: any) => {
+                return Array.from(testState.teamRoles.values())
+                    .filter(r => r.teamId === where.teamId);
             })
         },
         machine: {
@@ -204,12 +226,39 @@ vi.mock('@/storage/db', () => ({
                     m.id === where.id && m.accountId === where.accountId
                 ) || null;
             })
+        },
+        runtimeAgent: {
+            findUnique: vi.fn(async () => null),
+            findMany: vi.fn(async () => []),
+            upsert: vi.fn(async ({ create }: any) => create),
         }
     }
 }));
 
 vi.mock('@/utils/log', () => ({
-    log: vi.fn()
+    log: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    logger: {
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+        debug: vi.fn(),
+        trace: vi.fn(),
+        child: vi.fn().mockReturnThis(),
+    },
+    fileConsolidatedLogger: null,
+}));
+
+vi.mock('@/app/team/teamSystemMessage', () => ({
+    emitAgentSpawnSystemMessage: (...a: any[]) => teamSystemMessageMock.emitAgentSpawnSystemMessage(...a),
+    emitBypassSpawnSystemMessage: (...a: any[]) => teamSystemMessageMock.emitBypassSpawnSystemMessage(...a),
+    emitBypassAuditSystemMessage: (...a: any[]) => teamSystemMessageMock.emitBypassAuditSystemMessage(...a),
+    emitBypassRepairSystemMessage: (...a: any[]) => teamSystemMessageMock.emitBypassRepairSystemMessage(...a),
+    emitBypassCompleteSystemMessage: (...a: any[]) => teamSystemMessageMock.emitBypassCompleteSystemMessage(...a),
+    emitBypassRecommendationSystemMessage: (...a: any[]) => teamSystemMessageMock.emitBypassRecommendationSystemMessage(...a),
+    emitTeamCreateSystemMessage: (...a: any[]) => teamSystemMessageMock.emitTeamCreateSystemMessage(...a),
 }));
 
 import { runtimeAgentRoutes } from './runtimeAgentRoutes';
@@ -699,5 +748,311 @@ describe('runtime agent management', () => {
 
         const updatedSession = testState.sessions.get(sessionId);
         expect(updatedSession?.active).toBe(false);
+    });
+
+    // ── F-089: bypassResult field in agent-status callback ────────────────────
+
+    it('uses body.bypassResult in bypass complete message when provided', async () => {
+        const sessionId = 'sess-bypass-body';
+        const teamId = 'team-bypass';
+
+        testState.sessions.set(sessionId, {
+            id: sessionId,
+            tag: 'bypass-body-tag',
+            accountId: 'user-1',
+            metadata: JSON.stringify({ executionPlane: 'bypass' }),
+            metadataVersion: 1,
+            displayName: 'Bypass Agent',
+            mode: 'codex',
+            machineId: 'machine-1',
+            roleId: 'builder',
+            rootPathHash: null,
+            active: true,
+            lastActiveAt: new Date(),
+            createdAt: new Date()
+        });
+
+        teamSystemMessageMock.emitBypassCompleteSystemMessage.mockClear();
+
+        const res = await app.inject({
+            method: 'POST',
+            url: '/v1/agent-status',
+            headers: { 'content-type': 'application/json' },
+            payload: {
+                sessionId,
+                teamId,
+                status: 'stopped',
+                bypassResult: { fitnessScore: 88, summary: 'Great run' }
+            }
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(teamSystemMessageMock.emitBypassCompleteSystemMessage).toHaveBeenCalledWith(
+            expect.objectContaining({ fitnessScore: 88, summary: 'Great run' })
+        );
+    });
+
+    it('falls back to metadata bypassResult when body.bypassResult is absent', async () => {
+        const sessionId = 'sess-bypass-meta';
+        const teamId = 'team-bypass-meta';
+
+        testState.sessions.set(sessionId, {
+            id: sessionId,
+            tag: 'bypass-meta-tag',
+            accountId: 'user-1',
+            metadata: JSON.stringify({
+                executionPlane: 'bypass',
+                bypassResult: { fitnessScore: 60, summary: 'Metadata summary' }
+            }),
+            metadataVersion: 1,
+            displayName: 'Bypass Agent',
+            mode: 'codex',
+            machineId: 'machine-1',
+            roleId: 'builder',
+            rootPathHash: null,
+            active: true,
+            lastActiveAt: new Date(),
+            createdAt: new Date()
+        });
+
+        teamSystemMessageMock.emitBypassCompleteSystemMessage.mockClear();
+
+        const res = await app.inject({
+            method: 'POST',
+            url: '/v1/agent-status',
+            headers: { 'content-type': 'application/json' },
+            payload: { sessionId, teamId, status: 'stopped' }
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(teamSystemMessageMock.emitBypassCompleteSystemMessage).toHaveBeenCalledWith(
+            expect.objectContaining({ fitnessScore: 60, summary: 'Metadata summary' })
+        );
+    });
+
+    it('body.bypassResult takes precedence over metadata bypassResult', async () => {
+        const sessionId = 'sess-bypass-both';
+        const teamId = 'team-bypass-both';
+
+        testState.sessions.set(sessionId, {
+            id: sessionId,
+            tag: 'bypass-both-tag',
+            accountId: 'user-1',
+            metadata: JSON.stringify({
+                executionPlane: 'bypass',
+                bypassResult: { fitnessScore: 30, summary: 'Old metadata result' }
+            }),
+            metadataVersion: 1,
+            displayName: 'Bypass Agent',
+            mode: 'codex',
+            machineId: 'machine-1',
+            roleId: 'builder',
+            rootPathHash: null,
+            active: true,
+            lastActiveAt: new Date(),
+            createdAt: new Date()
+        });
+
+        teamSystemMessageMock.emitBypassCompleteSystemMessage.mockClear();
+
+        const res = await app.inject({
+            method: 'POST',
+            url: '/v1/agent-status',
+            headers: { 'content-type': 'application/json' },
+            payload: {
+                sessionId,
+                teamId,
+                status: 'stopped',
+                bypassResult: { fitnessScore: 92, summary: 'Fresh body result' }
+            }
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(teamSystemMessageMock.emitBypassCompleteSystemMessage).toHaveBeenCalledWith(
+            expect.objectContaining({ fitnessScore: 92, summary: 'Fresh body result' })
+        );
+        expect(teamSystemMessageMock.emitBypassCompleteSystemMessage).not.toHaveBeenCalledWith(
+            expect.objectContaining({ fitnessScore: 30 })
+        );
+    });
+});
+
+describe('POST /v1/sessions/:sessionId/bypass-result', () => {
+    let app: Awaited<ReturnType<typeof buildApp>>;
+
+    beforeEach(async () => {
+        testState.reset();
+        app = await buildApp();
+    });
+
+    afterEach(async () => {
+        await app.close();
+    });
+
+    it('merges bypassResult into session metadata and returns 200', async () => {
+        const userId = 'user-1';
+        const sessionId = 'bypass-sess-1';
+
+        testState.sessions.set(sessionId, {
+            id: sessionId,
+            tag: 'bypass-tag',
+            accountId: userId,
+            metadata: JSON.stringify({ executionPlane: 'bypass' }),
+            metadataVersion: 1,
+            displayName: 'Bypass Agent',
+            mode: 'codex',
+            machineId: 'machine-1',
+            roleId: 'builder',
+            rootPathHash: null,
+            active: true,
+            lastActiveAt: new Date(),
+            createdAt: new Date()
+        });
+
+        const res = await app.inject({
+            method: 'POST',
+            url: `/v1/sessions/${sessionId}/bypass-result`,
+            headers: { 'content-type': 'application/json', 'x-user-id': userId },
+            payload: {
+                fitnessScore: 82,
+                summary: 'Agent performed well on core tasks.',
+                recommendation: 'Improve error handling in edge cases.',
+            }
+        });
+
+        expect(res.statusCode).toBe(200);
+        const body = JSON.parse(res.payload);
+        expect(body.ok).toBe(true);
+
+        const updatedSession = testState.sessions.get(sessionId);
+        const meta = JSON.parse(updatedSession?.metadata as string);
+        expect(meta.executionPlane).toBe('bypass');
+        expect(meta.bypassResult.fitnessScore).toBe(82);
+        expect(meta.bypassResult.summary).toBe('Agent performed well on core tasks.');
+        expect(meta.bypassResult.recommendation).toBe('Improve error handling in edge cases.');
+    });
+
+    it('includes targetAgent in metadata when provided', async () => {
+        const userId = 'user-2';
+        const sessionId = 'bypass-sess-2';
+
+        testState.sessions.set(sessionId, {
+            id: sessionId,
+            tag: 'bypass-tag-2',
+            accountId: userId,
+            metadata: '{}',
+            metadataVersion: 1,
+            displayName: 'Bypass 2',
+            mode: 'codex',
+            machineId: 'machine-1',
+            roleId: 'builder',
+            rootPathHash: null,
+            active: true,
+            lastActiveAt: new Date(),
+            createdAt: new Date()
+        });
+
+        const res = await app.inject({
+            method: 'POST',
+            url: `/v1/sessions/${sessionId}/bypass-result`,
+            headers: { 'content-type': 'application/json', 'x-user-id': userId },
+            payload: {
+                fitnessScore: 60,
+                summary: 'Observed target agent behavior.',
+                recommendation: 'Consider refactoring prompts.',
+                targetAgent: 'target-sess-xyz',
+            }
+        });
+
+        expect(res.statusCode).toBe(200);
+        const updatedSession = testState.sessions.get(sessionId);
+        const meta = JSON.parse(updatedSession?.metadata as string);
+        expect(meta.bypassResult.targetAgent).toBe('target-sess-xyz');
+    });
+
+    it('returns 404 when session does not exist', async () => {
+        const res = await app.inject({
+            method: 'POST',
+            url: '/v1/sessions/nonexistent-session/bypass-result',
+            headers: { 'content-type': 'application/json', 'x-user-id': 'user-1' },
+            payload: {
+                fitnessScore: 50,
+                summary: 'Test',
+                recommendation: 'Test',
+            }
+        });
+
+        expect(res.statusCode).toBe(404);
+        const body = JSON.parse(res.payload);
+        expect(body.error).toBe('session_not_found');
+    });
+
+    it('returns 404 when session belongs to a different user', async () => {
+        const ownerUserId = 'user-owner';
+        const requestingUserId = 'user-other';
+        const sessionId = 'bypass-sess-owned';
+
+        testState.sessions.set(sessionId, {
+            id: sessionId,
+            tag: 'bypass-tag-owned',
+            accountId: ownerUserId,
+            metadata: '{}',
+            metadataVersion: 1,
+            displayName: 'Owned Session',
+            mode: 'codex',
+            machineId: 'machine-1',
+            roleId: 'builder',
+            rootPathHash: null,
+            active: true,
+            lastActiveAt: new Date(),
+            createdAt: new Date()
+        });
+
+        const res = await app.inject({
+            method: 'POST',
+            url: `/v1/sessions/${sessionId}/bypass-result`,
+            headers: { 'content-type': 'application/json', 'x-user-id': requestingUserId },
+            payload: {
+                fitnessScore: 50,
+                summary: 'Test',
+                recommendation: 'Test',
+            }
+        });
+
+        expect(res.statusCode).toBe(404);
+        const body = JSON.parse(res.payload);
+        expect(body.error).toBe('session_not_found');
+    });
+
+    it('rejects body missing required fields', async () => {
+        const userId = 'user-1';
+        const sessionId = 'bypass-sess-validation';
+
+        testState.sessions.set(sessionId, {
+            id: sessionId,
+            tag: 'bypass-tag-v',
+            accountId: userId,
+            metadata: '{}',
+            metadataVersion: 1,
+            displayName: 'Validation Test',
+            mode: 'codex',
+            machineId: 'machine-1',
+            roleId: 'builder',
+            rootPathHash: null,
+            active: true,
+            lastActiveAt: new Date(),
+            createdAt: new Date()
+        });
+
+        const res = await app.inject({
+            method: 'POST',
+            url: `/v1/sessions/${sessionId}/bypass-result`,
+            headers: { 'content-type': 'application/json', 'x-user-id': userId },
+            payload: {
+                // Missing fitnessScore, summary, recommendation
+            }
+        });
+
+        expect(res.statusCode).toBe(400);
     });
 });

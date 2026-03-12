@@ -9,6 +9,7 @@
  */
 
 import { Fastify } from "../types";
+import type { MetaActionContext } from "../types";
 import { log, logger } from "@/utils/log";
 import { RolePermissionService } from "@/services/rolePermissionService";
 
@@ -233,4 +234,18 @@ export function getRolePermissionService(): RolePermissionService {
     throw new Error('RolePermissionService not initialized. Call enablePermissionInterceptor first.');
   }
   return service;
+}
+
+/**
+ * Extract the MetaActionContext from the request object, optionally merging
+ * a payload into the audit envelope.  Returns undefined when no context is set.
+ */
+export function getMetaActionContext(
+  request: { metaActionContext?: unknown },
+  payload?: Record<string, unknown>,
+): MetaActionContext | undefined {
+  const ctx = (request as any).metaActionContext as MetaActionContext | undefined;
+  if (!ctx) return undefined;
+  const audit = payload ? { ...ctx.audit, payload } : { ...ctx.audit };
+  return { ...ctx, audit };
 }

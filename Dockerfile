@@ -13,21 +13,24 @@ COPY ./prisma ./prisma
 # Install dependencies
 RUN yarn install --frozen-lockfile --ignore-engines
 
+# Generate Prisma client
+RUN npx prisma generate
+
 # Copy the rest of the application code
 COPY ./tsconfig.json ./tsconfig.json
 COPY ./vitest.config.ts ./vitest.config.ts
 COPY ./sources ./sources
 
-# Build the Next.js application
+# Build the application
 RUN yarn build
 
 # Stage 2: Runtime
-FROM node:20 AS runner
+FROM node:20-slim AS runner
 
 WORKDIR /app
 
-# Install dependencies
-RUN apt-get update && apt-get install -y python3 ffmpeg && rm -rf /var/lib/apt/lists/*
+# Install runtime deps
+RUN apt-get update && apt-get install -y python3 ffmpeg curl && rm -rf /var/lib/apt/lists/*
 
 # Set environment to production
 ENV NODE_ENV=production
@@ -37,9 +40,10 @@ COPY --from=builder /app/tsconfig.json ./tsconfig.json
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/sources ./sources
+COPY --from=builder /app/prisma ./prisma
 
 # Expose the port the app will run on
-EXPOSE 3000
+EXPOSE 3005
 
-# Command to run the application
-CMD ["yarn", "start"] 
+# Run migrations then start
+CMD ["sh", "-c", "npx prisma migrate deploy && yarn start"]
