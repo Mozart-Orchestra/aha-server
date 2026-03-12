@@ -11,3 +11,5 @@ dist
 
 .claude/
 coverage/
+prisma/local.db
+*.db

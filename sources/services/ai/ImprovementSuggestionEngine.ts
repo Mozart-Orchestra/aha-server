@@ -56,12 +56,21 @@ export interface UserProfile {
 }
 
 export class ImprovementSuggestionEngine {
-  private anthropic: Anthropic;
+  private anthropic: Anthropic | null = null;
 
   constructor() {
-    this.anthropic = new Anthropic({
-      apiKey: process.env.ANTHROPIC_API_KEY,
-    });
+    if (process.env.ANTHROPIC_API_KEY) {
+      this.anthropic = new Anthropic({
+        apiKey: process.env.ANTHROPIC_API_KEY,
+      });
+    }
+  }
+
+  private getClient(): Anthropic {
+    if (!this.anthropic) {
+      throw new Error('ANTHROPIC_API_KEY is not set — ImprovementSuggestionEngine unavailable');
+    }
+    return this.anthropic;
   }
 
   /**
@@ -121,7 +130,7 @@ export class ImprovementSuggestionEngine {
     const prompt = this.buildPrompt(userProfile, ratingData, weaknesses, focusAreas);
 
     try {
-      const message = await this.anthropic.messages.create({
+      const message = await this.getClient().messages.create({
         model: 'claude-3-5-sonnet-20241022',
         max_tokens: 4000,
         messages: [

@@ -127,7 +127,7 @@ export function rpcHandler(userId: string, socket: Socket, rpcListeners: Map<str
             } catch (error) {
                 const duration = Date.now() - startTime;
                 const errorMsg = error instanceof Error ? error.message : 'RPC call failed';
-                // log({ module: 'websocket-rpc' }, `RPC call failed: ${method} - ${errorMsg} (${duration}ms)`);
+                log({ module: 'websocket-rpc' }, `RPC call failed: ${method} - ${errorMsg} (${duration}ms)`);
 
                 // Timeout or error occurred
                 if (callback) {
@@ -138,7 +138,7 @@ export function rpcHandler(userId: string, socket: Socket, rpcListeners: Map<str
                 }
             }
         } catch (error) {
-            // log({ module: 'websocket', level: 'error' }, `Error in rpc-call: ${error}`);
+            log({ module: 'websocket', level: 'error' }, `Error in rpc-call: ${error}`);
             if (callback) {
                 callback({
                     ok: false,

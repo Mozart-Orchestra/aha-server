@@ -26,14 +26,23 @@ export interface SearchOptions {
 }
 
 export class SemanticSearchEngine {
-  private anthropic: Anthropic;
+  private anthropic: Anthropic | null = null;
   private openaiApiKey: string | undefined;
 
   constructor() {
-    this.anthropic = new Anthropic({
-      apiKey: process.env.ANTHROPIC_API_KEY,
-    });
+    if (process.env.ANTHROPIC_API_KEY) {
+      this.anthropic = new Anthropic({
+        apiKey: process.env.ANTHROPIC_API_KEY,
+      });
+    }
     this.openaiApiKey = process.env.OPENAI_API_KEY;
+  }
+
+  private getClient(): Anthropic {
+    if (!this.anthropic) {
+      throw new Error('ANTHROPIC_API_KEY is not set — SemanticSearchEngine unavailable');
+    }
+    return this.anthropic;
   }
 
   /**

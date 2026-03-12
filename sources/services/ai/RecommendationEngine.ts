@@ -9,7 +9,17 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 
-const anthropic = new Anthropic();
+let _anthropic: Anthropic | null = null;
+
+function getAnthropicClient(): Anthropic {
+    if (!_anthropic) {
+        if (!process.env.ANTHROPIC_API_KEY) {
+            throw new Error('ANTHROPIC_API_KEY is not set — cannot use RecommendationEngine');
+        }
+        _anthropic = new Anthropic();
+    }
+    return _anthropic;
+}
 
 export interface ProjectRequirement {
   techStack: string[];        // 技术栈 ['React', 'TypeScript', 'Node.js']
@@ -84,7 +94,7 @@ ${requirement.timeline ? `时间线: ${requirement.timeline}` : ''}
 
 以 JSON 格式输出。`;
 
-    const message = await anthropic.messages.create({
+    const message = await getAnthropicClient().messages.create({
       model: 'claude-3-5-sonnet-20241022',
       max_tokens: 1024,
       messages: [{ role: 'user', content: prompt }]
@@ -130,7 +140,7 @@ ${role.successRate ? `- 成功率: ${(role.successRate * 100).toFixed(0)}%` : ''
   }
 }`;
 
-    const message = await anthropic.messages.create({
+    const message = await getAnthropicClient().messages.create({
       model: 'claude-3-5-sonnet-20241022',
       max_tokens: 512,
       messages: [{ role: 'user', content: prompt }]

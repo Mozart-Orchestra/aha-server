@@ -7,6 +7,18 @@ import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
 import * as privacyKit from "privacy-kit";
 import Anthropic from "@anthropic-ai/sdk";
 
+let _anthropicClient: Anthropic | null = null;
+
+function getAnthropicClient(): Anthropic {
+    if (!_anthropicClient) {
+        if (!process.env.ANTHROPIC_API_KEY) {
+            throw new Error('ANTHROPIC_API_KEY is not set — cannot use AI task operations');
+        }
+        _anthropicClient = new Anthropic();
+    }
+    return _anthropicClient;
+}
+
 /**
  * Server-side Task Orchestration Engine
  *
@@ -76,7 +88,8 @@ export interface KanbanBoard {
     tasks: KanbanTask[];
     version?: number;
     updatedAt?: number;
-    team?: any;
+    team?: { members?: Array<{ sessionId: string }> };
+    members?: Array<{ sessionId: string }>;
 }
 
 const DEFAULT_STATUS_PROPAGATION: StatusPropagation = {
@@ -108,8 +121,8 @@ export class TaskOrchestrator {
      * - board.members[].sessionId (legacy shape)
      */
     private getTeamMemberSessionIds(board: KanbanBoard): string[] {
-        const teamMembers = Array.isArray((board as any)?.team?.members) ? (board as any).team.members : [];
-        const legacyMembers = Array.isArray((board as any)?.members) ? (board as any).members : [];
+        const teamMembers = Array.isArray(board?.team?.members) ? board.team!.members! : [];
+        const legacyMembers = Array.isArray(board?.members) ? board.members! : [];
 
         const sessionIds = [...teamMembers, ...legacyMembers]
             .map((member: any) => member?.sessionId)
@@ -796,7 +809,7 @@ export class TaskOrchestrator {
         const originalDescription = task.description || '';
 
         // Call Claude to refine the task
-        const anthropic = new Anthropic();
+        const anthropic = getAnthropicClient();
         const prompt = `You are a task refinement assistant. Given a task title and description, create a more detailed, actionable version with clear acceptance criteria.
 
 Task Title: ${task.title}
@@ -891,7 +904,7 @@ Respond in JSON format:
         const styleGuide = styleInstructions[style || 'concise'] || styleInstructions['concise'];
 
         // Call Claude to rewrite the task
-        const anthropic = new Anthropic();
+        const anthropic = getAnthropicClient();
         const prompt = `You are a task rewriting assistant. Rewrite the following task to improve clarity.
 
 Style: ${styleGuide}
