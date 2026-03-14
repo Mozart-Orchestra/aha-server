@@ -29,10 +29,15 @@ export async function feedPost(
     }
 
     // Allocate new counter
+    const current = await tx.account.findUniqueOrThrow({
+        where: { id: ctx.uid },
+        select: { feedSeq: true }
+    });
+    const nextSeq = (parseInt(current.feedSeq, 10) + 1).toString();
     const user = await tx.account.update({
         where: { id: ctx.uid },
         select: { feedSeq: true },
-        data: { feedSeq: { increment: 1 } }
+        data: { feedSeq: nextSeq }
     });
 
     // Create new item
@@ -48,7 +53,7 @@ export async function feedPost(
     const result = {
         ...item,
         createdAt: item.createdAt.getTime(),
-        cursor: '0-' + item.counter.toString(10)
+        cursor: '0-' + item.counter
     };
 
     // Emit socket event after transaction completes

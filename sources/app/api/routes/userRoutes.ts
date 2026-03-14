@@ -78,8 +78,7 @@ export async function userRoutes(app: Fastify) {
         const users = await db.account.findMany({
             where: {
                 username: {
-                    startsWith: query,
-                    mode: 'insensitive'
+                    startsWith: query
                 }
             },
             include: {
@@ -108,9 +107,9 @@ export async function userRoutes(app: Fastify) {
         );
 
         // Build user profiles with cached relationship status
-        const userProfiles = users.map(user => {
+        const userProfiles = users.map((user) => {
             const status = relationshipMap.get(user.id) || RelationshipStatus.none;
-            return buildUserProfile(user, status);
+            return buildUserProfile(user as typeof user & { githubUser: { profile: any } | null }, status);
         });
 
         return reply.send({
