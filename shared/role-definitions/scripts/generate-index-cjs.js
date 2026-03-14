@@ -60,7 +60,7 @@ function convertRoleToIndexCjs(role, globalSettings) {
 
   // Add role-specific protocol if available
   const roleSpecificProtocolKey = Object.keys(protocols).find(key =>
-    ['master', 'builder', 'framer', 'scout', 'scribe', 'qa', 'reviewer'].includes(key)
+    ['master', 'org-manager', 'builder', 'framer', 'scout', 'scribe', 'qa', 'reviewer'].includes(key)
   );
 
   if (roleSpecificProtocolKey && protocols[roleSpecificProtocolKey]) {

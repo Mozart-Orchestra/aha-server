@@ -31,20 +31,28 @@ export function teamManagementRoutes(app: Fastify) {
             body: z.object({
                 sessionId: z.string(),
                 roleId: z.string(),
-                displayName: z.string().optional()
+                displayName: z.string().optional(),
+                specId: z.string().optional(),
+                parentSessionId: z.string().optional(),
+                executionPlane: z.string().optional(),
+                runtimeType: z.string().optional()
             })
         }
     }, async (request, reply) => {
         const userId = request.userId;
         const { teamId } = request.params as { teamId: string };
-        const { sessionId, roleId, displayName } = request.body as {
+        const { sessionId, roleId, displayName, specId, parentSessionId, executionPlane, runtimeType } = request.body as {
             sessionId: string;
             roleId: string;
             displayName?: string;
+            specId?: string;
+            parentSessionId?: string;
+            executionPlane?: string;
+            runtimeType?: string;
         };
 
         try {
-            const result = await addTeamMember(userId, teamId, sessionId, roleId, displayName);
+            const result = await addTeamMember(userId, teamId, sessionId, roleId, displayName, specId, parentSessionId, executionPlane, runtimeType);
             return reply.send(result);
         } catch (error: any) {
             log({ module: 'team-management', level: 'error' }, `Failed to add member: ${error}`);
@@ -274,7 +282,11 @@ async function addTeamMember(
     teamId: string,
     sessionId: string,
     roleId: string,
-    displayName?: string
+    displayName?: string,
+    specId?: string,
+    parentSessionId?: string,
+    executionPlane?: string,
+    runtimeType?: string
 ): Promise<{ success: boolean; member: any }> {
     // Query by teamId only - team artifacts are shared across all team members
     const artifact = await db.artifact.findFirst({
@@ -304,13 +316,21 @@ async function addTeamMember(
     if (existing) {
         existing.roleId = roleId;
         existing.displayName = displayName || existing.displayName;
+        if (specId !== undefined) existing.specId = specId;
+        if (parentSessionId !== undefined) existing.parentSessionId = parentSessionId;
+        if (executionPlane !== undefined) existing.executionPlane = executionPlane;
+        if (runtimeType !== undefined) existing.runtimeType = runtimeType;
     } else {
         board.team.members.push({
             sessionId,
             roleId,
             displayName: displayName || `Agent ${roleId}`,
             focusAreas: [],
-            joinedAt: Date.now()
+            joinedAt: Date.now(),
+            ...(specId !== undefined && { specId }),
+            ...(parentSessionId !== undefined && { parentSessionId }),
+            ...(executionPlane !== undefined && { executionPlane }),
+            ...(runtimeType !== undefined && { runtimeType })
         });
     }
 
