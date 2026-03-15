@@ -307,4 +307,58 @@ export function evolutionRoutes(app: Fastify) {
             return reply.code(500).send({ error: error.message });
         }
     });
+
+    // =========================================================================
+    // POST /v1/genomes/:id/publish
+    // Publish a private genome from Channel Server to Marketplace Server.
+    // =========================================================================
+    app.post('/v1/genomes/:id/publish', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ id: z.string() }),
+            body: z.object({
+                marketplaceUrl: z.string().url().optional(),
+            }),
+        }
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { id } = request.params as { id: string };
+        const { marketplaceUrl } = request.body as { marketplaceUrl?: string };
+
+        try {
+            const genome = await db.genome.findFirst({
+                where: { id, accountId: userId },
+            });
+            if (!genome) {
+                return reply.code(404).send({ error: 'Genome not found' });
+            }
+
+            const hubUrl = marketplaceUrl ?? process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
+
+            // 发布到 Marketplace Server
+            const spec = JSON.parse(genome.spec);
+            const publishBody = {
+                namespace: genome.namespace ?? spec.namespace,
+                name: genome.name,
+                description: genome.description ?? undefined,
+                spec: genome.spec,
+                tags: genome.tags ? JSON.parse(genome.tags) : undefined,
+                category: genome.category ?? spec.category,
+                isPublic: true,
+            };
+
+            // 使用动态 import 避免循环依赖；axios 已存在于 happy-server
+            const { default: axios } = await import('axios');
+            const res = await axios.post(`${hubUrl}/genomes`, publishBody, {
+                headers: { 'Content-Type': 'application/json' },
+                timeout: 10000,
+            });
+
+            log({ module: 'evolution' }, `Genome ${id} published to marketplace: ${hubUrl}`);
+            return reply.code(201).send({ published: res.data });
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `genome publish error: ${error}`);
+            return reply.code(500).send({ error: error.message });
+        }
+    });
 }
