@@ -26,6 +26,7 @@ import { teamMessagesRoutes } from "./routes/teamMessagesRoutes";
 import { teamKeyRoutes } from "./routes/teamKeyRoutes";
 import { taskRoutes } from "./routes/taskRoutes";
 import { teamManagementRoutes } from "./routes/teamManagementRoutes";
+import { evolutionRoutes } from "./routes/evolutionRoutes";
 import { getCorsConfig } from "./utils/corsConfig";
 import { getDefaultRateLimitConfig } from "./utils/rateLimitConfig";
 
@@ -162,6 +163,7 @@ export async function startApi() {
     teamKeyRoutes(typed);
     taskRoutes(typed);
     teamManagementRoutes(typed);
+    evolutionRoutes(typed);
 
     // Start HTTP 
     const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3005;

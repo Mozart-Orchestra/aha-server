@@ -52,6 +52,7 @@ model Account {
     AccessKey           AccessKey[]
     UserFeedItem        UserFeedItem[]
     UserKVStore         UserKVStore[]
+    Genome              Genome[]
 }
 
 model TerminalAuthRequest {
@@ -360,4 +361,31 @@ model UserKVStore {
 
     @@unique([accountId, key])
     @@index([accountId])
+}
+
+//
+// Agent Genomes — reusable agent specifications (adocker images)
+//
+
+model Genome {
+    id              String   @id @default(cuid())
+    accountId       String
+    account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+    name            String
+    description     String?
+    /// Serialized GenomeSpec JSON (systemPrompt, tools, modelId, permissionMode, etc.)
+    spec            String
+    /// Session ID of the agent that created/last-mutated this genome
+    parentSessionId String
+    /// Optional team scope (null = personal / global)
+    teamId          String?
+    spawnCount      Int      @default(0)
+    lastSpawnedAt   DateTime?
+    isPublic        Boolean  @default(false)
+    createdAt       DateTime @default(now())
+    updatedAt       DateTime @updatedAt
+
+    @@index([accountId, updatedAt(sort: Desc)])
+    @@index([teamId])
+    @@index([parentSessionId])
 }
