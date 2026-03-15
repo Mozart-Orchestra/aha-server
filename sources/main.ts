@@ -11,6 +11,7 @@ import { startDatabaseMetricsUpdater } from "@/app/monitoring/metrics2";
 import { initEncrypt } from "./modules/encrypt";
 import { initGithub } from "./modules/github";
 import { loadFiles } from "./storage/files";
+import { seedSystemGenomes } from "./app/startup/seedSystemGenomes";
 
 async function main() {
 
@@ -29,6 +30,9 @@ async function main() {
     await initGithub();
     await loadFiles();
     await auth.init();
+
+    // Seed built-in genomes
+    await seedSystemGenomes();
 
     //
     // Start
