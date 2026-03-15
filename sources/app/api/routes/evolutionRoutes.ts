@@ -70,6 +70,37 @@ export function evolutionRoutes(app: Fastify) {
     });
 
     // =========================================================================
+    // GET /v1/genomes/:id
+    // Fetch a single genome by ID (used by CLI when spawning with specId).
+    // Returns the genome if the caller owns it or it is public.
+    // =========================================================================
+    app.get('/v1/genomes/:id', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ id: z.string() }),
+        }
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { id } = request.params as { id: string };
+
+        try {
+            const genome = await db.genome.findFirst({
+                where: {
+                    id,
+                    OR: [{ accountId: userId }, { isPublic: true }],
+                },
+            });
+            if (!genome) {
+                return reply.code(404).send({ error: 'Genome not found' });
+            }
+            return reply.send({ genome });
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `genome get error: ${error}`);
+            return reply.code(500).send({ error: error.message });
+        }
+    });
+
+    // =========================================================================
     // GET /v1/genomes
     // List genomes for the authenticated user.
     // Supports ?teamId=, ?parentSessionId=, ?limit=, ?offset=
