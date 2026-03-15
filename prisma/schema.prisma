@@ -379,13 +379,25 @@ model Genome {
     parentSessionId String
     /// Optional team scope (null = personal / global)
     teamId          String?
+    /// Namespace for scoping: '@official', '@org-name', or null for personal
+    namespace       String?
+    /// Auto-incrementing version within same namespace+name. 1-based.
+    /// When spec changes, a new record is inserted (old records immutable).
+    version         Int      @default(1)
+    /// JSON array of searchable tags e.g. '["supervisor","bypass","monitoring"]'
+    tags            String?
+    /// Category for marketplace browsing e.g. 'coordination', 'development', 'qa'
+    category        String?
     spawnCount      Int      @default(0)
     lastSpawnedAt   DateTime?
     isPublic        Boolean  @default(false)
     createdAt       DateTime @default(now())
     updatedAt       DateTime @updatedAt
 
+    @@unique([namespace, name, version])
     @@index([accountId, updatedAt(sort: Desc)])
     @@index([teamId])
     @@index([parentSessionId])
+    @@index([namespace])
+    @@index([category])
 }
