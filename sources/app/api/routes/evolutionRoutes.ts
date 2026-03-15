@@ -11,6 +11,9 @@ import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
  *   GET  /v1/teams/:teamId/bypass-agents  - List active bypass agents for a team
  *   GET  /v1/genomes                      - List genomes (filterable by teamId)
  *   POST /v1/genomes                      - Register a new genome
+ *   GET  /v1/genomes/:namespace/:name/latest   - Latest version of a genome
+ *   GET  /v1/genomes/:namespace/:name/versions - Version history of a genome
+ *   GET  /v1/genomes/:namespace/:name/:version - Specific version (immutable, cacheable)
  *
  * Bypass agents are team members with executionPlane === 'bypass' (supervisor, help-agent).
  * They are stored in the team artifact body alongside regular members.
@@ -207,6 +210,100 @@ export function evolutionRoutes(app: Fastify) {
             return reply.code(201).send({ genome });
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome create error: ${error}`);
+            return reply.code(500).send({ error: error.message });
+        }
+    });
+
+    // =========================================================================
+    // GET /v1/genomes/:namespace/:name/latest
+    // Returns the latest version of a genome by namespace + name.
+    // =========================================================================
+    app.get('/v1/genomes/:namespace/:name/latest', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ namespace: z.string(), name: z.string() }),
+        }
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { namespace, name } = request.params as { namespace: string; name: string };
+        try {
+            const genome = await db.genome.findFirst({
+                where: {
+                    namespace,
+                    name,
+                    OR: [{ accountId: userId }, { isPublic: true }],
+                },
+                orderBy: { version: 'desc' },
+            });
+            if (!genome) return reply.code(404).send({ error: 'Genome not found' });
+            return reply.send({ genome });
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `genome latest error: ${error}`);
+            return reply.code(500).send({ error: error.message });
+        }
+    });
+
+    // =========================================================================
+    // GET /v1/genomes/:namespace/:name/versions
+    // Returns version history for a genome by namespace + name.
+    // =========================================================================
+    app.get('/v1/genomes/:namespace/:name/versions', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ namespace: z.string(), name: z.string() }),
+        }
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { namespace, name } = request.params as { namespace: string; name: string };
+        try {
+            const versions = await db.genome.findMany({
+                where: {
+                    namespace,
+                    name,
+                    OR: [{ accountId: userId }, { isPublic: true }],
+                },
+                orderBy: { version: 'asc' },
+                select: { id: true, version: true, createdAt: true, updatedAt: true, description: true },
+            });
+            return reply.send({ versions });
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `genome versions error: ${error}`);
+            return reply.code(500).send({ error: error.message });
+        }
+    });
+
+    // =========================================================================
+    // GET /v1/genomes/:namespace/:name/:version
+    // Returns a specific version of a genome (immutable — safe to cache forever).
+    // MUST be registered AFTER /latest and /versions to avoid param conflicts.
+    // =========================================================================
+    app.get('/v1/genomes/:namespace/:name/:version', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                namespace: z.string(),
+                name: z.string(),
+                version: z.coerce.number().int().min(1),
+            }),
+        }
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { namespace, name, version } = request.params as { namespace: string; name: string; version: number };
+        try {
+            const genome = await db.genome.findFirst({
+                where: {
+                    namespace,
+                    name,
+                    version,
+                    OR: [{ accountId: userId }, { isPublic: true }],
+                },
+            });
+            if (!genome) return reply.code(404).send({ error: 'Genome not found' });
+            // versioned genome is immutable — safe to cache forever
+            reply.header('Cache-Control', 'public, immutable, max-age=31536000');
+            return reply.send({ genome });
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `genome version error: ${error}`);
             return reply.code(500).send({ error: error.message });
         }
     });
