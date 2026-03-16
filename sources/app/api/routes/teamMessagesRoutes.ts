@@ -71,7 +71,7 @@ export function teamMessagesRoutes(app: Fastify) {
                 teamId: z.string()
             }),
             querystring: z.object({
-                limit: z.coerce.number().int().min(1).max(200).default(100),
+                limit: z.coerce.number().int().min(1).max(1000).default(500),
                 before: z.string().optional()
             })
         }
@@ -97,7 +97,7 @@ export function teamMessagesRoutes(app: Fastify) {
             }
 
             const prefix = `team_messages.${teamId}.`;
-            const fetchLimit = Math.min((limit ?? 100), 200);
+            const fetchLimit = Math.min((limit ?? 500), 1000);
 
             // Use direct DB access to get latest messages (reverse order)
             // Key format: team_messages.{teamId}.{timestamp}.{messageId}
