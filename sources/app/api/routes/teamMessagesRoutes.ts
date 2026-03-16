@@ -39,9 +39,9 @@ const TeamMessageSchema = z.object({
     fromSessionId: z.string().optional(),
     fromRole: z.string().optional(),
     fromDisplayName: z.string().optional(),
-    content: z.string().max(2000),
+    content: z.string().max(50000),  // agents send long messages; raised from 2000
     shortContent: z.string().optional(),
-    type: z.enum(['chat', 'task-update', 'notification', 'role-assignment', 'system']),
+    type: z.enum(['chat', 'task-update', 'notification', 'role-assignment', 'system']).or(z.string()),
     mentions: z.array(z.string()).optional(),
     timestamp: z.number(),
     metadata: TeamMessageMetadataSchema.optional()
