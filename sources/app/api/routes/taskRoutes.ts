@@ -2,6 +2,7 @@ import { Fastify } from "../types";
 import { z } from "zod";
 import { log } from "@/utils/log";
 import { taskOrchestrator } from "@/app/task/taskOrchestrator";
+import { isTaskOperationError, TASK_ERROR_CODES } from "@/app/task/taskErrors";
 
 /**
  * Task Routes - Server-Driven Task Management API
@@ -188,6 +189,9 @@ export function taskRoutes(app: Fastify) {
             log({ module: 'task-routes', teamId, taskId }, 'Task updated');
             return reply.send({ success: true, task });
         } catch (error: any) {
+            if (isTaskOperationError(error, TASK_ERROR_CODES.TASK_ACK_REQUIRED)) {
+                return reply.code(400).send({ error: error.message });
+            }
             if (error.message === 'Task not found' || error.message === 'Team not found') {
                 return reply.code(404).send({ error: error.message });
             }
@@ -274,7 +278,7 @@ export function taskRoutes(app: Fastify) {
             if (error.message === 'Task not found' || error.message === 'Team not found') {
                 return reply.code(404).send({ error: error.message });
             }
-            if (error.message?.includes('already being executed')) {
+            if (isTaskOperationError(error, TASK_ERROR_CODES.DUPLICATE_EXECUTION_CONFLICT)) {
                 return reply.code(400).send({ error: error.message });
             }
             log({ module: 'task-routes', level: 'error' }, `Failed to start task: ${error}`);

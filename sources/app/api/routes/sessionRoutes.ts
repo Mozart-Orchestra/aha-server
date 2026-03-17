@@ -33,6 +33,11 @@ export function sessionRoutes(app: Fastify) {
                 dataEncryptionKey: true,
                 active: true,
                 lastActiveAt: true,
+                _count: {
+                    select: {
+                        messages: true,
+                    }
+                },
                 // messages: {
                 //     orderBy: { seq: 'desc' },
                 //     take: 1,
@@ -65,6 +70,7 @@ export function sessionRoutes(app: Fastify) {
                     agentState: v.agentState,
                     agentStateVersion: v.agentStateVersion,
                     dataEncryptionKey: v.dataEncryptionKey ? Buffer.from(v.dataEncryptionKey).toString('base64') : null,
+                    persistedMessageCount: v._count.messages,
                     lastMessage: null
                 };
             })
@@ -103,6 +109,11 @@ export function sessionRoutes(app: Fastify) {
                 dataEncryptionKey: true,
                 active: true,
                 lastActiveAt: true,
+                _count: {
+                    select: {
+                        messages: true,
+                    }
+                },
             }
         });
 
@@ -119,6 +130,7 @@ export function sessionRoutes(app: Fastify) {
                 agentState: v.agentState,
                 agentStateVersion: v.agentStateVersion,
                 dataEncryptionKey: v.dataEncryptionKey ? Buffer.from(v.dataEncryptionKey).toString('base64') : null,
+                persistedMessageCount: v._count.messages,
             }))
         });
     });
@@ -183,6 +195,11 @@ export function sessionRoutes(app: Fastify) {
                 dataEncryptionKey: true,
                 active: true,
                 lastActiveAt: true,
+                _count: {
+                    select: {
+                        messages: true,
+                    }
+                },
             }
         });
 
@@ -210,6 +227,7 @@ export function sessionRoutes(app: Fastify) {
                 agentState: v.agentState,
                 agentStateVersion: v.agentStateVersion,
                 dataEncryptionKey: v.dataEncryptionKey ? Buffer.from(v.dataEncryptionKey).toString('base64') : null,
+                persistedMessageCount: v._count.messages,
             })),
             nextCursor,
             hasNext
@@ -220,6 +238,7 @@ export function sessionRoutes(app: Fastify) {
     app.post('/v1/sessions', {
         schema: {
             body: z.object({
+                sessionId: z.string().optional(),
                 tag: z.string(),
                 metadata: z.string(),
                 agentState: z.string().nullish(),
@@ -229,7 +248,55 @@ export function sessionRoutes(app: Fastify) {
         preHandler: app.authenticate
     }, async (request, reply) => {
         const userId = request.userId;
-        const { tag, metadata, dataEncryptionKey } = request.body;
+        const { sessionId, tag, metadata, dataEncryptionKey } = request.body;
+
+        if (sessionId) {
+            let exactSession = await db.session.findFirst({
+                where: {
+                    id: sessionId,
+                    accountId: userId,
+                }
+            });
+
+            if (exactSession) {
+                if (exactSession.tag !== tag) {
+                    const conflictingSession = await db.session.findFirst({
+                        where: {
+                            accountId: userId,
+                            tag,
+                        },
+                        select: { id: true },
+                    });
+
+                    if (!conflictingSession || conflictingSession.id === exactSession.id) {
+                        exactSession = await db.session.update({
+                            where: { id: exactSession.id },
+                            data: { tag },
+                        });
+                        log({ module: 'session-create', sessionId: exactSession.id, userId, tag }, `Migrated recovered session to stable tag ${tag}`);
+                    }
+                }
+
+                log({ module: 'session-create', sessionId: exactSession.id, userId, tag }, `Recovered existing session by id: ${exactSession.id}`);
+                return reply.send({
+                    session: {
+                        id: exactSession.id,
+                        seq: exactSession.seq,
+                        metadata: exactSession.metadata,
+                        metadataVersion: exactSession.metadataVersion,
+                        agentState: exactSession.agentState,
+                        agentStateVersion: exactSession.agentStateVersion,
+                        dataEncryptionKey: exactSession.dataEncryptionKey ? Buffer.from(exactSession.dataEncryptionKey).toString('base64') : null,
+                        active: exactSession.active,
+                        activeAt: exactSession.lastActiveAt.getTime(),
+                        createdAt: exactSession.createdAt.getTime(),
+                        updatedAt: exactSession.updatedAt.getTime(),
+                        lastMessage: null,
+                        tag: exactSession.tag,
+                    }
+                });
+            }
+        }
 
         const session = await db.session.findFirst({
             where: {
@@ -242,6 +309,7 @@ export function sessionRoutes(app: Fastify) {
             return reply.send({
                 session: {
                     id: session.id,
+                    tag: session.tag,
                     seq: session.seq,
                     metadata: session.metadata,
                     metadataVersion: session.metadataVersion,
@@ -357,6 +425,7 @@ export function sessionRoutes(app: Fastify) {
             return reply.send({
                 session: {
                     id: session.id,
+                    tag: session.tag,
                     seq: session.seq,
                     metadata: session.metadata,
                     metadataVersion: session.metadataVersion,
@@ -410,7 +479,12 @@ export function sessionRoutes(app: Fastify) {
             }
         });
 
+        const totalCount = await db.sessionMessage.count({
+            where: { sessionId }
+        });
+
         return reply.send({
+            totalCount,
             messages: messages.map((v) => ({
                 id: v.id,
                 seq: v.seq,

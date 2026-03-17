@@ -29,7 +29,9 @@ export function teamManagementRoutes(app: Fastify) {
         schema: {
             params: z.object({ teamId: z.string() }),
             body: z.object({
+                memberId: z.string().optional(),
                 sessionId: z.string(),
+                sessionTag: z.string().optional(),
                 roleId: z.string(),
                 displayName: z.string().optional(),
                 specId: z.string().optional(),
@@ -41,8 +43,10 @@ export function teamManagementRoutes(app: Fastify) {
     }, async (request, reply) => {
         const userId = request.userId;
         const { teamId } = request.params as { teamId: string };
-        const { sessionId, roleId, displayName, specId, parentSessionId, executionPlane, runtimeType } = request.body as {
+        const { memberId, sessionId, sessionTag, roleId, displayName, specId, parentSessionId, executionPlane, runtimeType } = request.body as {
+            memberId?: string;
             sessionId: string;
+            sessionTag?: string;
             roleId: string;
             displayName?: string;
             specId?: string;
@@ -52,7 +56,7 @@ export function teamManagementRoutes(app: Fastify) {
         };
 
         try {
-            const result = await addTeamMember(userId, teamId, sessionId, roleId, displayName, specId, parentSessionId, executionPlane, runtimeType);
+            const result = await addTeamMember(userId, teamId, memberId, sessionId, sessionTag, roleId, displayName, specId, parentSessionId, executionPlane, runtimeType);
             return reply.send(result);
         } catch (error: any) {
             log({ module: 'team-management', level: 'error' }, `Failed to add member: ${error}`);
@@ -280,7 +284,9 @@ export function teamManagementRoutes(app: Fastify) {
 async function addTeamMember(
     userId: string,
     teamId: string,
+    memberId: string | undefined,
     sessionId: string,
+    sessionTag: string | undefined,
     roleId: string,
     displayName?: string,
     specId?: string,
@@ -312,9 +318,17 @@ async function addTeamMember(
     }
 
     // Check if already exists
-    const existing = board.team.members.find((m: any) => m.sessionId === sessionId);
+    const existing = board.team.members.find((m: any) => {
+        if (memberId && m.memberId) {
+            return m.memberId === memberId;
+        }
+        return m.sessionId === sessionId;
+    });
     if (existing) {
+        existing.sessionId = sessionId;
+        if (memberId !== undefined) existing.memberId = memberId;
         existing.roleId = roleId;
+        if (sessionTag !== undefined) existing.sessionTag = sessionTag;
         existing.displayName = displayName || existing.displayName;
         if (specId !== undefined) existing.specId = specId;
         if (parentSessionId !== undefined) existing.parentSessionId = parentSessionId;
@@ -322,7 +336,9 @@ async function addTeamMember(
         if (runtimeType !== undefined) existing.runtimeType = runtimeType;
     } else {
         board.team.members.push({
+            ...(memberId !== undefined && { memberId }),
             sessionId,
+            ...(sessionTag !== undefined && { sessionTag }),
             roleId,
             displayName: displayName || `Agent ${roleId}`,
             focusAreas: [],

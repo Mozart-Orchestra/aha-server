@@ -9,6 +9,7 @@ import { kvList } from "@/app/kv/kvList";
 import { kvMutate } from "@/app/kv/kvMutate";
 import { encryptString, decryptString } from "@/modules/encrypt";
 import { teamMessagesCounter, teamTaskOperationsCounter } from "@/app/monitoring/metrics2";
+import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
 
 /**
  * Team Messages Routes
@@ -51,6 +52,48 @@ function buildEncryptionPath(userId: string, teamId: string, messageId: string) 
     return ['user', userId, 'teams', teamId, 'messages', messageId];
 }
 
+async function canUserAccessTeam(userId: string, teamId: string): Promise<boolean> {
+    const ownedTeam = await db.artifact.findFirst({
+        where: { id: teamId, accountId: userId },
+        select: { id: true }
+    });
+    if (ownedTeam) {
+        return true;
+    }
+
+    const sharedTeam = await db.artifact.findUnique({
+        where: { id: teamId },
+        select: { body: true }
+    });
+    if (!sharedTeam?.body) {
+        return false;
+    }
+
+    try {
+        const parsed = parseTeamArtifactBody(sharedTeam.body) as Record<string, any>;
+        const members = Array.isArray(parsed.team?.members) ? parsed.team.members : [];
+        const memberSessionIds = members
+            .map((member: any) => member?.sessionId)
+            .filter((sessionId: any): sessionId is string => typeof sessionId === 'string' && sessionId.length > 0);
+
+        if (memberSessionIds.length === 0) {
+            return false;
+        }
+
+        const session = await db.session.findFirst({
+            where: {
+                accountId: userId,
+                id: { in: memberSessionIds }
+            },
+            select: { id: true }
+        });
+
+        return !!session;
+    } catch {
+        return false;
+    }
+}
+
 export function teamMessagesRoutes(app: Fastify) {
     log({ module: 'api' }, 'Registering teamMessagesRoutes...');
 
@@ -83,13 +126,7 @@ export function teamMessagesRoutes(app: Fastify) {
         const { limit, before } = request.query as { limit?: number, before?: string };
 
         try {
-            // Verify team exists and belongs to the current user
-            const team = await db.artifact.findFirst({
-                where: { id: teamId, accountId: userId },
-                select: { id: true }
-            });
-
-            if (!team) {
+            if (!(await canUserAccessTeam(userId, teamId))) {
                 return reply.code(404).send({ error: 'Team not found' });
             }
 
@@ -241,19 +278,7 @@ export function teamMessagesRoutes(app: Fastify) {
                 }
             }
 
-            // Verify team exists
-            const team = await db.artifact.findFirst({
-                where: {
-                    id: teamId,
-                    accountId: userId
-                },
-                select: {
-                    id: true,
-                    header: true
-                }
-            });
-
-            if (!team) {
+            if (!(await canUserAccessTeam(userId, teamId))) {
                 return reply.code(404).send({ error: 'Team not found' });
             }
 

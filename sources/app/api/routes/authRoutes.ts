@@ -6,36 +6,88 @@ import { auth } from "@/app/auth/auth";
 import { log } from "@/utils/log";
 
 export function authRoutes(app: Fastify) {
-    app.post('/v1/auth', {
-        schema: {
-            body: z.object({
-                publicKey: z.string(),
-                challenge: z.string(),
-                signature: z.string()
-            })
-        }
-    }, async (request, reply) => {
+    const secretAuthSchema = {
+        body: z.object({
+            publicKey: z.string(),
+            challenge: z.string(),
+            signature: z.string()
+        })
+    };
+
+    async function authenticateSecretKey(
+        body: { publicKey: string; challenge: string; signature: string },
+        createIfMissing: boolean
+    ) {
         const tweetnacl = (await import("tweetnacl")).default;
-        const publicKey = privacyKit.decodeBase64(request.body.publicKey);
-        const challenge = privacyKit.decodeBase64(request.body.challenge);
-        const signature = privacyKit.decodeBase64(request.body.signature);
+        const publicKey = privacyKit.decodeBase64(body.publicKey);
+        const challenge = privacyKit.decodeBase64(body.challenge);
+        const signature = privacyKit.decodeBase64(body.signature);
         const isValid = tweetnacl.sign.detached.verify(challenge, signature, publicKey);
+
         if (!isValid) {
-            return reply.code(401).send({ error: 'Invalid signature' });
+            return { ok: false as const, status: 401, body: { error: 'Invalid signature' } };
         }
 
-        // Create or update user in database
         const publicKeyHex = privacyKit.encodeHex(publicKey);
-        const user = await db.account.upsert({
-            where: { publicKey: publicKeyHex },
-            update: { updatedAt: new Date() },
-            create: { publicKey: publicKeyHex }
+
+        if (createIfMissing) {
+            const user = await db.account.upsert({
+                where: { publicKey: publicKeyHex },
+                update: { updatedAt: new Date() },
+                create: { publicKey: publicKeyHex }
+            });
+
+            return {
+                ok: true as const,
+                body: {
+                    success: true,
+                    token: await auth.createToken(user.id)
+                }
+            };
+        }
+
+        const user = await db.account.findUnique({
+            where: { publicKey: publicKeyHex }
         });
 
-        return reply.send({
-            success: true,
-            token: await auth.createToken(user.id)
+        if (!user) {
+            return { ok: false as const, status: 404, body: { error: 'Account not found' } };
+        }
+
+        await db.account.update({
+            where: { publicKey: publicKeyHex },
+            data: { updatedAt: new Date() }
         });
+
+        return {
+            ok: true as const,
+            body: {
+                success: true,
+                token: await auth.createToken(user.id)
+            }
+        };
+    }
+
+    app.post('/v1/auth', {
+        schema: secretAuthSchema
+    }, async (request, reply) => {
+        const result = await authenticateSecretKey(request.body, true);
+        if (!result.ok) {
+            return reply.code(result.status).send(result.body);
+        }
+
+        return reply.send(result.body);
+    });
+
+    app.post('/v1/auth/reconnect', {
+        schema: secretAuthSchema
+    }, async (request, reply) => {
+        const result = await authenticateSecretKey(request.body, false);
+        if (!result.ok) {
+            return reply.code(result.status).send(result.body);
+        }
+
+        return reply.send(result.body);
     });
 
     app.post('/v1/auth/request', {

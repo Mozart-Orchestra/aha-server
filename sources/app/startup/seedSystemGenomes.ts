@@ -21,7 +21,7 @@ interface SystemGenomeSeed {
 const SYSTEM_GENOMES: SystemGenomeSeed[] = [
     {
         name: 'supervisor',
-        description: 'Periodically observes team agent activity, scores agents, and triggers intervention when stuck (two-phase: diff check then full analysis)',
+        description: 'Seed supervisor agent. Periodically observes team activity, scores agents, and triggers intervention when stuck (two-phase: diff check then full analysis)',
         category: 'coordination',
         tags: ['supervisor', 'bypass', 'monitoring', 'periodic'],
         spec: {
@@ -54,7 +54,7 @@ const SYSTEM_GENOMES: SystemGenomeSeed[] = [
     },
     {
         name: 'help-agent',
-        description: 'Responds to supervisor intervention requests, performs targeted repair, then auto-retires',
+        description: 'Seed help-agent. Responds to supervisor intervention requests, performs targeted repair, then auto-retires',
         category: 'support',
         tags: ['help-agent', 'bypass', 'repair', 'on-demand'],
         spec: {
@@ -79,7 +79,7 @@ const SYSTEM_GENOMES: SystemGenomeSeed[] = [
     },
     {
         name: 'org-manager',
-        description: 'Receives user tasks, analyzes requirements, and assembles the right agent team to execute',
+        description: 'Seed org-manager. Receives user tasks, analyzes requirements, and assembles the right agent team to execute',
         category: 'coordination',
         tags: ['org-manager', 'bootstrap', 'team-builder', 'orchestrator'],
         spec: {
@@ -88,17 +88,30 @@ const SYSTEM_GENOMES: SystemGenomeSeed[] = [
             executionPlane: 'mainline',
             permissionMode: 'bypassPermissions',
             accessLevel: 'full-access',
-            allowedTools: ['create_agent', 'send_team_message', 'read_team_log'],
+            allowedTools: [
+                'get_team_info',
+                'list_tasks',
+                'list_available_agents',
+                'create_agent',
+                'create_task',
+                'send_team_message',
+                'read_team_log',
+            ],
             capabilities: ['analyze_requirements', 'spawn_team', 'coordinate_agents'],
             responsibilities: [
                 'Analyze user task and break it down into sub-tasks',
+                'Inspect current team state before adding more agents',
                 'Select appropriate agent roles for each sub-task',
                 'Use create_agent to spawn team members',
+                'Treat the marketplace as a memory warehouse, never as a blocking dependency',
                 'Monitor high-level progress and unblock agents',
             ],
             protocol: [
                 'On receiving task: analyze immediately, do NOT wait',
+                'Inspect live team state via get_team_info and list_tasks first',
+                'Marketplace is optional memory only — if no fit exists, continue assembling the team',
                 'Use create_agent to spawn agents with specific roles',
+                'Use create_task to seed the initial backlog',
                 'Assign clear tasks to each agent via send_team_message',
                 'Monitor team log for completion or blockers',
             ],

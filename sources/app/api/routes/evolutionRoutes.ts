@@ -167,7 +167,7 @@ export function evolutionRoutes(app: Fastify) {
                 name: z.string(),
                 description: z.string().optional(),
                 spec: z.string(),                        // JSON string of GenomeSpec
-                parentSessionId: z.string(),
+                parentSessionId: z.string().optional(),
                 teamId: z.string().optional(),
                 isPublic: z.boolean().default(false),
             }),
@@ -179,33 +179,45 @@ export function evolutionRoutes(app: Fastify) {
             name: string;
             description?: string;
             spec: string;
-            parentSessionId: string;
+            parentSessionId?: string;
             teamId?: string;
             isPublic: boolean;
         };
 
         try {
-            const genome = await db.genome.upsert({
-                where: { id: id ?? '' },
-                create: {
-                    ...(id ? { id } : {}),
-                    accountId: userId,
-                    name,
-                    description: description ?? null,
-                    spec,
-                    parentSessionId,
-                    teamId: teamId ?? null,
-                    isPublic,
-                },
-                update: {
-                    name,
-                    description: description ?? null,
-                    spec,
-                    parentSessionId,
-                    teamId: teamId ?? null,
-                    isPublic,
-                },
-            });
+            const genome = id
+                ? await db.genome.upsert({
+                    where: { id },
+                    create: {
+                        id,
+                        accountId: userId,
+                        name,
+                        description: description ?? null,
+                        spec,
+                        parentSessionId: parentSessionId ?? null,
+                        teamId: teamId ?? null,
+                        isPublic,
+                    },
+                    update: {
+                        name,
+                        description: description ?? null,
+                        spec,
+                        parentSessionId: parentSessionId ?? null,
+                        teamId: teamId ?? null,
+                        isPublic,
+                    },
+                })
+                : await db.genome.create({
+                    data: {
+                        accountId: userId,
+                        name,
+                        description: description ?? null,
+                        spec,
+                        parentSessionId: parentSessionId ?? null,
+                        teamId: teamId ?? null,
+                        isPublic,
+                    },
+                });
 
             return reply.code(201).send({ genome });
         } catch (error: any) {

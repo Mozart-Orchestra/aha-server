@@ -6,6 +6,10 @@ import { randomKeyNaked } from "@/utils/randomKeyNaked";
 import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
 import * as privacyKit from "privacy-kit";
 
+import { findDuplicateExecutionConflict } from "./duplicateExecution";
+import { cleanupActiveExecutionLinks } from "./executionLinks";
+import { TaskOperationError, TASK_ERROR_CODES } from "./taskErrors";
+
 /**
  * Server-side Task Orchestration Engine
  *
@@ -328,6 +332,13 @@ export class TaskOrchestrator {
         const task = board.tasks[taskIndex];
         const previousStatus = task.status;
 
+        if (updates.status === 'in-progress' && previousStatus !== 'in-progress') {
+            throw new TaskOperationError(
+                TASK_ERROR_CODES.TASK_ACK_REQUIRED,
+                'Use start_task to move a task into in-progress; update_task cannot be used as task ack.',
+            );
+        }
+
         // Apply updates (preserve id, createdAt)
         const updatedTask: KanbanTask = {
             ...task,
@@ -336,6 +347,13 @@ export class TaskOrchestrator {
             createdAt: task.createdAt,
             updatedAt: Date.now()
         };
+
+        if (updates.status === 'review' || updates.status === 'done') {
+            updatedTask.executionLinks = cleanupActiveExecutionLinks(
+                updatedTask.executionLinks,
+                updatedTask.assigneeId,
+            );
+        }
 
         board.tasks[taskIndex] = updatedTask;
 
@@ -406,7 +424,29 @@ export class TaskOrchestrator {
         // Check for existing active link
         const activeLink = task.executionLinks?.find(l => l.status === 'active');
         if (activeLink && activeLink.sessionId !== sessionId) {
-            throw new Error(`Task already being executed by session ${activeLink.sessionId}`);
+            throw new TaskOperationError(
+                TASK_ERROR_CODES.DUPLICATE_EXECUTION_CONFLICT,
+                `Task already being executed by session ${activeLink.sessionId}`,
+                {
+                    conflictingTaskId: task.id,
+                    conflictingSessionId: activeLink.sessionId,
+                    reason: 'active-link',
+                },
+            );
+        }
+
+        const duplicateConflict = findDuplicateExecutionConflict(
+            board.tasks as any,
+            task as any,
+            sessionId
+        );
+        if (duplicateConflict) {
+            throw new TaskOperationError(
+                TASK_ERROR_CODES.DUPLICATE_EXECUTION_CONFLICT,
+                `Duplicate execution blocked: task overlaps with active task ${duplicateConflict.conflictingTaskId} ` +
+                `owned by ${duplicateConflict.conflictingSessionId} (${duplicateConflict.reason}: ${duplicateConflict.overlap}).`,
+                duplicateConflict,
+            );
         }
 
         // Add execution link
@@ -458,11 +498,7 @@ export class TaskOrchestrator {
             }
         }
 
-        // Update execution link
-        const activeLink = task.executionLinks?.find(l => l.sessionId === sessionId && l.status === 'active');
-        if (activeLink) {
-            activeLink.status = 'completed';
-        }
+        task.executionLinks = cleanupActiveExecutionLinks(task.executionLinks, sessionId);
 
         task.status = 'done';
         task.updatedAt = Date.now();
@@ -597,6 +633,7 @@ export class TaskOrchestrator {
         if (allDone && parent.status !== 'done') {
             parent.status = 'review'; // Move to review, not auto-done
             parent.updatedAt = Date.now();
+            parent.executionLinks = cleanupActiveExecutionLinks(parent.executionLinks, parent.assigneeId);
 
             // Recurse up
             await this.handleTaskCompletion(board, parent);

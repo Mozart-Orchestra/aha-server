@@ -52,6 +52,7 @@ model Account {
     AccessKey           AccessKey[]
     UserFeedItem        UserFeedItem[]
     UserKVStore         UserKVStore[]
+    TeamContextEntry    TeamContextEntry[]
     Genome              Genome[]
 }
 
@@ -363,6 +364,27 @@ model UserKVStore {
     @@index([accountId])
 }
 
+model TeamContextEntry {
+    id                 String   @id @default(cuid())
+    accountId          String
+    account            Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+    teamId             String
+    key                String
+    kind               String   @default("fact")
+    value              Json
+    summary            String?
+    tags               Json?
+    version            Int      @default(1)
+    updatedBySessionId String?
+    updatedByRole      String?
+    createdAt          DateTime @default(now())
+    updatedAt          DateTime @updatedAt
+
+    @@unique([accountId, teamId, key])
+    @@index([accountId, teamId, updatedAt(sort: Desc)])
+    @@index([teamId, kind])
+}
+
 //
 // Agent Genomes — reusable agent specifications (adocker images)
 //
@@ -375,8 +397,8 @@ model Genome {
     description     String?
     /// Serialized GenomeSpec JSON (systemPrompt, tools, modelId, permissionMode, etc.)
     spec            String
-    /// Session ID of the agent that created/last-mutated this genome
-    parentSessionId String
+    /// Session ID of the agent that created/last-mutated this genome (optional)
+    parentSessionId String?
     /// Optional team scope (null = personal / global)
     teamId          String?
     /// Namespace for scoping: '@official', '@org-name', or null for personal

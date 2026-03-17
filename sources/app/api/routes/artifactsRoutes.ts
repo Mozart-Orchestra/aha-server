@@ -6,6 +6,46 @@ import { randomKeyNaked } from "@/utils/randomKeyNaked";
 import { allocateUserSeq } from "@/storage/seq";
 import { log } from "@/utils/log";
 import * as privacyKit from "privacy-kit";
+import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
+
+function isSharedTeamArtifact(artifact: { body: Uint8Array }): boolean {
+    try {
+        const parsed = parseTeamArtifactBody(artifact.body) as Record<string, unknown>;
+        return Array.isArray(parsed.tasks) || Array.isArray(parsed.columns) || typeof parsed.team === 'object';
+    } catch {
+        return false;
+    }
+}
+
+async function canUserAccessSharedTeamArtifact(userId: string, artifact: { body: Uint8Array }): Promise<boolean> {
+    if (!isSharedTeamArtifact(artifact)) {
+        return false;
+    }
+
+    try {
+        const parsed = parseTeamArtifactBody(artifact.body) as Record<string, any>;
+        const members = Array.isArray(parsed.team?.members) ? parsed.team.members : [];
+        const memberSessionIds = members
+            .map((member: any) => member?.sessionId)
+            .filter((sessionId: any): sessionId is string => typeof sessionId === 'string' && sessionId.length > 0);
+
+        if (memberSessionIds.length === 0) {
+            return false;
+        }
+
+        const session = await db.session.findFirst({
+            where: {
+                accountId: userId,
+                id: { in: memberSessionIds }
+            },
+            select: { id: true }
+        });
+
+        return !!session;
+    } catch {
+        return false;
+    }
+}
 
 export function artifactsRoutes(app: Fastify) {
     // GET /v1/artifacts - List all artifacts for the account
@@ -92,7 +132,7 @@ export function artifactsRoutes(app: Fastify) {
         const { id } = request.params;
 
         try {
-            const artifact = await db.artifact.findFirst({
+            let artifact = await db.artifact.findFirst({
                 where: {
                     id,
                     accountId: userId
@@ -100,7 +140,15 @@ export function artifactsRoutes(app: Fastify) {
             });
 
             if (!artifact) {
-                return reply.code(404).send({ error: 'Artifact not found' });
+                const sharedArtifact = await db.artifact.findUnique({
+                    where: { id }
+                });
+
+                if (!sharedArtifact || !(await canUserAccessSharedTeamArtifact(userId, sharedArtifact))) {
+                    return reply.code(404).send({ error: 'Artifact not found' });
+                }
+
+                artifact = sharedArtifact;
             }
 
             return reply.send({
@@ -110,6 +158,7 @@ export function artifactsRoutes(app: Fastify) {
                 body: privacyKit.encodeBase64(artifact.body),
                 bodyVersion: artifact.bodyVersion,
                 dataEncryptionKey: privacyKit.encodeBase64(artifact.dataEncryptionKey),
+                type: isSharedTeamArtifact(artifact) ? 'team' : undefined,
                 seq: artifact.seq,
                 createdAt: artifact.createdAt.getTime(),
                 updatedAt: artifact.updatedAt.getTime()
