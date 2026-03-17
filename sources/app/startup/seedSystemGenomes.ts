@@ -31,7 +31,7 @@ const SYSTEM_GENOMES: SystemGenomeSeed[] = [
             permissionMode: 'bypassPermissions',
             accessLevel: 'read-only',
             allowedTools: [
-                'read_team_log', 'read_cc_log', 'list_team_cc_logs',
+                'read_team_log', 'read_cc_log', 'read_runtime_log', 'list_team_cc_logs', 'list_team_runtime_logs',
                 'score_agent', 'compact_agent', 'kill_agent',
                 'save_supervisor_state', 'send_team_message',
             ],
