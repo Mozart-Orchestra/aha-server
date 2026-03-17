@@ -75,8 +75,8 @@ export const logger = pino({
     timestamp: () => `,"time":${Date.now()},"localTime":"${formatLocalTime()}"`,
 });
 
-// Optional file-only logger for remote logs from CLI/mobile
-export const fileConsolidatedLogger = process.env.DANGEROUSLY_LOG_TO_SERVER_FOR_AI_AUTO_DEBUGGING && consolidatedLogFile ? 
+// Optional file-only logger for remote logs from CLI/mobile (also uses pino/file)
+export const fileConsolidatedLogger = process.env.DANGEROUSLY_LOG_TO_SERVER_FOR_AI_AUTO_DEBUGGING && consolidatedLogFile ?
     pino({
         level: 'debug',
         transport: {
@@ -90,8 +90,6 @@ export const fileConsolidatedLogger = process.env.DANGEROUSLY_LOG_TO_SERVER_FOR_
         },
         formatters: {
             log: (object: any) => {
-                // Add localTime to every log entry
-                // Note: source property already exists from CLI/mobile logs
                 return {
                     ...object,
                     localTime: formatLocalTime(typeof object.time === 'number' ? object.time : undefined),

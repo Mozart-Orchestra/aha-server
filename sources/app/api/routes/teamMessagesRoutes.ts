@@ -8,7 +8,7 @@ import { log } from "@/utils/log";
 import { kvList } from "@/app/kv/kvList";
 import { kvMutate } from "@/app/kv/kvMutate";
 import { encryptString, decryptString } from "@/modules/encrypt";
-import { teamMessagesCounter, teamTaskOperationsCounter, teamBroadcastEfficiencyGauge } from "@/app/monitoring/metrics2";
+import { teamMessagesCounter, teamTaskOperationsCounter } from "@/app/monitoring/metrics2";
 
 /**
  * Team Messages Routes
@@ -63,7 +63,9 @@ export function teamMessagesRoutes(app: Fastify) {
         return { pong: true, teamId };
     });
 
-    // GET /v1/teams/:teamId/messages - 获取团队消息
+    // GET /v1/teams/:teamId/messages - 获取团队消息（分页加载）
+    // 每次只返回最新的 `limit` 条（默认 50，最多 200）。
+    // 客户端向上滚动时传 ?before=<cursor> 加载更早的消息；cursor 是上次返回的最旧消息的 KV key。
     app.get('/v1/teams/:teamId/messages', {
         preHandler: app.authenticate,
         schema: {
@@ -71,8 +73,8 @@ export function teamMessagesRoutes(app: Fastify) {
                 teamId: z.string()
             }),
             querystring: z.object({
-                limit: z.coerce.number().int().min(1).max(1000).default(500),
-                before: z.string().optional()
+                limit: z.coerce.number().int().min(1).max(200).default(50),
+                before: z.string().optional()   // KV key cursor（来自上次响应的 cursor 字段）
             })
         }
     }, async (request, reply) => {
@@ -81,14 +83,9 @@ export function teamMessagesRoutes(app: Fastify) {
         const { limit, before } = request.query as { limit?: number, before?: string };
 
         try {
-            log({ module: 'team-messages', level: 'info' }, `Fetching messages for teamId: ${teamId}, userId: ${userId}`);
-
             // Verify team exists and belongs to the current user
             const team = await db.artifact.findFirst({
-                where: {
-                    id: teamId,
-                    accountId: userId
-                },
+                where: { id: teamId, accountId: userId },
                 select: { id: true }
             });
 
@@ -97,57 +94,53 @@ export function teamMessagesRoutes(app: Fastify) {
             }
 
             const prefix = `team_messages.${teamId}.`;
-            const fetchLimit = Math.min((limit ?? 500), 1000);
+            const fetchLimit = Math.min(limit ?? 50, 200);
 
-            // Use direct DB access to get latest messages (reverse order)
             // Key format: team_messages.{teamId}.{timestamp}.{messageId}
-            // Ordering by key desc gives us the latest messages first.
+            // ORDER BY key DESC → newest first; we take `fetchLimit` rows and reverse for client.
+            const whereClause: any = {
+                accountId: userId,
+                key: { startsWith: prefix },
+                value: { not: null }
+            };
 
-            let cursor = undefined;
+            // Cursor: load messages strictly older than `before` key
             if (before) {
-                // If 'before' is provided (messageId), we need to find its key or timestamp to use as cursor.
-                // Since we don't have the timestamp easily, we might need to scan or the client should provide the cursor (key).
-                // But the API spec says 'before' is messageId.
-                // For now, let's assume we just fetch the latest 'limit' messages.
-                // If 'before' is strictly required for pagination, we might need to change the API to accept a cursor (key) or look up the message.
-                // However, the user issue is specifically about "only returning earliest messages".
-                // Switching to 'desc' fixes the "latest messages" issue.
-                // Proper pagination with 'before' might require more work if we don't know the timestamp.
+                whereClause.key = { startsWith: prefix, lt: before };
             }
 
             const results = await db.userKVStore.findMany({
-                where: {
-                    accountId: userId,
-                    key: { startsWith: prefix },
-                    value: { not: null }
-                },
-                orderBy: {
-                    key: 'desc'
-                },
-                take: fetchLimit
+                where: whereClause,
+                orderBy: { key: 'desc' },
+                take: fetchLimit,
+                select: { key: true, value: true }
             });
 
-            const messages = results.map(item => {
+            const messages: Array<any & { _key: string }> = [];
+            for (const item of results) {
                 try {
-                    const messageKeyParts = item.key.split('.');
-                    const messageId = messageKeyParts[messageKeyParts.length - 1];
-                    // item.value is already a Buffer/Uint8Array from DB
-                    const encrypted = item.value!;
-                    const decrypted = decryptString(buildEncryptionPath(userId, teamId, messageId), encrypted);
-                    return JSON.parse(decrypted);
-                } catch (parseError) {
-                    log({ module: 'team-messages', level: 'warn' }, `Failed to decrypt message ${item.key}: ${parseError}`);
-                    return null;
+                    const parts = item.key.split('.');
+                    const messageId = parts[parts.length - 1];
+                    const decrypted = decryptString(
+                        buildEncryptionPath(userId, teamId, messageId),
+                        item.value!
+                    );
+                    messages.push({ ...JSON.parse(decrypted), _key: item.key });
+                } catch {
+                    // skip corrupted entries silently
                 }
-            }).filter((message): message is NonNullable<typeof message> => !!message);
+            }
 
-            // Sort back to ascending for the client
+            // Restore chronological order for the client
             messages.sort((a, b) => a.timestamp - b.timestamp);
 
+            // Cursor for the next older page = KV key of the oldest message in this page
+            const nextCursor = messages.length > 0 ? messages[0]._key : undefined;
+
             return reply.send({
-                messages: messages,
-                hasMore: results.length === fetchLimit, // Rough estimate
-                cursor: messages.length > 0 ? messages[0].id : undefined
+                messages: messages.map(({ _key, ...rest }) => rest),
+                hasMore: results.length === fetchLimit,
+                cursor: nextCursor
             });
         } catch (error) {
             log({ module: 'team-messages', level: 'error' }, `Failed to get messages: ${error}`);
@@ -297,31 +290,18 @@ export function teamMessagesRoutes(app: Fastify) {
                 teamTaskOperationsCounter.inc({ role: message.fromRole || 'unknown' });
             }
 
-            // Emit team-message event via WebSocket to all team members
-            // OPTIMIZATION: Filter sessions by teamId to reduce unnecessary broadcasts
-            // This prevents sending team messages to sessions that belong to other teams
-            const allSessions = await db.session.findMany({
+            // Emit team-message event via WebSocket to all user sessions.
+            // Metadata is encrypted so we cannot filter by teamId server-side;
+            // the client filters. Only load session IDs (no metadata) to avoid
+            // pulling large encrypted blobs into memory on every message send.
+            const sessionRows = await db.session.findMany({
                 where: { accountId: userId },
-                select: { id: true, metadata: true }
+                select: { id: true }
             });
 
-            // Filter sessions that belong to this team
-            // Since metadata is encrypted, we cannot filter by teamId on the server.
-            // We must broadcast to all user sessions and let the client filter.
-            const teamSessionIds = new Set<string>();
-            for (const session of allSessions) {
-                teamSessionIds.add(session.id);
-            }
+            const sessionIds = new Set(sessionRows.map(s => s.id));
 
-            console.log(`[TeamMessages] Broadcasting to ${teamSessionIds.size} team sessions (filtered from ${allSessions.length} total sessions)`);
-
-            // Track broadcast efficiency for monitoring
-            if (allSessions.length > 0) {
-                const efficiency = teamSessionIds.size / allSessions.length;
-                teamBroadcastEfficiencyGauge.set({ teamId }, efficiency);
-            }
-
-            if (teamSessionIds.size > 0) {
+            if (sessionIds.size > 0) {
                 const updSeq = await allocateUserSeq(userId);
 
                 const messageEvent = {
@@ -335,11 +315,10 @@ export function teamMessagesRoutes(app: Fastify) {
                     createdAt: Date.now()
                 };
 
-                // Broadcast only to sessions that are members of this team
                 eventRouter.emitUpdate({
                     userId,
                     payload: messageEvent,
-                    recipientFilter: { type: 'specific-sessions', sessionIds: teamSessionIds }
+                    recipientFilter: { type: 'specific-sessions', sessionIds }
                 });
             }
 

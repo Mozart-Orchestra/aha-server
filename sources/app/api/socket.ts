@@ -171,6 +171,15 @@ export function startSocket(app: Fastify) {
             rpcListeners.set(userId, userRpcListeners);
         }
         rpcHandler(userId, socket, userRpcListeners);
+
+        // After rpcHandler registers its disconnect cleanup, register our own to
+        // prune the outer rpcListeners map once the user has no RPC listeners left.
+        socket.on('disconnect', () => {
+            const listeners = rpcListeners.get(userId);
+            if (listeners && listeners.size === 0) {
+                rpcListeners.delete(userId);
+            }
+        });
         usageHandler(userId, socket);
         sessionUpdateHandler(userId, socket, connection);
         pingHandler(socket);

@@ -257,7 +257,14 @@ class ActivityCache {
 // Global instance
 export const activityCache = new ActivityCache();
 
-// Cleanup every 5 minutes
-setInterval(() => {
+// Cleanup expired cache entries every 5 minutes
+const _cleanupInterval = setInterval(() => {
     activityCache.cleanup();
 }, 5 * 60 * 1000);
+
+// Ensure the interval is cleared on graceful shutdown so Node can exit cleanly
+import { onShutdown } from '@/utils/shutdown';
+onShutdown('session-cache', async () => {
+    clearInterval(_cleanupInterval);
+    activityCache.shutdown();
+});
