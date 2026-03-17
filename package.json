@@ -8,8 +8,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit",
-    "start": "tsx ./sources/main.ts",
-    "dev": "(lsof -ti tcp:3005 | xargs kill -9 || true) && tsx --env-file=.env --env-file=.env.dev ./sources/main.ts",
+    "start": "NODE_OPTIONS='--max-old-space-size=2048' tsx ./sources/main.ts",
+    "dev": "(lsof -ti tcp:3005 | xargs kill -9 || true) && NODE_OPTIONS='--max-old-space-size=2048' tsx --env-file=.env --env-file=.env.dev ./sources/main.ts",
     "test": "vitest run",
     "migrate": "dotenv -e .env.dev -- prisma migrate dev",
     "migrate:reset": "dotenv -e .env.dev -- prisma migrate reset",
