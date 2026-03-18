@@ -190,8 +190,4 @@ class MemoryCache {
 // 导出单例
 export const memoryCache = new MemoryCache()
 
-// 兼容 Redis 接口的重导出
-export { memoryCache as redis }
-
-// 类型兼容
 export default memoryCache

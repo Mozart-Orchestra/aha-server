@@ -108,89 +108,97 @@ export function agentRoutes(app: Fastify) {
                 });
             }
 
-            // Validate genome exists and is accessible
-            if (genomeId) {
-                const genome = await db.genome.findFirst({
-                    where: {
-                        id: genomeId,
-                        deletedAt: null,
-                        OR: [{ accountId: userId }, { isPublic: true }],
-                    },
-                    select: { id: true },
-                });
-                if (!genome) {
-                    return reply.code(404).send({ error: 'Genome not found' });
-                }
-            }
-
-            const agentId = randomKeyNaked(24);
-            const sessionTag = `standalone:${agentId}`;
-
-            // Create session for the agent
-            const session = await db.session.create({
-                data: {
-                    tag: sessionTag,
-                    accountId: userId,
-                    metadata: JSON.stringify({
-                        name: displayName,
-                        type: 'standalone-agent',
-                        genomeId: genomeId || null,
-                        runtimeType,
-                        modelId: modelId || null,
-                    }),
-                },
-            });
-
-            // Build standalone team board
-            const board: Record<string, any> = {
-                type: 'standalone',
-                name: displayName,
-                status: 'active',
-                genomeId: genomeId || null,
-                genomeSpec: genomeSpec || null,
-                metadata: metadata || {},
-                team: {
-                    members: [{
-                        sessionId: session.id,
-                        roleId: 'standalone',
-                        displayName,
-                        runtimeType,
-                        joinedAt: Date.now(),
-                        lifecycle: {
-                            spawnRequestedAt: Date.now(),
+            const created = await db.$transaction(async (tx) => {
+                if (genomeId) {
+                    const genome = await tx.genome.findFirst({
+                        where: {
+                            id: genomeId,
+                            deletedAt: null,
+                            OR: [{ accountId: userId }, { isPublic: true }],
                         },
-                    }],
-                },
-            };
+                        select: { id: true },
+                    });
+                    if (!genome) {
+                        return { type: 'genome-not-found' as const };
+                    }
+                }
 
-            const artifact = await db.artifact.create({
-                data: {
-                    id: agentId,
-                    accountId: userId,
-                    header: Buffer.from(JSON.stringify({
-                        name: displayName,
-                        type: 'standalone',
-                    })),
-                    body: serializeTeamBoard(board),
-                    dataEncryptionKey: Buffer.from('standalone'),
-                },
-            });
+                const agentId = randomKeyNaked(24);
+                const sessionTag = `standalone:${agentId}`;
 
-            // Bump genome spawn count
-            if (genomeId) {
-                await db.genome.update({
-                    where: { id: genomeId },
+                const session = await tx.session.create({
                     data: {
-                        spawnCount: { increment: 1 },
-                        lastSpawnedAt: new Date(),
+                        tag: sessionTag,
+                        accountId: userId,
+                        metadata: JSON.stringify({
+                            name: displayName,
+                            type: 'standalone-agent',
+                            genomeId: genomeId || null,
+                            runtimeType,
+                            modelId: modelId || null,
+                        }),
                     },
                 });
+
+                const board: Record<string, any> = {
+                    type: 'standalone',
+                    name: displayName,
+                    status: 'active',
+                    genomeId: genomeId || null,
+                    genomeSpec: genomeSpec || null,
+                    metadata: metadata || {},
+                    team: {
+                        members: [{
+                            sessionId: session.id,
+                            roleId: 'standalone',
+                            displayName,
+                            runtimeType,
+                            joinedAt: Date.now(),
+                            lifecycle: {
+                                spawnRequestedAt: Date.now(),
+                            },
+                        }],
+                    },
+                };
+
+                const artifact = await tx.artifact.create({
+                    data: {
+                        id: agentId,
+                        accountId: userId,
+                        header: Buffer.from(JSON.stringify({
+                            name: displayName,
+                            type: 'standalone',
+                        })),
+                        body: serializeTeamBoard(board),
+                        dataEncryptionKey: Buffer.from('standalone'),
+                    },
+                });
+
+                if (genomeId) {
+                    await tx.genome.update({
+                        where: { id: genomeId },
+                        data: {
+                            spawnCount: { increment: 1 },
+                            lastSpawnedAt: new Date(),
+                        },
+                    });
+                }
+
+                return {
+                    type: 'created' as const,
+                    artifact,
+                    board,
+                };
+            });
+
+            if (created.type === 'genome-not-found') {
+                return reply.code(404).send({ error: 'Genome not found' });
             }
 
-            log({ module: 'agents' }, `Standalone agent created: ${agentId}`);
+            log({ module: 'agents' }, `Standalone agent created: ${created.artifact.id}`);
 
             return reply.code(201).send({
-                agent: buildAgentResponse(artifact, board),
+                agent: buildAgentResponse(created.artifact, created.board),
             });
         } catch (error: any) {
             log({ module: 'agents', level: 'error' }, `agent create error: ${error}`);

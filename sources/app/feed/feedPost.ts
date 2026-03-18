@@ -33,7 +33,7 @@ export async function feedPost(
         where: { id: ctx.uid },
         select: { feedSeq: true }
     });
-    const nextSeq = (parseInt(current.feedSeq, 10) + 1).toString();
+    const nextSeq = current.feedSeq + 1n;
     const user = await tx.account.update({
         where: { id: ctx.uid },
         select: { feedSeq: true },
@@ -53,7 +53,7 @@ export async function feedPost(
     const result = {
         ...item,
         createdAt: item.createdAt.getTime(),
-        cursor: '0-' + item.counter
+        cursor: '0-' + item.counter.toString()
     };
 
     // Emit socket event after transaction completes

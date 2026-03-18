@@ -1,6 +1,4 @@
-/**
- * Redis 替换为内存缓存
- * 为了保持兼容性,导出 memoryCache 作为 redis
- */
+import Redis from 'ioredis'
 
-export { redis, memoryCache } from '../cache/memory'
+const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379'
+export const redis = new Redis(redisUrl)

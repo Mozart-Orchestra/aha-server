@@ -266,13 +266,7 @@ export class PermissionInterceptor {
       const decoded = Buffer.from(payload, 'base64url').toString('utf8');
       return JSON.parse(decoded);
     } catch (error) {
-      logger.debug('[PermissionInterceptor] Could not decode token, returning mock data');
-      return {
-        userId: 'mock-user-id',
-        teamId: 'mock-team-id',
-        role: 'builder',
-        sessionId: 'mock-session-id'
-      };
+      throw new Error(`[PermissionInterceptor] Could not decode token: ${(error as Error).message}`);
     }
   }
 

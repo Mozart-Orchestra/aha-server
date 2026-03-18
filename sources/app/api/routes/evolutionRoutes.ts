@@ -368,23 +368,25 @@ export function evolutionRoutes(app: Fastify) {
             querystring: z.object({
                 teamId: z.string().optional(),
                 parentSessionId: z.string().optional(),
+                ownedOnly: z.enum(['true', 'false']).optional(),
                 limit: z.coerce.number().int().min(1).max(100).default(20),
                 offset: z.coerce.number().int().min(0).default(0),
             }),
         }
     }, async (request, reply) => {
         const userId = request.userId;
-        const { teamId, parentSessionId, limit, offset } = request.query as {
+        const { teamId, parentSessionId, ownedOnly, limit, offset } = request.query as {
             teamId?: string;
             parentSessionId?: string;
+            ownedOnly?: string;
             limit: number;
             offset: number;
         };
 
         try {
-            const where: any = {
-                ...buildGenomeVisibilityWhere(userId),
-            };
+            const where: any = ownedOnly === 'true'
+                ? { accountId: userId, deletedAt: null }
+                : { ...buildGenomeVisibilityWhere(userId) };
 
             if (teamId) where.teamId = teamId;
             if (parentSessionId) where.parentSessionId = parentSessionId;
@@ -783,8 +785,12 @@ export function evolutionRoutes(app: Fastify) {
 
             // 使用动态 import 避免循环依赖；axios 已存在于 happy-server
             const { default: axios } = await import('axios');
+            const hubPublishKey = process.env.GENOME_HUB_PUBLISH_KEY;
             const res = await axios.post(`${hubUrl}/genomes`, publishBody, {
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                },
                 timeout: 10000,
             });
 

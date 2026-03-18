@@ -61,9 +61,11 @@ export interface UserInfo {
 interface RoleDefinition {
   id: string;
   title: string;
-  accessLevel: 'read-only' | 'full-access';
+  accessLevel?: 'read-only' | 'full-access';
+  toolsToAvoid?: Array<{ name: string; reason?: string }>;
   policy?: {
     permissionMode?: string;
+    accessLevel?: 'read-only' | 'full-access';
     disallowedTools?: string[];
   };
   responsibilities?: string[];
@@ -177,10 +179,17 @@ export class RolePermissionService {
     }
 
     // Map role definition to permissions
+    // toolsToAvoid names are lowercase (bash, edit) — normalise to match Claude Code PascalCase
+    const toolsToAvoidNames = (roleDef.toolsToAvoid || []).map(
+      (t: { name: string }) => t.name.charAt(0).toUpperCase() + t.name.slice(1)
+    );
+    const policyDisallowed: string[] = roleDef.policy?.disallowedTools || [];
+    const disallowedTools = Array.from(new Set([...policyDisallowed, ...toolsToAvoidNames]));
+
     const permissions: RolePermissions = {
       permissionMode: (roleDef.policy?.permissionMode as any) || 'default',
-      accessLevel: roleDef.accessLevel || 'full-access',
-      disallowedTools: roleDef.policy?.disallowedTools || [],
+      accessLevel: roleDef.policy?.accessLevel || roleDef.accessLevel || 'full-access',
+      disallowedTools,
       allowedOperations: this.extractAllowedOperations(roleDef)
     };
 
@@ -275,10 +284,9 @@ export class RolePermissionService {
    * Check if operation is allowed for role
    */
   isOperationAllowed(role: string, operation: Operation): PermissionCheckResult {
-    const permissions = this.permissionCache.get(role);
+    const permissions = this.permissionCache.get(role) ?? this.resolvePermissionsSync(role);
 
     if (!permissions) {
-      // If not cached, assume allowed for now (will be checked on next request)
       return { allowed: true, requiresConfirmation: false };
     }
 
@@ -339,13 +347,35 @@ export class RolePermissionService {
    * Check if tool is allowed for role
    */
   isToolAllowed(role: string, tool: string): boolean {
-    const permissions = this.permissionCache.get(role);
+    const permissions = this.permissionCache.get(role) ?? this.resolvePermissionsSync(role);
 
     if (!permissions) {
-      return true; // Assume allowed if not loaded
+      return true;
     }
 
     return !permissions.disallowedTools.includes(tool);
+  }
+
+  /**
+   * Synchronously resolve permissions from roleDefinitions (bypasses async cache).
+   * Used by sync methods (isOperationAllowed, isToolAllowed) when cache is cold.
+   */
+  private resolvePermissionsSync(role: string): RolePermissions | undefined {
+    const roleDef = this.roleDefinitions.get(role);
+    if (!roleDef) return undefined;
+
+    const toolsToAvoidNames = (roleDef.toolsToAvoid || []).map(
+      (t) => t.name.charAt(0).toUpperCase() + t.name.slice(1)
+    );
+    const policyDisallowed: string[] = roleDef.policy?.disallowedTools || [];
+    const disallowedTools = Array.from(new Set([...policyDisallowed, ...toolsToAvoidNames]));
+
+    return {
+      permissionMode: (roleDef.policy?.permissionMode as any) || 'default',
+      accessLevel: roleDef.policy?.accessLevel || roleDef.accessLevel || 'full-access',
+      disallowedTools,
+      allowedOperations: this.extractAllowedOperations(roleDef)
+    };
   }
 
   /**

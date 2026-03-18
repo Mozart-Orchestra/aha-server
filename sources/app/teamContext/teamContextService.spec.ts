@@ -166,7 +166,7 @@ describe('TeamContextService', () => {
 
         await expect(() => service.list('user-1', 'team-1', { sessionId: 'session-1' }))
             .rejects
-            .toMatchObject<TeamContextAccessError>({
+            .toMatchObject({
                 statusCode: 403,
             });
     });

@@ -21,13 +21,13 @@ export async function feedGet(
 
     if (cursor?.before !== undefined) {
         if (cursor.before.startsWith('0-')) {
-            where.counter = { lt: cursor.before.substring(2) };
+            where.counter = { lt: BigInt(cursor.before.substring(2)) };
         } else {
             throw new Error('Invalid cursor format');
         }
     } else if (cursor?.after !== undefined) {
         if (cursor.after.startsWith('0-')) {
-            where.counter = { gt: cursor.after.substring(2) };
+            where.counter = { gt: BigInt(cursor.after.substring(2)) };
         } else {
             throw new Error('Invalid cursor format');
         }
@@ -48,7 +48,7 @@ export async function feedGet(
         items: items.slice(0, limit).map(item => ({
             ...item,
             createdAt: item.createdAt.getTime(),
-            cursor: '0-' + item.counter
+            cursor: '0-' + item.counter.toString()
         })),
         hasMore
     };

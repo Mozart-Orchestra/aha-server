@@ -61,11 +61,11 @@ export function normalizeTeamContextKey(key: string): string {
     return key.trim();
 }
 
-function isPlainObject(value: Prisma.JsonValue | Prisma.InputJsonValue): value is Record<string, unknown> {
+function isPlainObject(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function parseTags(value: Prisma.JsonValue | null): string[] | undefined {
+function parseTags(value: unknown): string[] | undefined {
     if (!Array.isArray(value)) {
         return undefined;
     }
@@ -77,9 +77,9 @@ function parseTags(value: Prisma.JsonValue | null): string[] | undefined {
 function mapItem(entry: {
     key: string;
     kind: string;
-    value: Prisma.JsonValue;
+    value: unknown;
     summary: string | null;
-    tags: Prisma.JsonValue | null;
+    tags: unknown;
     version: number;
     updatedBySessionId: string | null;
     updatedByRole: string | null;
@@ -89,7 +89,7 @@ function mapItem(entry: {
     return {
         key: entry.key,
         kind: entry.kind as TeamContextKind,
-        value: entry.value,
+        value: entry.value as Prisma.JsonValue,
         summary: entry.summary ?? undefined,
         tags: parseTags(entry.tags),
         version: entry.version,
@@ -223,7 +223,7 @@ export class TeamContextService {
         }
 
         const nextValue = isPlainObject(existing.value) && isPlainObject(input.patch)
-            ? { ...existing.value, ...input.patch }
+            ? { ...(existing.value as Record<string, unknown>), ...input.patch }
             : input.patch;
 
         const entry = await db.teamContextEntry.update({
@@ -236,9 +236,9 @@ export class TeamContextService {
             },
             data: {
                 kind: input.kind ?? existing.kind,
-                value: nextValue,
+                value: nextValue as Prisma.InputJsonValue,
                 summary: input.summary ?? existing.summary,
-                tags: input.tags ?? existing.tags,
+                tags: (input.tags ?? existing.tags) as Prisma.InputJsonValue,
                 updatedBySessionId: input.sessionId ?? null,
                 updatedByRole: input.role ?? null,
                 version: { increment: 1 },
