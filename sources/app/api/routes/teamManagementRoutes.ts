@@ -527,6 +527,22 @@ async function addTeamMember(
         return m.sessionId === sessionId;
     });
     if (existing) {
+        // Only write + broadcast if something actually changed
+        const hasChanges =
+            existing.sessionId !== sessionId ||
+            existing.roleId !== roleId ||
+            (memberId !== undefined && existing.memberId !== memberId) ||
+            (sessionTag !== undefined && existing.sessionTag !== sessionTag) ||
+            (displayName && existing.displayName !== displayName) ||
+            (specId !== undefined && existing.specId !== specId) ||
+            (parentSessionId !== undefined && existing.parentSessionId !== parentSessionId) ||
+            (executionPlane !== undefined && existing.executionPlane !== executionPlane) ||
+            (runtimeType !== undefined && existing.runtimeType !== runtimeType);
+
+        if (!hasChanges) {
+            return { success: true, member: existing };
+        }
+
         existing.sessionId = sessionId;
         if (memberId !== undefined) existing.memberId = memberId;
         existing.roleId = roleId;
