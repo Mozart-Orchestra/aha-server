@@ -1,0 +1,283 @@
+import fastify from 'fastify';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { serializerCompiler, validatorCompiler, ZodTypeProvider } from 'fastify-type-provider-zod';
+
+vi.mock('@/storage/db', () => ({
+    db: {
+        artifact: {
+            findMany: vi.fn(),
+            findUnique: vi.fn(),
+            update: vi.fn(),
+            delete: vi.fn(),
+        },
+        session: {
+            findFirst: vi.fn(),
+            findMany: vi.fn(),
+            update: vi.fn(),
+            updateMany: vi.fn(),
+            deleteMany: vi.fn(),
+        },
+    },
+}));
+
+vi.mock('@/app/events/eventRouter', () => ({
+    eventRouter: {
+        emitUpdate: vi.fn(),
+    },
+}));
+
+vi.mock('@/storage/seq', () => ({
+    allocateUserSeq: vi.fn().mockResolvedValue(1),
+}));
+
+vi.mock('@/utils/randomKeyNaked', () => ({
+    randomKeyNaked: vi.fn().mockReturnValue('update-id'),
+}));
+
+import { db } from '@/storage/db';
+import { teamManagementRoutes } from './teamManagementRoutes';
+
+function buildTeamArtifact(board: Record<string, unknown>, overrides?: Partial<{ id: string; accountId: string; createdAt: Date; updatedAt: Date }>) {
+    return {
+        id: overrides?.id ?? 'team-1',
+        accountId: overrides?.accountId ?? 'user-1',
+        body: Buffer.from(JSON.stringify({ body: JSON.stringify(board) })),
+        createdAt: overrides?.createdAt ?? new Date('2026-03-17T00:00:00Z'),
+        updatedAt: overrides?.updatedAt ?? new Date('2026-03-17T00:05:00Z'),
+    };
+}
+
+function buildApp() {
+    const app = fastify();
+    app.setValidatorCompiler(validatorCompiler);
+    app.setSerializerCompiler(serializerCompiler);
+    const typed = app.withTypeProvider<ZodTypeProvider>() as any;
+    typed.decorate('authenticate', async (request: any) => {
+        request.userId = 'user-1';
+    });
+    teamManagementRoutes(typed);
+    return typed;
+}
+
+describe('teamManagementRoutes', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it('lists accessible teams with summary counts', async () => {
+        const board = {
+            team: {
+                name: 'Backend Team',
+                members: [{ sessionId: 'session-1', roleId: 'builder' }],
+            },
+            tasks: [{ id: 'task-1' }, { id: 'task-2' }],
+        };
+        const standaloneBoard = {
+            type: 'standalone',
+            name: 'Solo Agent',
+            team: {
+                members: [{ sessionId: 'session-2', roleId: 'standalone' }],
+            },
+        };
+
+        vi.mocked(db.artifact.findMany).mockResolvedValue([
+            buildTeamArtifact(board),
+            buildTeamArtifact(standaloneBoard, { id: 'agent-1' }),
+        ] as never);
+        vi.mocked(db.session.findMany).mockResolvedValue([{ id: 'session-1' }, { id: 'session-2' }] as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/teams',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            teams: [
+                expect.objectContaining({
+                    id: 'team-1',
+                    name: 'Backend Team',
+                    memberCount: 1,
+                    taskCount: 2,
+                }),
+            ],
+        });
+
+        await app.close();
+    });
+
+    it('archives member sessions discovered from the stored team board', async () => {
+        const board = {
+            team: {
+                name: 'Ops Team',
+                members: [
+                    { sessionId: 'session-1', roleId: 'builder' },
+                    { sessionId: 'session-2', roleId: 'reviewer' },
+                ],
+            },
+            tasks: [],
+        };
+
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(buildTeamArtifact(board) as never);
+        vi.mocked(db.session.updateMany).mockResolvedValue({ count: 2 } as never);
+        vi.mocked(db.artifact.update).mockResolvedValue({ id: 'team-1' } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/teams/team-1/archive',
+            payload: {},
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            success: true,
+            archivedSessions: 2,
+        });
+        expect(db.session.updateMany).toHaveBeenCalledWith({
+            where: {
+                id: { in: ['session-1', 'session-2'] },
+                accountId: 'user-1',
+            },
+            data: expect.objectContaining({
+                active: false,
+                updatedAt: expect.any(Date),
+            }),
+        });
+
+        await app.close();
+    });
+
+    it('returns team detail with members', async () => {
+        const board = {
+            team: {
+                name: 'API Squad',
+                members: [
+                    { sessionId: 'session-1', roleId: 'builder', displayName: 'Server Builder' },
+                    { sessionId: 'session-2', roleId: 'master', displayName: 'Master' },
+                ],
+            },
+            tasks: [{ id: 'task-1' }],
+        };
+
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(buildTeamArtifact(board) as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/teams/team-1',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            team: expect.objectContaining({
+                id: 'team-1',
+                name: 'API Squad',
+                memberCount: 2,
+                taskCount: 1,
+                members: [
+                    expect.objectContaining({ sessionId: 'session-1', roleId: 'builder' }),
+                    expect.objectContaining({ sessionId: 'session-2', roleId: 'master' }),
+                ],
+            }),
+        });
+
+        await app.close();
+    });
+
+    it('renames a team and returns the updated team envelope', async () => {
+        const board = {
+            name: 'Old Team Name',
+            team: {
+                name: 'Old Team Name',
+                members: [],
+            },
+            tasks: [],
+        };
+
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(buildTeamArtifact(board) as never);
+        vi.mocked(db.artifact.update).mockResolvedValue({ id: 'team-1' } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'PUT',
+            url: '/v1/teams/team-1/rename',
+            payload: { name: 'New Team Name' },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            success: true,
+            team: {
+                id: 'team-1',
+                name: 'New Team Name',
+            },
+        });
+        expect(db.artifact.update).toHaveBeenCalledWith(expect.objectContaining({
+            where: { id: 'team-1' },
+            data: expect.objectContaining({
+                body: expect.any(Buffer),
+            }),
+        }));
+
+        await app.close();
+    });
+
+    it('batch archives only owned sessions and reports per-session results', async () => {
+        vi.mocked(db.session.findMany).mockResolvedValue([{ id: 'session-1' }] as never);
+        vi.mocked(db.session.updateMany).mockResolvedValue({ count: 1 } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/sessions/batch/archive',
+            payload: { sessionIds: ['session-1', 'session-2'] },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            success: true,
+            archived: 1,
+            results: [
+                { sessionId: 'session-1', success: true },
+                { sessionId: 'session-2', success: false, error: 'Session not found or not owned by user' },
+            ],
+        });
+
+        await app.close();
+    });
+
+    it('renames a session by patching metadata when metadata is JSON', async () => {
+        vi.mocked(db.session.findFirst).mockResolvedValue({
+            id: 'session-1',
+            accountId: 'user-1',
+            metadata: JSON.stringify({ name: 'Old Session', teamId: 'team-1' }),
+        } as never);
+        vi.mocked(db.session.update).mockResolvedValue({ id: 'session-1' } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'PUT',
+            url: '/v1/sessions/session-1/rename',
+            payload: { name: 'New Session' },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            success: true,
+            session: {
+                id: 'session-1',
+                name: 'New Session',
+            },
+        });
+        expect(db.session.update).toHaveBeenCalledWith(expect.objectContaining({
+            where: { id: 'session-1' },
+            data: expect.objectContaining({
+                metadata: expect.stringContaining('New Session'),
+            }),
+        }));
+
+        await app.close();
+    });
+});
