@@ -5,7 +5,15 @@ import { db } from "@/storage/db";
 import { eventRouter } from "@/app/events/eventRouter";
 import { allocateUserSeq } from "@/storage/seq";
 import { randomKeyNaked } from "@/utils/randomKeyNaked";
-import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
+import {
+    extractTeamBoard,
+    extractTeamMembers,
+    getAccessibleTeamArtifact,
+    listAccessibleTeamArtifacts,
+    serializeTeamBoard,
+    summarizeTeamArtifact,
+} from "@/app/team/teamArtifacts";
+import { activityCache } from "@/app/presence/sessionCache";
 
 /**
  * Team Management Routes
@@ -21,7 +29,175 @@ import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
 export function teamManagementRoutes(app: Fastify) {
     log({ module: 'api' }, 'Registering teamManagementRoutes...');
 
+    // POST /v1/teams - Create a new team
+    app.post('/v1/teams', {
+        preHandler: app.authenticate,
+        schema: {
+            body: z.object({
+                name: z.string().min(1).max(200),
+                description: z.string().max(500).optional(),
+            }),
+        },
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { name, description } = request.body as { name: string; description?: string };
+
+        try {
+            const teamId = randomKeyNaked(24);
+
+            const board: Record<string, any> = {
+                name,
+                description: description || '',
+                columns: [
+                    { id: 'todo', title: 'To Do' },
+                    { id: 'in-progress', title: 'In Progress' },
+                    { id: 'review', title: 'Review' },
+                    { id: 'done', title: 'Done' },
+                ],
+                tasks: [],
+                agreements: [],
+                roles: [],
+                team: {
+                    name,
+                    members: [],
+                },
+            };
+
+            const artifact = await db.artifact.create({
+                data: {
+                    id: teamId,
+                    accountId: userId,
+                    header: Buffer.from(JSON.stringify({ name, type: 'team' })),
+                    body: serializeTeamBoard(board),
+                    dataEncryptionKey: Buffer.from('team'),
+                },
+            });
+
+            log({ module: 'team-management' }, `Team created: ${teamId} by ${userId}`);
+
+            return reply.code(201).send({
+                team: summarizeTeamArtifact(artifact),
+            });
+        } catch (error: any) {
+            log({ module: 'team-management' }, `Failed to create team: ${error}`);
+            return reply.code(500).send({ error: 'Failed to create team' });
+        }
+    });
+
+    // GET /v1/teams - List teams accessible to the current user
+    app.get('/v1/teams', {
+        preHandler: app.authenticate,
+        schema: {
+            response: {
+                200: z.object({
+                    teams: z.array(z.object({
+                        id: z.string(),
+                        name: z.string(),
+                        memberCount: z.number(),
+                        taskCount: z.number(),
+                        createdAt: z.number(),
+                        updatedAt: z.number(),
+                    })),
+                }),
+                500: z.object({
+                    error: z.literal('Failed to list teams'),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        try {
+            const teams = await listAccessibleTeamArtifacts(request.userId);
+            return reply.send({
+                teams: teams.map(team => summarizeTeamArtifact(team)),
+            });
+        } catch (error: any) {
+            log({ module: 'team-management', level: 'error' }, `Failed to list teams: ${error}`);
+            return reply.code(500).send({ error: 'Failed to list teams' });
+        }
+    });
+
+    // GET /v1/teams/:teamId - Fetch one team summary with members
+    app.get('/v1/teams/:teamId', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ teamId: z.string() }),
+            response: {
+                200: z.object({
+                    team: z.object({
+                        id: z.string(),
+                        name: z.string(),
+                        memberCount: z.number(),
+                        taskCount: z.number(),
+                        members: z.array(z.any()),
+                        createdAt: z.number(),
+                        updatedAt: z.number(),
+                    }),
+                }),
+                404: z.object({
+                    error: z.literal('Team not found'),
+                }),
+                500: z.object({
+                    error: z.literal('Failed to get team'),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const { teamId } = request.params as { teamId: string };
+
+        try {
+            const artifact = await getAccessibleTeamArtifact(request.userId, teamId);
+            if (!artifact) {
+                return reply.code(404).send({ error: 'Team not found' });
+            }
+
+            const team = summarizeTeamArtifact(artifact, { includeMembers: true });
+            return reply.send({
+                team: {
+                    ...team,
+                    members: team.members ?? [],
+                },
+            });
+        } catch (error: any) {
+            log({ module: 'team-management', level: 'error' }, `Failed to get team ${teamId}: ${error}`);
+            return reply.code(500).send({ error: 'Failed to get team' });
+        }
+    });
+
     // === Team Member Management ===
+
+    // GET /v1/teams/:teamId/members - List team members
+    app.get('/v1/teams/:teamId/members', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ teamId: z.string() }),
+            response: {
+                200: z.object({
+                    members: z.array(z.any()),
+                }),
+                404: z.object({
+                    error: z.literal('Team not found'),
+                }),
+                500: z.object({
+                    error: z.literal('Failed to list team members'),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const { teamId } = request.params as { teamId: string };
+
+        try {
+            const artifact = await getAccessibleTeamArtifact(request.userId, teamId);
+            if (!artifact) {
+                return reply.code(404).send({ error: 'Team not found' });
+            }
+
+            const board = extractTeamBoard(artifact);
+            return reply.send({ members: extractTeamMembers(board) });
+        } catch (error: any) {
+            log({ module: 'team-management', level: 'error' }, `Failed to list members for ${teamId}: ${error}`);
+            return reply.code(500).send({ error: 'Failed to list team members' });
+        }
+    });
 
     // POST /v1/teams/:teamId/members - Add member to team
     app.post('/v1/teams/:teamId/members', {
@@ -59,6 +235,9 @@ export function teamManagementRoutes(app: Fastify) {
             const result = await addTeamMember(userId, teamId, memberId, sessionId, sessionTag, roleId, displayName, specId, parentSessionId, executionPlane, runtimeType);
             return reply.send(result);
         } catch (error: any) {
+            if (error.message === 'Team not found') {
+                return reply.code(404).send({ error: error.message });
+            }
             log({ module: 'team-management', level: 'error' }, `Failed to add member: ${error}`);
             return reply.code(500).send({ error: error.message });
         }
@@ -81,6 +260,9 @@ export function teamManagementRoutes(app: Fastify) {
             const result = await removeTeamMember(userId, teamId, sessionId);
             return reply.send(result);
         } catch (error: any) {
+            if (error.message === 'Team not found') {
+                return reply.code(404).send({ error: error.message });
+            }
             log({ module: 'team-management', level: 'error' }, `Failed to remove member: ${error}`);
             return reply.code(500).send({ error: error.message });
         }
@@ -109,6 +291,9 @@ export function teamManagementRoutes(app: Fastify) {
             log({ module: 'team-management', teamId }, `Team archived with ${result.archivedSessions} sessions`);
             return reply.send(result);
         } catch (error: any) {
+            if (error.message === 'Team not found') {
+                return reply.code(404).send({ error: error.message });
+            }
             log({ module: 'team-management', level: 'error' }, `Failed to archive team: ${error}`);
             return reply.code(500).send({ error: error.message });
         }
@@ -135,6 +320,9 @@ export function teamManagementRoutes(app: Fastify) {
             log({ module: 'team-management', teamId }, `Team deleted with ${result.deletedSessions} sessions`);
             return reply.send(result);
         } catch (error: any) {
+            if (error.message === 'Team not found') {
+                return reply.code(404).send({ error: error.message });
+            }
             log({ module: 'team-management', level: 'error' }, `Failed to delete team: ${error}`);
             return reply.code(500).send({ error: error.message });
         }
@@ -156,6 +344,9 @@ export function teamManagementRoutes(app: Fastify) {
             const result = await renameTeam(userId, teamId, name);
             return reply.send(result);
         } catch (error: any) {
+            if (error.message === 'Team not found') {
+                return reply.code(404).send({ error: error.message });
+            }
             log({ module: 'team-management', level: 'error' }, `Failed to rename team: ${error}`);
             return reply.code(500).send({ error: error.message });
         }
@@ -221,6 +412,9 @@ export function teamManagementRoutes(app: Fastify) {
             const result = await renameSession(userId, sessionId, name);
             return reply.send(result);
         } catch (error: any) {
+            if (error.message === 'Session not found') {
+                return reply.code(404).send({ error: error.message });
+            }
             log({ module: 'team-management', level: 'error' }, `Failed to rename session: ${error}`);
             return reply.code(500).send({ error: error.message });
         }
@@ -243,10 +437,18 @@ export function teamManagementRoutes(app: Fastify) {
         try {
             const results = [];
             for (const teamId of teamIds) {
-                const result = await archiveTeam(userId, teamId);
-                results.push({ teamId, ...result });
+                try {
+                    const result = await archiveTeam(userId, teamId);
+                    results.push({ teamId, ...result });
+                } catch (error: any) {
+                    results.push({ teamId, success: false, error: error.message });
+                }
             }
-            return reply.send({ success: true, results });
+            return reply.send({
+                success: true,
+                archived: results.filter(result => result.success).length,
+                results,
+            });
         } catch (error: any) {
             log({ module: 'team-management', level: 'error' }, `Failed to batch archive teams: ${error}`);
             return reply.code(500).send({ error: error.message });
@@ -268,10 +470,18 @@ export function teamManagementRoutes(app: Fastify) {
         try {
             const results = [];
             for (const teamId of teamIds) {
-                const result = await deleteTeam(userId, teamId);
-                results.push({ teamId, ...result });
+                try {
+                    const result = await deleteTeam(userId, teamId);
+                    results.push({ teamId, ...result });
+                } catch (error: any) {
+                    results.push({ teamId, success: false, error: error.message });
+                }
             }
-            return reply.send({ success: true, results });
+            return reply.send({
+                success: true,
+                deleted: results.filter(result => result.success).length,
+                results,
+            });
         } catch (error: any) {
             log({ module: 'team-management', level: 'error' }, `Failed to batch delete teams: ${error}`);
             return reply.code(500).send({ error: error.message });
@@ -294,21 +504,13 @@ async function addTeamMember(
     executionPlane?: string,
     runtimeType?: string
 ): Promise<{ success: boolean; member: any }> {
-    // Query by teamId only - team artifacts are shared across all team members
-    const artifact = await db.artifact.findFirst({
-        where: { id: teamId }
-    });
+    const artifact = await getAccessibleTeamArtifact(userId, teamId);
 
     if (!artifact) {
         throw new Error('Team not found');
     }
 
-    // 防御性检查: artifact.body 可能为 null
-    if (!artifact.body) {
-        throw new Error('Team artifact not initialized - please open Kanban to initialize the team first');
-    }
-
-    const board = parseTeamArtifactBody(artifact.body) as Record<string, any>;
+    const board = extractTeamBoard(artifact);
 
     if (!board.team) {
         board.team = { members: [] };
@@ -351,12 +553,10 @@ async function addTeamMember(
     }
 
     // Re-wrap in the same structure for storage
-    const updatedWrapper = { body: JSON.stringify(board) };
-    const bodyBuffer = Buffer.from(JSON.stringify(updatedWrapper));
     await db.artifact.update({
         where: { id: teamId },
         data: {
-            body: bodyBuffer,
+            body: serializeTeamBoard(board),
             bodyVersion: { increment: 1 },
             updatedAt: new Date()
         }
@@ -376,21 +576,13 @@ async function removeTeamMember(
     teamId: string,
     sessionId: string
 ): Promise<{ success: boolean }> {
-    // Query by teamId only - team artifacts are shared across all team members
-    const artifact = await db.artifact.findFirst({
-        where: { id: teamId }
-    });
+    const artifact = await getAccessibleTeamArtifact(userId, teamId);
 
     if (!artifact) {
         throw new Error('Team not found');
     }
 
-    // 防御性检查: artifact.body 可能为 null
-    if (!artifact.body) {
-        throw new Error('Team artifact not initialized - please open Kanban to initialize the team first');
-    }
-
-    const board = parseTeamArtifactBody(artifact.body) as Record<string, any>;
+    const board = extractTeamBoard(artifact);
 
     if (!board.team?.members) {
         return { success: true };
@@ -399,12 +591,10 @@ async function removeTeamMember(
     board.team.members = board.team.members.filter((m: any) => m.sessionId !== sessionId);
 
     // Re-wrap in the same structure for storage
-    const updatedWrapper = { body: JSON.stringify(board) };
-    const bodyBuffer = Buffer.from(JSON.stringify(updatedWrapper));
     await db.artifact.update({
         where: { id: teamId },
         data: {
-            body: bodyBuffer,
+            body: serializeTeamBoard(board),
             bodyVersion: { increment: 1 },
             updatedAt: new Date()
         }
@@ -421,22 +611,25 @@ async function archiveTeam(
     teamId: string,
     sessionIds: string[] = []
 ): Promise<{ success: boolean; archivedSessions: number }> {
-    // Get team artifact (just verify it exists)
-    // Query by teamId only - team artifacts are shared across all team members
-    const artifact = await db.artifact.findFirst({
-        where: { id: teamId }
-    });
+    const artifact = await getAccessibleTeamArtifact(userId, teamId);
 
     if (!artifact) {
         throw new Error('Team not found');
     }
 
-    // Use sessionIds provided by client (since body is encrypted)
-    // Archive all sessions (set active = false)
-    if (sessionIds.length > 0) {
-        await db.session.updateMany({
+    const board = extractTeamBoard(artifact);
+    const managedSessionIds = Array.from(new Set([
+        ...extractTeamMembers(board)
+            .map((member) => member.sessionId)
+            .filter((sessionId): sessionId is string => typeof sessionId === 'string' && sessionId.length > 0),
+        ...sessionIds,
+    ]));
+
+    let archivedCount = 0;
+    if (managedSessionIds.length > 0) {
+        const result = await db.session.updateMany({
             where: {
-                id: { in: sessionIds },
+                id: { in: managedSessionIds },
                 accountId: userId
             },
             data: {
@@ -444,6 +637,8 @@ async function archiveTeam(
                 updatedAt: new Date()
             }
         });
+        archivedCount = result.count;
+        managedSessionIds.forEach((sessionId) => activityCache.invalidateSession(sessionId));
     }
 
     // Just increment version to trigger sync - client will handle body update
@@ -457,13 +652,13 @@ async function archiveTeam(
     });
 
     // Broadcast archive events for each session
-    for (const sessionId of sessionIds) {
+    for (const sessionId of managedSessionIds) {
         await broadcastSessionUpdate(userId, sessionId, 'session-archived');
     }
 
-    await broadcastTeamUpdate(userId, teamId, 'team-archived', { archivedSessions: sessionIds.length });
+    await broadcastTeamUpdate(userId, teamId, 'team-archived', { archivedSessions: archivedCount });
 
-    return { success: true, archivedSessions: sessionIds.length };
+    return { success: true, archivedSessions: archivedCount };
 }
 
 async function deleteTeam(
@@ -471,25 +666,30 @@ async function deleteTeam(
     teamId: string,
     sessionIds: string[] = []
 ): Promise<{ success: boolean; deletedSessions: number }> {
-    // Get team artifact (just verify it exists)
-    // Query by teamId only - team artifacts are shared across all team members
-    const artifact = await db.artifact.findFirst({
-        where: { id: teamId }
-    });
+    const artifact = await getAccessibleTeamArtifact(userId, teamId);
 
     if (!artifact) {
         throw new Error('Team not found');
     }
 
-    // Use sessionIds provided by client (since body is encrypted)
-    // Delete all sessions
-    if (sessionIds.length > 0) {
-        await db.session.deleteMany({
+    const board = extractTeamBoard(artifact);
+    const managedSessionIds = Array.from(new Set([
+        ...extractTeamMembers(board)
+            .map((member) => member.sessionId)
+            .filter((sessionId): sessionId is string => typeof sessionId === 'string' && sessionId.length > 0),
+        ...sessionIds,
+    ]));
+
+    let deletedCount = 0;
+    if (managedSessionIds.length > 0) {
+        const result = await db.session.deleteMany({
             where: {
-                id: { in: sessionIds },
+                id: { in: managedSessionIds },
                 accountId: userId
             }
         });
+        deletedCount = result.count;
+        managedSessionIds.forEach((sessionId) => activityCache.invalidateSession(sessionId));
     }
 
     // Delete team artifact
@@ -498,48 +698,37 @@ async function deleteTeam(
     });
 
     // Broadcast delete events
-    for (const sessionId of sessionIds) {
+    for (const sessionId of managedSessionIds) {
         await broadcastSessionUpdate(userId, sessionId, 'session-deleted');
     }
 
-    await broadcastTeamUpdate(userId, teamId, 'team-deleted', { deletedSessions: sessionIds.length });
+    await broadcastTeamUpdate(userId, teamId, 'team-deleted', { deletedSessions: deletedCount });
 
-    return { success: true, deletedSessions: sessionIds.length };
+    return { success: true, deletedSessions: deletedCount };
 }
 
 async function renameTeam(
     userId: string,
     teamId: string,
     name: string
-): Promise<{ success: boolean; name: string }> {
-    // Query by teamId only - team artifacts are shared across all team members
-    const artifact = await db.artifact.findFirst({
-        where: { id: teamId }
-    });
+): Promise<{ success: boolean; team: { id: string; name: string } }> {
+    const artifact = await getAccessibleTeamArtifact(userId, teamId);
 
     if (!artifact) {
         throw new Error('Team not found');
     }
 
-    // 防御性检查: artifact.body 可能为 null
-    if (!artifact.body) {
-        throw new Error('Team artifact not initialized - please open Kanban to initialize the team first');
-    }
-
-    const board = parseTeamArtifactBody(artifact.body) as Record<string, any>;
+    const board = extractTeamBoard(artifact);
 
     board.name = name;
     if (board.team) {
         board.team.name = name;
     }
 
-    // Re-wrap in the same structure for storage
-    const updatedWrapper = { body: JSON.stringify(board) };
-    const bodyBuffer = Buffer.from(JSON.stringify(updatedWrapper));
     await db.artifact.update({
         where: { id: teamId },
         data: {
-            body: bodyBuffer,
+            body: serializeTeamBoard(board),
             bodyVersion: { increment: 1 },
             updatedAt: new Date()
         }
@@ -547,54 +736,100 @@ async function renameTeam(
 
     await broadcastTeamUpdate(userId, teamId, 'team-renamed', { name });
 
-    return { success: true, name };
+    return {
+        success: true,
+        team: {
+            id: teamId,
+            name,
+        },
+    };
 }
 
 async function batchArchiveSessions(
     userId: string,
     sessionIds: string[]
-): Promise<{ success: boolean; archived: number }> {
-    const result = await db.session.updateMany({
+): Promise<{ success: boolean; archived: number; results: Array<{ sessionId: string; success: boolean; error?: string }> }> {
+    const ownedSessions = await db.session.findMany({
         where: {
             id: { in: sessionIds },
-            accountId: userId
+            accountId: userId,
         },
-        data: {
-            active: false,
-            updatedAt: new Date()
-        }
+        select: { id: true },
     });
 
-    for (const sessionId of sessionIds) {
+    const ownedSessionIds = new Set(ownedSessions.map(session => session.id));
+    const archivableIds = [...ownedSessionIds];
+
+    if (archivableIds.length > 0) {
+        await db.session.updateMany({
+            where: {
+                id: { in: archivableIds },
+                accountId: userId
+            },
+            data: {
+                active: false,
+                updatedAt: new Date()
+            }
+        });
+        archivableIds.forEach((sessionId) => activityCache.invalidateSession(sessionId));
+    }
+
+    for (const sessionId of archivableIds) {
         await broadcastSessionUpdate(userId, sessionId, 'session-archived');
     }
 
-    return { success: true, archived: result.count };
+    return {
+        success: true,
+        archived: archivableIds.length,
+        results: sessionIds.map(sessionId => ownedSessionIds.has(sessionId)
+            ? { sessionId, success: true }
+            : { sessionId, success: false, error: 'Session not found or not owned by user' }),
+    };
 }
 
 async function batchDeleteSessions(
     userId: string,
     sessionIds: string[]
-): Promise<{ success: boolean; deleted: number }> {
-    const result = await db.session.deleteMany({
+): Promise<{ success: boolean; deleted: number; results: Array<{ sessionId: string; success: boolean; error?: string }> }> {
+    const ownedSessions = await db.session.findMany({
         where: {
             id: { in: sessionIds },
-            accountId: userId
-        }
+            accountId: userId,
+        },
+        select: { id: true },
     });
 
-    for (const sessionId of sessionIds) {
+    const ownedSessionIds = new Set(ownedSessions.map(session => session.id));
+    const deletableIds = [...ownedSessionIds];
+
+    if (deletableIds.length > 0) {
+        await db.session.deleteMany({
+            where: {
+                id: { in: deletableIds },
+                accountId: userId
+            }
+        });
+        deletableIds.forEach((sessionId) => activityCache.invalidateSession(sessionId));
+    }
+
+    for (const sessionId of deletableIds) {
         await broadcastSessionUpdate(userId, sessionId, 'session-deleted');
     }
 
-    return { success: true, deleted: result.count };
+    return {
+        success: true,
+        deleted: deletableIds.length,
+        results: sessionIds.map(sessionId => ownedSessionIds.has(sessionId)
+            ? { sessionId, success: true }
+            : { sessionId, success: false, error: 'Session not found or not owned by user' }),
+    };
 }
 
 async function renameSession(
     userId: string,
     sessionId: string,
     name: string
-): Promise<{ success: boolean; name: string }> {
+): Promise<{ success: boolean; session: { id: string; name: string } }> {
     // Get session
     const session = await db.session.findFirst({
         where: { id: sessionId, accountId: userId }
@@ -604,13 +839,40 @@ async function renameSession(
         throw new Error('Session not found');
     }
 
-    // Update metadata with new name
-    // Note: This requires decryption/encryption which is done by the client
-    // For now, we just broadcast the rename event and let clients update their local state
+    let nextMetadata = session.metadata;
+
+    try {
+        const parsed = JSON.parse(session.metadata);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            nextMetadata = JSON.stringify({
+                ...parsed,
+                name,
+            });
+        }
+    } catch {
+        // Leave existing metadata unchanged when it is not JSON.
+    }
+
+    if (nextMetadata !== session.metadata) {
+        await db.session.update({
+            where: { id: sessionId },
+            data: {
+                metadata: nextMetadata,
+                metadataVersion: { increment: 1 },
+                updatedAt: new Date(),
+            },
+        });
+    }
 
     await broadcastSessionUpdate(userId, sessionId, 'session-renamed', { name });
 
-    return { success: true, name };
+    return {
+        success: true,
+        session: {
+            id: sessionId,
+            name,
+        },
+    };
 }
 
 // === Broadcast Helpers ===

@@ -68,6 +68,16 @@ export function startSocket(app: Fastify) {
         }
 
         const userId = verified.userId;
+        const account = await db.account.findUnique({
+            where: { id: userId },
+            select: { id: true },
+        });
+        if (!account) {
+            log({ module: 'websocket', level: 'error', userId }, 'Token points to a missing account');
+            socket.emit('error', { message: 'Account not found for token' });
+            socket.disconnect();
+            return;
+        }
         log({ module: 'websocket' }, `Token verified: ${userId}, clientType: ${clientType || 'user-scoped'}, sessionId: ${sessionId || 'none'}, machineId: ${machineId || 'none'}, socketId: ${socket.id}`);
 
         // Store connection based on type
