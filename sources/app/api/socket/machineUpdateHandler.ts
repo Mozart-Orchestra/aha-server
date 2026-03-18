@@ -1,6 +1,6 @@
 import { machineAliveEventsCounter, websocketEventsCounter } from "@/app/monitoring/metrics2";
 import { activityCache } from "@/app/presence/sessionCache";
-import { buildMachineActivityEphemeral, buildUpdateMachineUpdate, eventRouter } from "@/app/events/eventRouter";
+import { buildMachineActivityEphemeral, buildSessionActivityEphemeral, buildUpdateMachineUpdate, eventRouter } from "@/app/events/eventRouter";
 import { log } from "@/utils/log";
 import { db } from "@/storage/db";
 import { Socket } from "socket.io";
@@ -236,6 +236,43 @@ export function machineUpdateHandler(userId: string, socket: Socket) {
             if (callback) {
                 callback({ result: 'error', message: 'Internal error' });
             }
+        }
+    });
+
+    // Daemon reports dead sessions (process exited without graceful shutdown)
+    socket.on('report-dead-sessions', async (data: {
+        machineId: string;
+        sessionIds: string[];
+    }) => {
+        try {
+            websocketEventsCounter.inc({ event_type: 'report-dead-sessions' });
+
+            if (!data || !Array.isArray(data.sessionIds) || data.sessionIds.length === 0) {
+                return;
+            }
+
+            for (const sid of data.sessionIds) {
+                if (typeof sid !== 'string') continue;
+
+                const updated = await db.session.updateManyAndReturn({
+                    where: { id: sid, accountId: userId, active: true },
+                    data: { active: false }
+                });
+
+                if (updated.length === 0) continue;
+                activityCache.invalidateSession(sid);
+
+                const sessionActivity = buildSessionActivityEphemeral(sid, false, updated[0].lastActiveAt.getTime(), false);
+                eventRouter.emitEphemeral({
+                    userId,
+                    payload: sessionActivity,
+                    recipientFilter: { type: 'user-scoped-only' }
+                });
+            }
+
+            log({ module: 'websocket', level: 'info' }, `Daemon reported ${data.sessionIds.length} dead session(s) for machine ${data.machineId}`);
+        } catch (error) {
+            log({ module: 'websocket', level: 'error' }, `Error in report-dead-sessions: ${error}`);
         }
     });
 }

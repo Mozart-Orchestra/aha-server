@@ -27,6 +27,7 @@ import { teamKeyRoutes } from "./routes/teamKeyRoutes";
 import { taskRoutes } from "./routes/taskRoutes";
 import { teamManagementRoutes } from "./routes/teamManagementRoutes";
 import { evolutionRoutes } from "./routes/evolutionRoutes";
+import { agentRoutes } from "./routes/agentRoutes";
 import { teamContextRoutes } from "./routes/teamContextRoutes";
 import { commerceObservabilityRoutes } from "./routes/commerceObservabilityRoutes";
 import { getCorsConfig } from "./utils/corsConfig";
@@ -166,6 +167,7 @@ export async function startApi() {
     taskRoutes(typed);
     teamManagementRoutes(typed);
     evolutionRoutes(typed);
+    agentRoutes(typed);
     teamContextRoutes(typed);
     commerceObservabilityRoutes(typed);
 

@@ -12,11 +12,13 @@ import { initEncrypt } from "./modules/encrypt";
 import { initGithub } from "./modules/github";
 import { loadFiles } from "./storage/files";
 import { seedSystemGenomes } from "./app/startup/seedSystemGenomes";
+import { startSqliteDatabaseGuard } from "./storage/sqliteDatabaseGuard";
 
 async function main() {
 
     // Storage
     await db.$connect();
+    await startSqliteDatabaseGuard(db);
     onShutdown('db', async () => {
         await db.$disconnect();
     });

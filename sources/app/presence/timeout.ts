@@ -3,6 +3,7 @@ import { delay } from "@/utils/delay";
 import { forever } from "@/utils/forever";
 import { shutdownSignal } from "@/utils/shutdown";
 import { buildMachineActivityEphemeral, buildSessionActivityEphemeral, eventRouter } from "@/app/events/eventRouter";
+import { activityCache } from "@/app/presence/sessionCache";
 
 export function startTimeout() {
     forever('session-timeout', async () => {
@@ -11,7 +12,7 @@ export function startTimeout() {
             where: {
                 active: true,
                 lastActiveAt: {
-                    lte: new Date(Date.now() - 1000 * 60 * 10) // 10 minutes
+                    lte: new Date(Date.now() - 1000 * 60 * 2) // 2 minutes
                 }
             }
         });
@@ -23,6 +24,7 @@ export function startTimeout() {
             if (updated.length === 0) {
                 continue;
             }
+            activityCache.invalidateSession(session.id);
             eventRouter.emitEphemeral({
                 userId: session.accountId,
                 payload: buildSessionActivityEphemeral(session.id, false, updated[0].lastActiveAt.getTime(), false),
@@ -35,7 +37,7 @@ export function startTimeout() {
             where: {
                 active: true,
                 lastActiveAt: {
-                    lte: new Date(Date.now() - 1000 * 60 * 10) // 10 minutes
+                    lte: new Date(Date.now() - 1000 * 60 * 2) // 2 minutes
                 }
             }
         });
@@ -47,6 +49,7 @@ export function startTimeout() {
             if (updated.length === 0) {
                 continue;
             }
+            activityCache.invalidateMachine(machine.id);
             eventRouter.emitEphemeral({
                 userId: machine.accountId,
                 payload: buildMachineActivityEphemeral(machine.id, false, updated[0].lastActiveAt.getTime()),

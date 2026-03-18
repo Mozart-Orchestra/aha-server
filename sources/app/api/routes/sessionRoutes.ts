@@ -9,6 +9,38 @@ import { allocateUserSeq } from "@/storage/seq";
 import { sessionDelete } from "@/app/session/sessionDelete";
 import * as privacyKit from "privacy-kit";
 
+function toSessionResponse(v: {
+    id: string;
+    seq: number;
+    createdAt: Date;
+    updatedAt: Date;
+    metadata: string;
+    metadataVersion: number;
+    agentState: string | null;
+    agentStateVersion: number;
+    dataEncryptionKey: Uint8Array | null;
+    active: boolean;
+    lastActiveAt: Date;
+    _count?: {
+        messages?: number;
+    };
+}) {
+    return {
+        id: v.id,
+        seq: v.seq,
+        createdAt: v.createdAt.getTime(),
+        updatedAt: v.updatedAt.getTime(),
+        active: v.active,
+        activeAt: v.lastActiveAt.getTime(),
+        metadata: v.metadata,
+        metadataVersion: v.metadataVersion,
+        agentState: v.agentState,
+        agentStateVersion: v.agentStateVersion,
+        dataEncryptionKey: v.dataEncryptionKey ? Buffer.from(v.dataEncryptionKey).toString('base64') : null,
+        persistedMessageCount: v._count?.messages ?? 0,
+    };
+}
+
 export function sessionRoutes(app: Fastify) {
 
     // Sessions API
@@ -53,28 +85,86 @@ export function sessionRoutes(app: Fastify) {
         });
 
         return reply.send({
-            sessions: sessions.map((v) => {
-                // const lastMessage = v.messages[0];
-                const sessionUpdatedAt = v.updatedAt.getTime();
-                // const lastMessageCreatedAt = lastMessage ? lastMessage.createdAt.getTime() : 0;
-
-                return {
-                    id: v.id,
-                    seq: v.seq,
-                    createdAt: v.createdAt.getTime(),
-                    updatedAt: sessionUpdatedAt,
-                    active: v.active,
-                    activeAt: v.lastActiveAt.getTime(),
-                    metadata: v.metadata,
-                    metadataVersion: v.metadataVersion,
-                    agentState: v.agentState,
-                    agentStateVersion: v.agentStateVersion,
-                    dataEncryptionKey: v.dataEncryptionKey ? Buffer.from(v.dataEncryptionKey).toString('base64') : null,
-                    persistedMessageCount: v._count.messages,
-                    lastMessage: null
-                };
-            })
+            sessions: sessions.map((v) => ({
+                ...toSessionResponse(v),
+                lastMessage: null,
+            }))
         });
+    });
+
+    // Get single session
+    app.get('/v1/sessions/:sessionId', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                sessionId: z.string(),
+            }),
+            response: {
+                200: z.object({
+                    session: z.object({
+                        id: z.string(),
+                        seq: z.number(),
+                        createdAt: z.number(),
+                        updatedAt: z.number(),
+                        active: z.boolean(),
+                        activeAt: z.number(),
+                        metadata: z.string(),
+                        metadataVersion: z.number(),
+                        agentState: z.string().nullable(),
+                        agentStateVersion: z.number(),
+                        dataEncryptionKey: z.string().nullable(),
+                        persistedMessageCount: z.number(),
+                    }),
+                }),
+                404: z.object({
+                    error: z.literal('Session not found'),
+                }),
+                500: z.object({
+                    error: z.literal('Failed to get session'),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { sessionId } = request.params;
+
+        try {
+            const session = await db.session.findFirst({
+                where: {
+                    id: sessionId,
+                    accountId: userId,
+                },
+                select: {
+                    id: true,
+                    seq: true,
+                    createdAt: true,
+                    updatedAt: true,
+                    metadata: true,
+                    metadataVersion: true,
+                    agentState: true,
+                    agentStateVersion: true,
+                    dataEncryptionKey: true,
+                    active: true,
+                    lastActiveAt: true,
+                    _count: {
+                        select: {
+                            messages: true,
+                        },
+                    },
+                },
+            });
+
+            if (!session) {
+                return reply.code(404).send({ error: 'Session not found' });
+            }
+
+            return reply.send({
+                session: toSessionResponse(session),
+            });
+        } catch (error) {
+            log({ module: 'api', level: 'error' }, `Failed to get session: ${error}`);
+            return reply.code(500).send({ error: 'Failed to get session' });
+        }
     });
 
     // V2 Sessions API - Active sessions only

@@ -60,8 +60,12 @@ class ActivityCache {
         
         // Cache miss - check database
         try {
-            const session = await db.session.findUnique({
-                where: { id: sessionId, accountId: userId }
+            const session = await db.session.findFirst({
+                where: {
+                    id: sessionId,
+                    accountId: userId,
+                    active: true,
+                }
             });
             
             if (session) {
@@ -155,6 +159,14 @@ class ActivityCache {
         
         databaseUpdatesSkippedCounter.inc({ type: 'machine' });
         return false; // No update needed
+    }
+
+    invalidateSession(sessionId: string): void {
+        this.sessionCache.delete(sessionId);
+    }
+
+    invalidateMachine(machineId: string): void {
+        this.machineCache.delete(machineId);
     }
 
     private async flushPendingUpdates(): Promise<void> {

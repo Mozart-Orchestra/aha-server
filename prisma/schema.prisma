@@ -410,9 +410,21 @@ model Genome {
     tags            String?
     /// Category for marketplace browsing e.g. 'coordination', 'development', 'qa'
     category        String?
+    /// Lifecycle status: 'draft' | 'unverified' | 'verified' | 'official' | 'archived'
+    status          String   @default("unverified")
+    /// How this genome was created: 'manual' | 'auto-created' | 'forked' | 'mutated' | 'market-installed'
+    origin          String?
+    /// ID of the genome this was derived/mutated from
+    variantOf       String?
+    /// Description of the mutation or fork reason
+    mutationNote    String?
+    /// Structured scorecard JSON (GenomeScorecard) written by supervisor via PATCH /feedback
+    scorecard       String?
     spawnCount      Int      @default(0)
     lastSpawnedAt   DateTime?
+    hubGenomeId     String?
     isPublic        Boolean  @default(false)
+    deletedAt       DateTime?
     createdAt       DateTime @default(now())
     updatedAt       DateTime @updatedAt
 
@@ -422,4 +434,8 @@ model Genome {
     @@index([parentSessionId])
     @@index([namespace])
     @@index([category])
+    @@index([deletedAt])
+    @@index([status])
+    @@index([origin])
+    @@index([variantOf])
 }

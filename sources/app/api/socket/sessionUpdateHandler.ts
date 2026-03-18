@@ -22,8 +22,12 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
             }
 
             // Resolve session
-            const session = await db.session.findUnique({
-                where: { id: sid, accountId: userId }
+            const session = await db.session.findFirst({
+                where: {
+                    id: sid,
+                    accountId: userId,
+                    active: true,
+                }
             });
             if (!session) {
                 return;
@@ -84,10 +88,11 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
             }
 
             // Resolve session
-            const session = await db.session.findUnique({
+            const session = await db.session.findFirst({
                 where: {
                     id: sid,
-                    accountId: userId
+                    accountId: userId,
+                    active: true,
                 }
             });
             if (!session) {
@@ -192,8 +197,12 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
                 log({ module: 'websocket' }, `Received message from socket ${socket.id}: sessionId=${sid}, messageLength=${message.length} bytes, connectionType=${connection.connectionType}, connectionSessionId=${connection.connectionType === 'session-scoped' ? connection.sessionId : 'N/A'}`);
 
                 // Resolve session
-                const session = await db.session.findUnique({
-                    where: { id: sid, accountId: userId }
+                const session = await db.session.findFirst({
+                    where: {
+                        id: sid,
+                        accountId: userId,
+                        active: true,
+                    }
                 });
                 if (!session) {
                     return;
@@ -274,6 +283,7 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
                 where: { id: sid },
                 data: { lastActiveAt: new Date(t), active: false }
             });
+            activityCache.invalidateSession(sid);
 
             // Emit session activity update
             const sessionActivity = buildSessionActivityEphemeral(sid, false, t, false);
