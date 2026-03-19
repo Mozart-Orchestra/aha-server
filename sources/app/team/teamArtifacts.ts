@@ -53,6 +53,11 @@ export function isTeamArtifact(artifact: Pick<ArtifactLike, 'body'>): boolean {
         || (board.team && typeof board.team === 'object');
 }
 
+export function isArchivedTeamBoard(board: Record<string, any>): boolean {
+    const archivedAt = board?.archivedAt ?? board?.team?.archivedAt;
+    return typeof archivedAt === 'number' && archivedAt > 0;
+}
+
 export function extractTeamMembers(board: Record<string, any>): TeamMemberRecord[] {
     if (!Array.isArray(board?.team?.members)) {
         return [];
@@ -106,11 +111,15 @@ export async function getAccessibleTeamArtifact(userId: string, teamId: string):
         return null;
     }
 
+    const board = extractTeamBoard(artifact);
+    if (isArchivedTeamBoard(board)) {
+        return null;
+    }
+
     if (artifact.accountId === userId) {
         return artifact;
     }
 
-    const board = extractTeamBoard(artifact);
     const memberSessionIds = extractTeamMembers(board)
         .map(member => member?.sessionId)
         .filter((value): value is string => typeof value === 'string' && value.length > 0);
@@ -155,11 +164,15 @@ export async function listAccessibleTeamArtifacts(userId: string): Promise<Artif
             return false;
         }
 
+        const board = extractTeamBoard(artifact);
+        if (isArchivedTeamBoard(board)) {
+            return false;
+        }
+
         if (artifact.accountId === userId) {
             return true;
         }
 
-        const board = extractTeamBoard(artifact);
         return extractTeamMembers(board).some(member => ownedOrMembershipSessionIds.has(member.sessionId));
     });
 }

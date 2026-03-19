@@ -22,7 +22,7 @@ export function machinesRoutes(app: Fastify) {
         const userId = request.userId;
         const { id, metadata, daemonState, dataEncryptionKey } = request.body;
 
-        // Check if machine exists (like sessions do)
+        // Check if machine exists for this account
         const machine = await db.machine.findFirst({
             where: {
                 accountId: userId,
@@ -31,7 +31,7 @@ export function machinesRoutes(app: Fastify) {
         });
 
         if (machine) {
-            // Machine exists - just return it
+            // Machine exists for this account - update metadata and return
             log({ module: 'machines', machineId: id, userId }, 'Found existing machine');
             return reply.send({
                 machine: {
@@ -48,9 +48,19 @@ export function machinesRoutes(app: Fastify) {
                 }
             });
         } else {
-            // Create new machine
-            log({ module: 'machines', machineId: id, userId }, 'Creating new machine');
+            const existingById = await db.machine.findUnique({ where: { id } });
 
+            if (existingById && existingById.accountId !== userId) {
+                log(
+                    { module: 'machines', level: 'warn', machineId: id, userId, previousAccountId: existingById.accountId },
+                    'Rejected machine registration attempt for machine owned by another account',
+                );
+                return reply.code(409).send({
+                    error: 'Machine already belongs to another account. Clear the local machine ID or reconnect the original account.',
+                });
+            }
+
+            log({ module: 'machines', machineId: id, userId }, 'Creating new machine');
             const newMachine = await db.machine.create({
                 data: {
                     id,
@@ -60,9 +70,7 @@ export function machinesRoutes(app: Fastify) {
                     daemonState: daemonState || null,
                     daemonStateVersion: daemonState ? 1 : 0,
                     dataEncryptionKey: dataEncryptionKey ? new Uint8Array(Buffer.from(dataEncryptionKey, 'base64')) : undefined,
-                    // Default to offline - in case the user does not start daemon
                     active: false,
-                    // lastActiveAt and activeAt defaults to now() in schema
                 }
             });
 

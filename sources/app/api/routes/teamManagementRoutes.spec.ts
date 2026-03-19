@@ -5,6 +5,7 @@ import { serializerCompiler, validatorCompiler, ZodTypeProvider } from 'fastify-
 vi.mock('@/storage/db', () => ({
     db: {
         artifact: {
+            create: vi.fn(),
             findMany: vi.fn(),
             findUnique: vi.fn(),
             update: vi.fn(),
@@ -34,7 +35,13 @@ vi.mock('@/utils/randomKeyNaked', () => ({
     randomKeyNaked: vi.fn().mockReturnValue('update-id'),
 }));
 
+vi.mock('@/app/team/teamOverview', () => ({
+    getTeamOverviewSnapshot: vi.fn(),
+    invalidateTeamOverviewSnapshot: vi.fn(),
+}));
+
 import { db } from '@/storage/db';
+import { getTeamOverviewSnapshot } from '@/app/team/teamOverview';
 import { teamManagementRoutes } from './teamManagementRoutes';
 
 function buildTeamArtifact(board: Record<string, unknown>, overrides?: Partial<{ id: string; accountId: string; createdAt: Date; updatedAt: Date }>) {
@@ -62,6 +69,96 @@ function buildApp() {
 describe('teamManagementRoutes', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+    });
+
+    it('creates a canonical team artifact with the provided id and initial board', async () => {
+        vi.mocked(db.artifact.create).mockResolvedValue(buildTeamArtifact({
+            name: 'Canonical Team',
+            description: 'Ship it',
+            team: {
+                name: 'Canonical Team',
+                members: [{ sessionId: 'session-1', roleId: 'builder' }],
+            },
+            tasks: [{ id: 'task-1', status: 'todo' }],
+        }, { id: 'team-canonical' }) as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/teams',
+            payload: {
+                id: 'team-canonical',
+                name: 'Canonical Team',
+                description: 'Ship it',
+                board: {
+                    team: {
+                        members: [{ sessionId: 'session-1', roleId: 'builder' }],
+                    },
+                    tasks: [{ id: 'task-1', status: 'todo' }],
+                },
+            },
+        });
+
+        expect(response.statusCode).toBe(201);
+        expect(vi.mocked(db.artifact.create)).toHaveBeenCalledWith(expect.objectContaining({
+            data: expect.objectContaining({
+                id: 'team-canonical',
+                body: expect.any(Buffer),
+            }),
+        }));
+
+        await app.close();
+    });
+
+    it('treats repeated canonical team creation with the same id as idempotent', async () => {
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(
+            buildTeamArtifact({
+                name: 'Canonical Team',
+                team: {
+                    name: 'Canonical Team',
+                    members: [],
+                },
+                tasks: [],
+            }, { id: 'team-canonical' }) as never
+        );
+        vi.mocked(db.artifact.update).mockResolvedValue(
+            buildTeamArtifact({
+                name: 'Canonical Team',
+                description: 'Retry create',
+                team: {
+                    name: 'Canonical Team',
+                    members: [{ sessionId: 'session-1', roleId: 'builder' }],
+                },
+                tasks: [{ id: 'task-1', status: 'todo' }],
+            }, { id: 'team-canonical' }) as never
+        );
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/teams',
+            payload: {
+                id: 'team-canonical',
+                name: 'Canonical Team',
+                description: 'Retry create',
+                board: {
+                    team: {
+                        members: [{ sessionId: 'session-1', roleId: 'builder' }],
+                    },
+                    tasks: [{ id: 'task-1', status: 'todo' }],
+                },
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(vi.mocked(db.artifact.update)).toHaveBeenCalledWith(expect.objectContaining({
+            where: { id: 'team-canonical' },
+            data: expect.objectContaining({
+                body: expect.any(Buffer),
+            }),
+        }));
+
+        await app.close();
     });
 
     it('lists accessible teams with summary counts', async () => {
@@ -107,6 +204,80 @@ describe('teamManagementRoutes', () => {
         await app.close();
     });
 
+    it('hides archived teams from the workspace list', async () => {
+        const activeBoard = {
+            team: {
+                name: 'Active Team',
+                members: [{ sessionId: 'session-1', roleId: 'builder' }],
+            },
+            tasks: [],
+        };
+        const archivedBoard = {
+            archivedAt: 1710800000000,
+            team: {
+                name: 'Archived Team',
+                archivedAt: 1710800000000,
+                members: [],
+            },
+            tasks: [],
+        };
+
+        vi.mocked(db.artifact.findMany).mockResolvedValue([
+            buildTeamArtifact(activeBoard, { id: 'team-active' }),
+            buildTeamArtifact(archivedBoard, { id: 'team-archived' }),
+        ] as never);
+        vi.mocked(db.session.findMany).mockResolvedValue([{ id: 'session-1' }] as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/teams',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            teams: [
+                expect.objectContaining({
+                    id: 'team-active',
+                    name: 'Active Team',
+                }),
+            ],
+        });
+
+        await app.close();
+    });
+
+    it('serves the persisted team overview snapshot from the static overview route', async () => {
+        vi.mocked(getTeamOverviewSnapshot).mockResolvedValue({
+            generatedAt: 1710800000000,
+            teamCount: 2,
+            teamTotalTokens: 4200,
+            agentTotalTokens: 2100,
+            completedTasksTotal: 5,
+            teamUsageItems: [{ id: 'team-1', label: 'Backend Team', tokens: 4200 }],
+            agentUsageItems: [{ id: 'session-1', label: 'Builder · builder', tokens: 2100 }],
+            completedTaskItems: [{ id: 'team-1', label: 'Backend Team', completedTasks: 5 }],
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/teams/overview',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            overview: expect.objectContaining({
+                teamCount: 2,
+                teamTotalTokens: 4200,
+                completedTasksTotal: 5,
+            }),
+        });
+        expect(getTeamOverviewSnapshot).toHaveBeenCalledWith('user-1');
+
+        await app.close();
+    });
+
     it('archives member sessions discovered from the stored team board', async () => {
         const board = {
             team: {
@@ -145,6 +316,14 @@ describe('teamManagementRoutes', () => {
                 updatedAt: expect.any(Date),
             }),
         });
+        expect(db.artifact.update).toHaveBeenCalledWith(expect.objectContaining({
+            where: { id: 'team-1' },
+            data: expect.objectContaining({
+                body: expect.any(Buffer),
+                bodyVersion: expect.anything(),
+                updatedAt: expect.any(Date),
+            }),
+        }));
 
         await app.close();
     });

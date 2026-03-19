@@ -13,6 +13,7 @@ import {
     serializeTeamBoard,
     summarizeTeamArtifact,
 } from "@/app/team/teamArtifacts";
+import { getTeamOverviewSnapshot, invalidateTeamOverviewSnapshot } from "@/app/team/teamOverview";
 import { activityCache } from "@/app/presence/sessionCache";
 
 /**
@@ -34,48 +35,100 @@ export function teamManagementRoutes(app: Fastify) {
         preHandler: app.authenticate,
         schema: {
             body: z.object({
+                id: z.string().optional(),
                 name: z.string().min(1).max(200),
                 description: z.string().max(500).optional(),
+                board: z.record(z.unknown()).optional(),
             }),
         },
     }, async (request, reply) => {
         const userId = request.userId;
-        const { name, description } = request.body as { name: string; description?: string };
+        const { id, name, description, board: incomingBoard } = request.body as {
+            id?: string;
+            name: string;
+            description?: string;
+            board?: Record<string, unknown>;
+        };
 
         try {
-            const teamId = randomKeyNaked(24);
+            const teamId = id || randomKeyNaked(24);
 
-            const board: Record<string, any> = {
-                name,
-                description: description || '',
-                columns: [
-                    { id: 'todo', title: 'To Do' },
-                    { id: 'in-progress', title: 'In Progress' },
-                    { id: 'review', title: 'Review' },
-                    { id: 'done', title: 'Done' },
-                ],
-                tasks: [],
-                agreements: [],
-                roles: [],
-                team: {
+            const board: Record<string, any> = incomingBoard
+                ? JSON.parse(JSON.stringify(incomingBoard))
+                : {
                     name,
-                    members: [],
-                },
-            };
+                    description: description || '',
+                    columns: [
+                        { id: 'todo', title: 'To Do' },
+                        { id: 'in-progress', title: 'In Progress' },
+                        { id: 'review', title: 'Review' },
+                        { id: 'done', title: 'Done' },
+                    ],
+                    tasks: [],
+                    agreements: [],
+                    roles: [],
+                    team: {
+                        name,
+                        members: [],
+                    },
+                };
 
-            const artifact = await db.artifact.create({
-                data: {
-                    id: teamId,
-                    accountId: userId,
-                    header: Buffer.from(JSON.stringify({ name, type: 'team' })),
-                    body: serializeTeamBoard(board),
-                    dataEncryptionKey: Buffer.from('team'),
-                },
-            });
+            board.name = name;
+            if (description !== undefined) {
+                board.description = description;
+            } else if (typeof board.description !== 'string') {
+                board.description = '';
+            }
+            if (!board.team || typeof board.team !== 'object') {
+                board.team = { members: [] };
+            }
+            board.team.name = name;
+            if (!Array.isArray(board.team.members)) {
+                board.team.members = [];
+            }
 
+            const existingArtifact = id
+                ? await db.artifact.findUnique({
+                    where: { id: teamId },
+                    select: {
+                        id: true,
+                        accountId: true,
+                        body: true,
+                        createdAt: true,
+                        updatedAt: true,
+                    },
+                })
+                : null;
+
+            if (existingArtifact && existingArtifact.accountId !== userId) {
+                return reply.code(409).send({ error: 'Team id already belongs to another account' });
+            }
+
+            const artifact = existingArtifact
+                ? await db.artifact.update({
+                    where: { id: teamId },
+                    data: {
+                        header: Buffer.from(JSON.stringify({ name, type: 'team' })),
+                        body: serializeTeamBoard(board),
+                        dataEncryptionKey: Buffer.from('team'),
+                        bodyVersion: { increment: 1 },
+                        updatedAt: new Date(),
+                    },
+                })
+                : await db.artifact.create({
+                    data: {
+                        id: teamId,
+                        accountId: userId,
+                        header: Buffer.from(JSON.stringify({ name, type: 'team' })),
+                        body: serializeTeamBoard(board),
+                        dataEncryptionKey: Buffer.from('team'),
+                    },
+                });
+
+            await invalidateTeamOverviewSnapshot(userId);
             log({ module: 'team-management' }, `Team created: ${teamId} by ${userId}`);
 
-            return reply.code(201).send({
+            return reply.code(existingArtifact ? 200 : 201).send({
                 team: summarizeTeamArtifact(artifact),
             });
         } catch (error: any) {
@@ -113,6 +166,49 @@ export function teamManagementRoutes(app: Fastify) {
         } catch (error: any) {
             log({ module: 'team-management', level: 'error' }, `Failed to list teams: ${error}`);
             return reply.code(500).send({ error: 'Failed to list teams' });
+        }
+    });
+
+    app.get('/v1/teams/overview', {
+        preHandler: app.authenticate,
+        schema: {
+            response: {
+                200: z.object({
+                    overview: z.object({
+                        generatedAt: z.number(),
+                        teamCount: z.number(),
+                        teamTotalTokens: z.number(),
+                        agentTotalTokens: z.number(),
+                        completedTasksTotal: z.number(),
+                        teamUsageItems: z.array(z.object({
+                            id: z.string(),
+                            label: z.string(),
+                            tokens: z.number(),
+                        })),
+                        agentUsageItems: z.array(z.object({
+                            id: z.string(),
+                            label: z.string(),
+                            tokens: z.number(),
+                        })),
+                        completedTaskItems: z.array(z.object({
+                            id: z.string(),
+                            label: z.string(),
+                            completedTasks: z.number(),
+                        })),
+                    }),
+                }),
+                500: z.object({
+                    error: z.literal('Failed to get team overview'),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        try {
+            const overview = await getTeamOverviewSnapshot(request.userId);
+            return reply.send({ overview });
+        } catch (error: any) {
+            log({ module: 'team-management', level: 'error' }, `Failed to get team overview: ${error}`);
+            return reply.code(500).send({ error: 'Failed to get team overview' });
         }
     });
 
@@ -580,6 +676,7 @@ async function addTeamMember(
 
     // Broadcast update
     await broadcastTeamUpdate(userId, teamId, 'member-added', { sessionId, roleId });
+    await invalidateTeamOverviewSnapshot(userId);
 
     return {
         success: true,
@@ -618,6 +715,7 @@ async function removeTeamMember(
 
     // Broadcast update
     await broadcastTeamUpdate(userId, teamId, 'member-removed', { sessionId });
+    await invalidateTeamOverviewSnapshot(userId);
 
     return { success: true };
 }
@@ -657,11 +755,17 @@ async function archiveTeam(
         managedSessionIds.forEach((sessionId) => activityCache.invalidateSession(sessionId));
     }
 
-    // Just increment version to trigger sync - client will handle body update
-    // (We can't modify encrypted body on server)
+    const archivedAt = Date.now();
+    board.archivedAt = archivedAt;
+    if (!board.team || typeof board.team !== 'object') {
+        board.team = { members: [] };
+    }
+    board.team.archivedAt = archivedAt;
+
     await db.artifact.update({
         where: { id: teamId },
         data: {
+            body: serializeTeamBoard(board),
             bodyVersion: { increment: 1 },
             updatedAt: new Date()
         }
@@ -673,6 +777,7 @@ async function archiveTeam(
     }
 
     await broadcastTeamUpdate(userId, teamId, 'team-archived', { archivedSessions: archivedCount });
+    await invalidateTeamOverviewSnapshot(userId);
 
     return { success: true, archivedSessions: archivedCount };
 }
@@ -719,6 +824,7 @@ async function deleteTeam(
     }
 
     await broadcastTeamUpdate(userId, teamId, 'team-deleted', { deletedSessions: deletedCount });
+    await invalidateTeamOverviewSnapshot(userId);
 
     return { success: true, deletedSessions: deletedCount };
 }
@@ -751,6 +857,7 @@ async function renameTeam(
     });
 
     await broadcastTeamUpdate(userId, teamId, 'team-renamed', { name });
+    await invalidateTeamOverviewSnapshot(userId);
 
     return {
         success: true,

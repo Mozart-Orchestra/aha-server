@@ -3,6 +3,7 @@ import { AsyncLock } from "@/utils/lock";
 import { db } from "@/storage/db";
 import { buildUsageEphemeral, eventRouter } from "@/app/events/eventRouter";
 import { log } from "@/utils/log";
+import { invalidateTeamOverviewSnapshot } from "@/app/team/teamOverview";
 
 export function usageHandler(userId: string, socket: Socket) {
     const receiveUsageLock = new AsyncLock();
@@ -87,6 +88,7 @@ export function usageHandler(userId: string, socket: Socket) {
                         }
                     });
 
+                    await invalidateTeamOverviewSnapshot(userId);
                     log({ module: 'websocket' }, `Usage report saved: key=${key}, sessionId=${sessionId || 'none'}, userId=${userId}`);
 
                     // Emit usage ephemeral update if sessionId is provided

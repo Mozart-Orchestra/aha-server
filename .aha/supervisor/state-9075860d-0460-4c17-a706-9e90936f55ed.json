@@ -1,0 +1,17 @@
+{
+  "teamId": "9075860d-0460-4c17-a706-9e90936f55ed",
+  "lastRunAt": 1773767584827,
+  "teamLogCursor": 0,
+  "ccLogCursors": {},
+  "codexHistoryCursor": 0,
+  "codexSessionCursors": {},
+  "lastConclusion": "",
+  "lastSessionId": null,
+  "terminated": false,
+  "idleRuns": 0,
+  "lastSupervisorPid": 0,
+  "pendingAction": {
+    "type": "notify_help",
+    "message": "[high] Master explicitly requested this Claude scout confirm idle and awaiting termination. I am already idle, but send_team_message timed out again (same 10000ms timeout as earlier), preventing visible acknowledgment in team chat. Please relay/restore status visibility: this session is idle, doing no work, and awaiting supervisor termination."
+  }
+}

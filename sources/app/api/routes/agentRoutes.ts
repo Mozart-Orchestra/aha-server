@@ -9,6 +9,10 @@ import {
     serializeTeamBoard,
 } from "@/app/team/teamArtifacts";
 
+const GENOME_HUB_URL = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
+const EXISTING_SESSION_LOOKUP_ATTEMPTS = 20;
+const EXISTING_SESSION_LOOKUP_DELAY_MS = 250;
+
 // ---------------------------------------------------------------------------
 // Schemas
 // ---------------------------------------------------------------------------
@@ -17,6 +21,9 @@ const AgentCreateSchema = z.object({
     displayName: z.string().min(1).max(100),
     genomeId: z.string().optional(),
     genomeSpec: z.record(z.unknown()).optional(),
+    sessionId: z.string().optional(),
+    sessionTag: z.string().optional(),
+    memberId: z.string().optional(),
     runtimeType: z.enum(['claude', 'codex']).default('claude'),
     modelId: z.string().optional(),
     metadata: z.record(z.unknown()).optional(),
@@ -51,6 +58,8 @@ function buildAgentResponse(
         id: artifact.id,
         displayName: agent?.displayName || board.name || `Agent ${artifact.id.slice(0, 8)}`,
         sessionId: agent?.sessionId || null,
+        sessionTag: agent?.sessionTag || null,
+        memberId: agent?.memberId || null,
         roleId: agent?.roleId || null,
         runtimeType: agent?.runtimeType || 'claude',
         genomeId: board.genomeId || null,
@@ -60,6 +69,43 @@ function buildAgentResponse(
         createdAt: artifact.createdAt.getTime(),
         updatedAt: artifact.updatedAt.getTime(),
     };
+}
+
+async function waitForExistingSession(
+    userId: string,
+    opts: { sessionId?: string; sessionTag?: string },
+): Promise<{ id: string; tag: string } | null> {
+    const orClauses = [
+        ...(opts.sessionId ? [{ id: opts.sessionId }] : []),
+        ...(opts.sessionTag ? [{ tag: opts.sessionTag }] : []),
+    ];
+
+    if (orClauses.length === 0) {
+        return null;
+    }
+
+    for (let attempt = 0; attempt < EXISTING_SESSION_LOOKUP_ATTEMPTS; attempt += 1) {
+        const session = await db.session.findFirst({
+            where: {
+                accountId: userId,
+                OR: orClauses,
+            },
+            select: {
+                id: true,
+                tag: true,
+            },
+        });
+
+        if (session) {
+            return session;
+        }
+
+        if (attempt < EXISTING_SESSION_LOOKUP_ATTEMPTS - 1) {
+            await new Promise((resolve) => setTimeout(resolve, EXISTING_SESSION_LOOKUP_DELAY_MS));
+        }
+    }
+
+    return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +141,9 @@ export function agentRoutes(app: Fastify) {
             displayName,
             genomeId,
             genomeSpec,
+            sessionId: existingSessionId,
+            sessionTag,
+            memberId,
             runtimeType,
             modelId,
             metadata,
@@ -108,37 +157,76 @@ export function agentRoutes(app: Fastify) {
                 });
             }
 
+            const reusableSession = existingSessionId || sessionTag
+                ? await waitForExistingSession(userId, {
+                    sessionId: existingSessionId,
+                    sessionTag,
+                })
+                : null;
+
             const created = await db.$transaction(async (tx) => {
+                // Validate genomeId: genome-hub is the authoritative source,
+                // local DB is only a fallback (will be deprecated)
                 if (genomeId) {
-                    const genome = await tx.genome.findFirst({
-                        where: {
-                            id: genomeId,
-                            deletedAt: null,
-                            OR: [{ accountId: userId }, { isPublic: true }],
-                        },
-                        select: { id: true },
-                    });
-                    if (!genome) {
-                        return { type: 'genome-not-found' as const };
+                    const hubGenome = await fetchGenomeFromHub(genomeId);
+                    if (!hubGenome) {
+                        // Fallback to local genome table (transitional)
+                        const localGenome = await tx.genome.findFirst({
+                            where: {
+                                id: genomeId,
+                                deletedAt: null,
+                                OR: [{ accountId: userId }, { isPublic: true }],
+                            },
+                            select: { id: true },
+                        });
+                        if (!localGenome && !genomeSpec) {
+                            return { type: 'genome-not-found' as const };
+                        }
                     }
                 }
 
                 const agentId = randomKeyNaked(24);
-                const sessionTag = `standalone:${agentId}`;
+                const defaultSessionTag = `standalone:${agentId}`;
 
-                const session = await tx.session.create({
-                    data: {
-                        tag: sessionTag,
-                        accountId: userId,
-                        metadata: JSON.stringify({
-                            name: displayName,
-                            type: 'standalone-agent',
-                            genomeId: genomeId || null,
-                            runtimeType,
-                            modelId: modelId || null,
-                        }),
-                    },
-                });
+                const session = reusableSession
+                    ? reusableSession
+                    : (existingSessionId || sessionTag)
+                        ? await tx.session.findFirst({
+                            where: {
+                                accountId: userId,
+                                OR: [
+                                    ...(existingSessionId ? [{ id: existingSessionId }] : []),
+                                    ...(sessionTag ? [{ tag: sessionTag }] : []),
+                                ],
+                            },
+                            select: {
+                                id: true,
+                                tag: true,
+                            },
+                        })
+                    : await tx.session.create({
+                        data: {
+                            tag: sessionTag || defaultSessionTag,
+                            accountId: userId,
+                            metadata: JSON.stringify({
+                                name: displayName,
+                                type: 'standalone-agent',
+                                genomeId: genomeId || null,
+                                runtimeType,
+                                modelId: modelId || null,
+                            }),
+                        },
+                        select: {
+                            id: true,
+                            tag: true,
+                        },
+                    });
+
+                if (!session) {
+                    return { type: 'session-not-found' as const };
+                }
+
+                const resolvedSessionTag = sessionTag || session.tag || defaultSessionTag;
 
                 const board: Record<string, any> = {
                     type: 'standalone',
@@ -149,7 +237,9 @@ export function agentRoutes(app: Fastify) {
                     metadata: metadata || {},
                     team: {
                         members: [{
+                            ...(memberId ? { memberId } : {}),
                             sessionId: session.id,
+                            sessionTag: resolvedSessionTag,
                             roleId: 'standalone',
                             displayName,
                             runtimeType,
@@ -175,13 +265,22 @@ export function agentRoutes(app: Fastify) {
                 });
 
                 if (genomeId) {
-                    await tx.genome.update({
-                        where: { id: genomeId },
-                        data: {
-                            spawnCount: { increment: 1 },
-                            lastSpawnedAt: new Date(),
-                        },
+                    // Increment on genome-hub (authoritative)
+                    incrementHubSpawnCount(genomeId).catch(() => {});
+                    // Also increment locally if record exists (transitional fallback)
+                    const localGenome = await tx.genome.findFirst({
+                        where: { id: genomeId, deletedAt: null },
+                        select: { id: true },
                     });
+                    if (localGenome) {
+                        await tx.genome.update({
+                            where: { id: genomeId },
+                            data: {
+                                spawnCount: { increment: 1 },
+                                lastSpawnedAt: new Date(),
+                            },
+                        });
+                    }
                 }
 
                 return {
@@ -193,6 +292,10 @@ export function agentRoutes(app: Fastify) {
 
             if (created.type === 'genome-not-found') {
                 return reply.code(404).send({ error: 'Genome not found' });
+            }
+
+            if (created.type === 'session-not-found') {
+                return reply.code(404).send({ error: 'Session not found' });
             }
 
             log({ module: 'agents' }, `Standalone agent created: ${created.artifact.id}`);
@@ -366,16 +469,20 @@ export function agentRoutes(app: Fastify) {
             }
 
             if (updates.genomeId !== undefined) {
-                const genome = await db.genome.findFirst({
-                    where: {
-                        id: updates.genomeId,
-                        deletedAt: null,
-                        OR: [{ accountId: userId }, { isPublic: true }],
-                    },
-                    select: { id: true },
-                });
-                if (!genome) {
-                    return reply.code(404).send({ error: 'Genome not found' });
+                // genome-hub is authoritative, local is fallback
+                const hubGenome = await fetchGenomeFromHub(updates.genomeId);
+                if (!hubGenome) {
+                    const localGenome = await db.genome.findFirst({
+                        where: {
+                            id: updates.genomeId,
+                            deletedAt: null,
+                            OR: [{ accountId: userId }, { isPublic: true }],
+                        },
+                        select: { id: true },
+                    });
+                    if (!localGenome) {
+                        return reply.code(404).send({ error: 'Genome not found' });
+                    }
                 }
                 board.genomeId = updates.genomeId;
             }
@@ -562,4 +669,35 @@ export function agentRoutes(app: Fastify) {
             return reply.code(500).send({ error: error.message });
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Genome-hub federation helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch a genome record from genome-hub by ID.
+ * Returns the genome object if found, null otherwise.
+ */
+async function fetchGenomeFromHub(genomeId: string): Promise<Record<string, unknown> | null> {
+    try {
+        const res = await fetch(`${GENOME_HUB_URL}/genomes/id/${genomeId}`);
+        if (res.status === 404) return null;
+        if (!res.ok) return null;
+        return await res.json() as Record<string, unknown>;
+    } catch {
+        log({ module: 'agents', level: 'warn' }, `genome-hub unreachable for genome ${genomeId}`);
+        return null;
+    }
+}
+
+/**
+ * Increment spawn count on genome-hub (fire-and-forget).
+ */
+async function incrementHubSpawnCount(genomeId: string): Promise<void> {
+    try {
+        await fetch(`${GENOME_HUB_URL}/genomes/id/${genomeId}/spawn`, { method: 'POST' });
+    } catch {
+        // Silently ignore — non-critical
+    }
 }

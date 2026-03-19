@@ -10,6 +10,7 @@ import { kvMutate } from "@/app/kv/kvMutate";
 import { encryptString, decryptString } from "@/modules/encrypt";
 import { teamMessagesCounter, teamTaskOperationsCounter } from "@/app/monitoring/metrics2";
 import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
+import { observeSessionActivity } from "@/app/presence/observeSessionActivity";
 
 /**
  * Team Messages Routes
@@ -348,6 +349,10 @@ export function teamMessagesRoutes(app: Fastify) {
             }
 
             log({ module: 'team-messages', teamId, messageId: message.id }, 'Message broadcasted');
+
+            if (message.fromSessionId) {
+                await observeSessionActivity(userId, message.fromSessionId, Date.now());
+            }
 
             return reply.send({
                 success: true,

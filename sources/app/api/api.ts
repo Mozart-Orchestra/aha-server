@@ -30,6 +30,7 @@ import { evolutionRoutes } from "./routes/evolutionRoutes";
 import { agentRoutes } from "./routes/agentRoutes";
 import { teamContextRoutes } from "./routes/teamContextRoutes";
 import { commerceObservabilityRoutes } from "./routes/commerceObservabilityRoutes";
+import { marketListingRoutes } from "./routes/marketListingRoutes";
 import { getCorsConfig } from "./utils/corsConfig";
 import { getDefaultRateLimitConfig } from "./utils/rateLimitConfig";
 
@@ -170,6 +171,7 @@ export async function startApi() {
     agentRoutes(typed);
     teamContextRoutes(typed);
     commerceObservabilityRoutes(typed);
+    marketListingRoutes(typed);
 
     // Start HTTP 
     const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3005;

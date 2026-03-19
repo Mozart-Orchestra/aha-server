@@ -439,3 +439,48 @@ model Genome {
     @@index([origin])
     @@index([variantOf])
 }
+
+//
+// Agent Marketplace
+//
+
+model MarketListing {
+    id           String   @id @default(cuid())
+    ref          String   @unique // @namespace/name:version
+    digest       String   @unique // sha256:...
+    publisherId  String
+    /// Full agent-json-v1 spec
+    genome       Json
+    /// {isPublic, accessControl}
+    visibility   Json
+    /// {displayName, shortDescription, icon, screenshots, readmeUrl}
+    display      Json
+    /// {namespace, category, tags, lifecycle, featured, curated}
+    market       Json
+    /// {downloads, activeInstances, starRating, reviewCount}
+    stats        Json     @default("{}")
+    /// {minAhaVersion, supportedRuntimes, requiredFeatures}
+    compatibility Json?
+    /// {model, details}
+    pricing      Json?
+    publishedAt  DateTime?
+    createdAt    DateTime @default(now())
+    updatedAt    DateTime @updatedAt
+
+    reviews      MarketReview[]
+}
+
+model MarketReview {
+    id         String   @id @default(cuid())
+    listingId  String
+    listing    MarketListing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+    userId     String
+    rating     Int
+    title      String?
+    review     String?
+    createdAt  DateTime @default(now())
+    updatedAt  DateTime @updatedAt
+
+    @@unique([listingId, userId])
+    @@index([listingId])
+}

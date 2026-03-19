@@ -1,0 +1,89 @@
+import fastify from 'fastify';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { serializerCompiler, validatorCompiler, ZodTypeProvider } from 'fastify-type-provider-zod';
+
+vi.mock('@/storage/db', () => ({
+    db: {
+        machine: {
+            findFirst: vi.fn(),
+            findUnique: vi.fn(),
+            create: vi.fn(),
+        },
+    },
+}));
+
+vi.mock('@/app/events/eventRouter', () => ({
+    eventRouter: {
+        emitUpdate: vi.fn(),
+    },
+    buildNewMachineUpdate: vi.fn().mockReturnValue({ t: 'new-machine' }),
+    buildUpdateMachineUpdate: vi.fn().mockReturnValue({ t: 'update-machine' }),
+}));
+
+vi.mock('@/storage/seq', () => ({
+    allocateUserSeq: vi.fn().mockResolvedValue(1),
+}));
+
+vi.mock('@/utils/randomKeyNaked', () => ({
+    randomKeyNaked: vi.fn().mockReturnValue('update-id'),
+}));
+
+import { db } from '@/storage/db';
+import { machinesRoutes } from './machinesRoutes';
+
+function buildApp() {
+    const app = fastify();
+    app.setValidatorCompiler(validatorCompiler);
+    app.setSerializerCompiler(serializerCompiler);
+    const typed = app.withTypeProvider<ZodTypeProvider>() as any;
+    typed.decorate('authenticate', async (request: any) => {
+        request.userId = 'user-1';
+    });
+    machinesRoutes(typed);
+    return typed;
+}
+
+describe('machinesRoutes', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        vi.mocked(db.machine.findFirst).mockResolvedValue(null as never);
+        vi.mocked(db.machine.findUnique).mockResolvedValue(null as never);
+        vi.mocked(db.machine.create).mockResolvedValue({
+            id: 'machine-1',
+            metadata: 'meta',
+            metadataVersion: 1,
+            daemonState: null,
+            daemonStateVersion: 0,
+            dataEncryptionKey: null,
+            active: false,
+            lastActiveAt: new Date('2026-03-19T00:00:00Z'),
+            createdAt: new Date('2026-03-19T00:00:00Z'),
+            updatedAt: new Date('2026-03-19T00:00:00Z'),
+        } as never);
+    });
+
+    it('rejects cross-account machine registration without proof of ownership', async () => {
+        vi.mocked(db.machine.findUnique).mockResolvedValue({
+            id: 'machine-1',
+            accountId: 'other-user',
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/machines',
+            payload: {
+                id: 'machine-1',
+                metadata: 'encrypted-meta',
+            },
+        });
+
+        expect(response.statusCode).toBe(409);
+        expect(response.json()).toEqual({
+            error: 'Machine already belongs to another account. Clear the local machine ID or reconnect the original account.',
+        });
+        expect(vi.mocked(db.machine.create)).not.toHaveBeenCalled();
+
+        await app.close();
+    });
+});

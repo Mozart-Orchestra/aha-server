@@ -24,10 +24,6 @@ export function cleanupActiveExecutionLinks<T extends ExecutionLinkLike>(
             ? 'abandoned'
             : 'completed';
 
-        if (nextStatus === link.status) {
-            return link;
-        }
-
         changed = true;
         return {
             ...link,

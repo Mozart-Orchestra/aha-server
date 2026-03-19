@@ -191,4 +191,53 @@ describe('artifactsRoutes', () => {
 
         await app.close();
     });
+
+    it('accepts non-uuid artifact ids for team recovery flows', async () => {
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(null as never);
+        vi.mocked(db.artifact.create).mockResolvedValue(buildArtifact({
+            id: 'team_legacy_id',
+            body: Buffer.from('encrypted-body'),
+            dataEncryptionKey: Buffer.from('encrypted-key'),
+        }) as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/artifacts',
+            payload: {
+                id: 'team_legacy_id',
+                header: privacyKit.encodeBase64(Buffer.from('encrypted-header')),
+                body: privacyKit.encodeBase64(Buffer.from('encrypted-body')),
+                dataEncryptionKey: privacyKit.encodeBase64(Buffer.from('encrypted-key')),
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(vi.mocked(db.artifact.create)).toHaveBeenCalledWith(expect.objectContaining({
+            data: expect.objectContaining({
+                id: 'team_legacy_id',
+            }),
+        }));
+
+        await app.close();
+    });
+
+    it('rejects artifact ids with unsafe characters', async () => {
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/artifacts',
+            payload: {
+                id: 'bad/id with spaces',
+                header: privacyKit.encodeBase64(Buffer.from('encrypted-header')),
+                body: privacyKit.encodeBase64(Buffer.from('encrypted-body')),
+                dataEncryptionKey: privacyKit.encodeBase64(Buffer.from('encrypted-key')),
+            },
+        });
+
+        expect(response.statusCode).toBe(400);
+        expect(vi.mocked(db.artifact.create)).not.toHaveBeenCalled();
+
+        await app.close();
+    });
 });

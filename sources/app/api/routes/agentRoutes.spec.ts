@@ -8,6 +8,7 @@ const tx = {
         update: vi.fn(),
     },
     session: {
+        findFirst: vi.fn(),
         create: vi.fn(),
     },
     artifact: {
@@ -17,7 +18,10 @@ const tx = {
 
 vi.mock('@/storage/db', () => ({
     db: {
-        $transaction: vi.fn(async (callback: (innerTx: typeof tx) => unknown) => callback(tx)),
+        session: {
+            findFirst: vi.fn(),
+        },
+        $transaction: vi.fn(),
     },
 }));
 
@@ -43,9 +47,11 @@ function buildApp() {
 describe('agentRoutes', () => {
     beforeEach(() => {
         vi.clearAllMocks();
-        vi.mocked(db.$transaction).mockImplementation(async (callback: (innerTx: typeof tx) => unknown) => callback(tx));
+        (db.$transaction as any).mockImplementation(async (callback: (innerTx: typeof tx) => unknown) => callback(tx));
+        vi.mocked(db.session.findFirst).mockResolvedValue(null as never);
         tx.genome.findFirst.mockResolvedValue({ id: 'genome-1' });
         tx.genome.update.mockResolvedValue({ id: 'genome-1' });
+        tx.session.findFirst.mockResolvedValue(null as never);
         tx.session.create.mockResolvedValue({ id: 'session-1' });
         tx.artifact.create.mockResolvedValue({
             id: 'agent-123',
@@ -92,6 +98,33 @@ describe('agentRoutes', () => {
         expect(response.statusCode).toBe(500);
         expect(db.$transaction).toHaveBeenCalledTimes(1);
         expect(tx.genome.update).not.toHaveBeenCalled();
+
+        await app.close();
+    });
+
+    it('reuses a freshly spawned persisted session by tag before falling back to session.create', async () => {
+        vi.mocked(db.session.findFirst).mockResolvedValue({
+            id: 'session-live',
+            tag: 'standalone:abc',
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/agents',
+            payload: {
+                displayName: 'Reviewer',
+                genomeId: 'genome-1',
+                runtimeType: 'claude',
+                sessionId: 'session-live',
+                sessionTag: 'standalone:abc',
+            },
+        });
+
+        expect(response.statusCode).toBe(201);
+        expect(db.session.findFirst).toHaveBeenCalled();
+        expect(tx.session.create).not.toHaveBeenCalled();
+        expect(tx.artifact.create).toHaveBeenCalledTimes(1);
 
         await app.close();
     });

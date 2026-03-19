@@ -3,6 +3,8 @@ import { z } from "zod";
 import { log } from "@/utils/log";
 import { taskOrchestrator } from "@/app/task/taskOrchestrator";
 import { isTaskOperationError, TASK_ERROR_CODES } from "@/app/task/taskErrors";
+import { invalidateTeamOverviewSnapshot } from "@/app/team/teamOverview";
+import { observeSessionActivity } from "@/app/presence/observeSessionActivity";
 
 /**
  * Task Routes - Server-Driven Task Management API
@@ -143,6 +145,7 @@ export function taskRoutes(app: Fastify) {
 
         try {
             const task = await taskOrchestrator.createTask(userId, teamId, taskData);
+            await invalidateTeamOverviewSnapshot(userId);
             log({ module: 'task-routes', teamId, taskId: task.id }, 'Task created');
             return reply.send({ success: true, task });
         } catch (error: any) {
@@ -186,6 +189,7 @@ export function taskRoutes(app: Fastify) {
 
         try {
             const task = await taskOrchestrator.updateTask(userId, teamId, taskId, updates);
+            await invalidateTeamOverviewSnapshot(userId);
             log({ module: 'task-routes', teamId, taskId }, 'Task updated');
             return reply.send({ success: true, task });
         } catch (error: any) {
@@ -226,6 +230,7 @@ export function taskRoutes(app: Fastify) {
 
         try {
             await taskOrchestrator.deleteTask(userId, teamId, taskId);
+            await invalidateTeamOverviewSnapshot(userId);
             log({ module: 'task-routes', teamId, taskId }, 'Task deleted');
             return reply.send({ success: true });
         } catch (error: any) {
@@ -272,6 +277,7 @@ export function taskRoutes(app: Fastify) {
 
         try {
             const task = await taskOrchestrator.startTask(userId, teamId, taskId, sessionId, role);
+            await observeSessionActivity(userId, sessionId, Date.now());
             log({ module: 'task-routes', teamId, taskId, sessionId }, 'Task started');
             return reply.send({ success: true, task });
         } catch (error: any) {
@@ -320,6 +326,7 @@ export function taskRoutes(app: Fastify) {
 
         try {
             const task = await taskOrchestrator.completeTask(userId, teamId, taskId, sessionId);
+            await observeSessionActivity(userId, sessionId, Date.now());
             log({ module: 'task-routes', teamId, taskId, sessionId }, 'Task completed');
             return reply.send({ success: true, task });
         } catch (error: any) {
@@ -376,6 +383,7 @@ export function taskRoutes(app: Fastify) {
                 sessionId,
                 { type, description }
             );
+            await observeSessionActivity(userId, sessionId, Date.now());
             log({ module: 'task-routes', teamId, taskId }, 'Blocker reported');
             return reply.send({ success: true, task });
         } catch (error: any) {
@@ -431,6 +439,7 @@ export function taskRoutes(app: Fastify) {
                 sessionId,
                 resolution
             );
+            await observeSessionActivity(userId, sessionId, Date.now());
             log({ module: 'task-routes', teamId, taskId, blockerId }, 'Blocker resolved');
             return reply.send({ success: true, task });
         } catch (error: any) {

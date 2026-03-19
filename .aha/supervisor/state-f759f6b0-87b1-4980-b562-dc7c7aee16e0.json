@@ -1,0 +1,15 @@
+{
+  "teamId": "f759f6b0-87b1-4980-b562-dc7c7aee16e0",
+  "lastRunAt": 1773742159885,
+  "teamLogCursor": 0,
+  "ccLogCursors": {},
+  "lastConclusion": "",
+  "lastSessionId": null,
+  "terminated": false,
+  "idleRuns": 0,
+  "lastSupervisorPid": 0,
+  "pendingAction": {
+    "type": "notify_help",
+    "message": "[medium] Backend implementation is complete and focused tests pass, but I’m blocked from updating Kanban / notifying Master because both `update_task` and `send_team_message` are returning HTTP 500 from the collaboration backend. I retried with shorter payloads and still hit the same error."
+  }
+}

@@ -9,6 +9,8 @@ import * as privacyKit from "privacy-kit";
 import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
 import { extractTeamBoard, extractTeamMembers, extractTeamName, isTeamArtifact } from "@/app/team/teamArtifacts";
 
+const ARTIFACT_ID_SCHEMA = z.string().min(1).max(200).regex(/^[A-Za-z0-9._:-]+$/);
+
 function isSharedTeamArtifact(artifact: { body: Uint8Array }): boolean {
     try {
         const parsed = parseTeamArtifactBody(artifact.body) as Record<string, unknown>;
@@ -61,6 +63,33 @@ type ArtifactListRecord = {
     updatedAt: Date;
 };
 
+function buildSharedTeamArtifactEnvelope(
+    artifact: Pick<ArtifactListRecord, 'id' | 'headerVersion' | 'body' | 'bodyVersion' | 'seq' | 'createdAt' | 'updatedAt'>,
+    opts: { includeBody: true }
+): {
+    id: string;
+    header: string;
+    headerVersion: number;
+    body: string;
+    bodyVersion: number;
+    type: 'team';
+    dataEncryptionKey: string;
+    seq: number;
+    createdAt: number;
+    updatedAt: number;
+};
+function buildSharedTeamArtifactEnvelope(
+    artifact: Pick<ArtifactListRecord, 'id' | 'headerVersion' | 'body' | 'bodyVersion' | 'seq' | 'createdAt' | 'updatedAt'>,
+    opts?: { includeBody?: false }
+): {
+    id: string;
+    header: string;
+    headerVersion: number;
+    dataEncryptionKey: string;
+    seq: number;
+    createdAt: number;
+    updatedAt: number;
+};
 function buildSharedTeamArtifactEnvelope(
     artifact: Pick<ArtifactListRecord, 'id' | 'headerVersion' | 'body' | 'bodyVersion' | 'seq' | 'createdAt' | 'updatedAt'>,
     opts?: { includeBody?: boolean }
@@ -265,7 +294,7 @@ export function artifactsRoutes(app: Fastify) {
         preHandler: app.authenticate,
         schema: {
             body: z.object({
-                id: z.string().uuid(),
+                id: ARTIFACT_ID_SCHEMA,
                 header: z.string(),
                 body: z.string(),
                 dataEncryptionKey: z.string()

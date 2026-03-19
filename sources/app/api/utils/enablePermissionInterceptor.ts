@@ -36,7 +36,8 @@ export async function enablePermissionInterceptor(
     bypassPaths = ['/health', '/ping', '/metrics', '/api/health']
   } = options;
 
-  log('PermissionInterceptor', {
+  log({
+    module: 'PermissionInterceptor',
     enabled,
     strictMode,
     auditLog,
@@ -60,7 +61,8 @@ export async function enablePermissionInterceptor(
     });
 
     if (auditLog) {
-      log('PermissionInterceptor', {
+      log({
+        module: 'PermissionInterceptor',
         userId: request.userId,
         role,
         operation: operationName,
@@ -108,7 +110,8 @@ export async function enablePermissionInterceptor(
 
       // Audit log
       if (auditLog) {
-        log('PermissionInterceptor', {
+        log({
+          module: 'PermissionInterceptor',
           userId: (request as any).userId,
           role: userRole,
           operation: operationName,
@@ -121,7 +124,8 @@ export async function enablePermissionInterceptor(
 
       if (!result.allowed) {
         // Access denied
-        log('PermissionInterceptor', {
+        log({
+          module: 'PermissionInterceptor',
           userId: (request as any).userId,
           role: userRole,
           operation: operationName,
@@ -139,14 +143,16 @@ export async function enablePermissionInterceptor(
 
       // Access granted - continue to route handler
       if (auditLog) {
-        log('PermissionInterceptor', {
+        log({
+          module: 'PermissionInterceptor',
           userId: (request as any).userId,
           role: userRole,
           operation: operationName
         }, `Access GRANTED: ${operationName}`);
       }
     } catch (error) {
-      log('PermissionInterceptor', {
+      log({
+        module: 'PermissionInterceptor',
         level: 'error',
         error: error instanceof Error ? error.message : String(error)
       }, 'Error checking permissions');
@@ -161,12 +167,13 @@ export async function enablePermissionInterceptor(
 
   // Log available roles
   const availableRoles = rolePermissionService.getAvailableRoles();
-  log('PermissionInterceptor', {
+  log({
+    module: 'PermissionInterceptor',
     count: availableRoles.length,
     roles: availableRoles
   }, `Available roles: ${availableRoles.join(', ')}`);
 
-  log('PermissionInterceptor', null, '✓ PermissionInterceptor initialized successfully');
+  log({ module: 'PermissionInterceptor' }, '✓ PermissionInterceptor initialized successfully');
 }
 
 /**
