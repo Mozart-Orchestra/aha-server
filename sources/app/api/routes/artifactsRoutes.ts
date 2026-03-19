@@ -7,6 +7,7 @@ import { allocateUserSeq } from "@/storage/seq";
 import { log } from "@/utils/log";
 import * as privacyKit from "privacy-kit";
 import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
+import { extractTeamBoard, extractTeamMembers, extractTeamName, isTeamArtifact } from "@/app/team/teamArtifacts";
 
 function isSharedTeamArtifact(artifact: { body: Uint8Array }): boolean {
     try {
@@ -47,6 +48,55 @@ async function canUserAccessSharedTeamArtifact(userId: string, artifact: { body:
     }
 }
 
+type ArtifactListRecord = {
+    id: string;
+    accountId: string;
+    header: Uint8Array;
+    headerVersion: number;
+    body: Uint8Array;
+    bodyVersion: number;
+    dataEncryptionKey: Uint8Array;
+    seq: number;
+    createdAt: Date;
+    updatedAt: Date;
+};
+
+function buildSharedTeamArtifactEnvelope(
+    artifact: Pick<ArtifactListRecord, 'id' | 'headerVersion' | 'body' | 'bodyVersion' | 'seq' | 'createdAt' | 'updatedAt'>,
+    opts?: { includeBody?: boolean }
+) {
+    const board = extractTeamBoard(artifact);
+    const memberSessionIds = extractTeamMembers(board)
+        .map(member => member?.sessionId)
+        .filter((sessionId): sessionId is string => typeof sessionId === 'string' && sessionId.length > 0);
+
+    const header = privacyKit.encodeBase64(
+        Buffer.from(JSON.stringify({
+            title: extractTeamName(board, artifact.id),
+            type: 'team',
+            sessions: memberSessionIds,
+            draft: false,
+        }))
+    );
+
+    return {
+        id: artifact.id,
+        header,
+        headerVersion: artifact.headerVersion,
+        ...(opts?.includeBody
+            ? {
+                body: privacyKit.encodeBase64(artifact.body),
+                bodyVersion: artifact.bodyVersion,
+                type: 'team' as const,
+            }
+            : {}),
+        dataEncryptionKey: privacyKit.encodeBase64(Buffer.from('team')),
+        seq: artifact.seq,
+        createdAt: artifact.createdAt.getTime(),
+        updatedAt: artifact.updatedAt.getTime(),
+    };
+}
+
 export function artifactsRoutes(app: Fastify) {
     // GET /v1/artifacts - List all artifacts for the account
     app.get('/v1/artifacts', {
@@ -71,29 +121,69 @@ export function artifactsRoutes(app: Fastify) {
         const userId = request.userId;
 
         try {
-            const artifacts = await db.artifact.findMany({
-                where: { accountId: userId },
-                orderBy: { updatedAt: 'desc' },
-                select: {
-                    id: true,
-                    header: true,
-                    headerVersion: true,
-                    dataEncryptionKey: true,
-                    seq: true,
-                    createdAt: true,
-                    updatedAt: true
+            const [ownedArtifacts, candidateSharedArtifacts, ownedSessions] = await Promise.all([
+                db.artifact.findMany({
+                    where: { accountId: userId },
+                    orderBy: { updatedAt: 'desc' },
+                    select: {
+                        id: true,
+                        accountId: true,
+                        header: true,
+                        headerVersion: true,
+                        body: true,
+                        bodyVersion: true,
+                        dataEncryptionKey: true,
+                        seq: true,
+                        createdAt: true,
+                        updatedAt: true
+                    }
+                }),
+                db.artifact.findMany({
+                    where: { accountId: { not: userId } },
+                    orderBy: { updatedAt: 'desc' },
+                    select: {
+                        id: true,
+                        accountId: true,
+                        header: true,
+                        headerVersion: true,
+                        body: true,
+                        bodyVersion: true,
+                        dataEncryptionKey: true,
+                        seq: true,
+                        createdAt: true,
+                        updatedAt: true
+                    }
+                }),
+                db.session.findMany({
+                    where: { accountId: userId },
+                    select: { id: true }
+                }),
+            ]);
+
+            const ownedSessionIds = new Set(ownedSessions.map(session => session.id));
+            const sharedTeamArtifacts = candidateSharedArtifacts.filter((artifact) => {
+                if (!isTeamArtifact(artifact)) {
+                    return false;
                 }
+
+                const board = extractTeamBoard(artifact);
+                return extractTeamMembers(board).some((member) => ownedSessionIds.has(member.sessionId));
             });
 
-            return reply.send(artifacts.map(a => ({
-                id: a.id,
-                header: privacyKit.encodeBase64(a.header),
-                headerVersion: a.headerVersion,
-                dataEncryptionKey: privacyKit.encodeBase64(a.dataEncryptionKey),
-                seq: a.seq,
-                createdAt: a.createdAt.getTime(),
-                updatedAt: a.updatedAt.getTime()
-            })));
+            const artifacts = [
+                ...ownedArtifacts.map((artifact) => ({
+                    id: artifact.id,
+                    header: privacyKit.encodeBase64(artifact.header),
+                    headerVersion: artifact.headerVersion,
+                    dataEncryptionKey: privacyKit.encodeBase64(artifact.dataEncryptionKey),
+                    seq: artifact.seq,
+                    createdAt: artifact.createdAt.getTime(),
+                    updatedAt: artifact.updatedAt.getTime()
+                })),
+                ...sharedTeamArtifacts.map((artifact) => buildSharedTeamArtifactEnvelope(artifact)),
+            ].sort((a, b) => b.updatedAt - a.updatedAt);
+
+            return reply.send(artifacts);
         } catch (error) {
             log({ module: 'api', level: 'error' }, `Failed to get artifacts: ${error}`);
             return reply.code(500).send({ error: 'Failed to get artifacts' });
@@ -115,6 +205,7 @@ export function artifactsRoutes(app: Fastify) {
                     body: z.string(),
                     bodyVersion: z.number(),
                     dataEncryptionKey: z.string(),
+                    type: z.enum(['team']).optional(),
                     seq: z.number(),
                     createdAt: z.number(),
                     updatedAt: z.number()
@@ -148,7 +239,7 @@ export function artifactsRoutes(app: Fastify) {
                     return reply.code(404).send({ error: 'Artifact not found' });
                 }
 
-                artifact = sharedArtifact;
+                return reply.send(buildSharedTeamArtifactEnvelope(sharedArtifact as ArtifactListRecord, { includeBody: true }));
             }
 
             return reply.send({
