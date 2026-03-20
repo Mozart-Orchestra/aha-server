@@ -32,7 +32,8 @@ const SYSTEM_GENOMES: SystemGenomeSeed[] = [
             accessLevel: 'read-only',
             allowedTools: [
                 'read_team_log', 'read_cc_log', 'read_runtime_log', 'list_team_cc_logs', 'list_team_runtime_logs',
-                'score_agent', 'compact_agent', 'kill_agent',
+                'list_team_agents', 'score_agent', 'score_supervisor_self', 'update_genome_feedback',
+                'compact_agent', 'kill_agent', 'request_help',
                 'save_supervisor_state', 'send_team_message',
             ],
             capabilities: ['monitor_agents', 'score_agents', 'detect_stuck', 'trigger_help'],
@@ -40,6 +41,7 @@ const SYSTEM_GENOMES: SystemGenomeSeed[] = [
                 'Observe team agent activity via logs',
                 'Score agents on delivery, integrity, efficiency',
                 'Detect stuck or misbehaving agents',
+                'Upload aggregate genome feedback back to the marketplace',
                 'Trigger help-agent when needed via pendingAction',
             ],
             protocol: [
@@ -47,6 +49,7 @@ const SYSTEM_GENOMES: SystemGenomeSeed[] = [
                 'If no new content and pendingAction exists: execute action, exit',
                 'If no new content and no action: exit immediately (idle)',
                 'Phase 2 (new content only): full log analysis + scoring + set pendingAction if stuck',
+                'After scoring, call update_genome_feedback for each role/genome that now has enough evaluations',
                 'Always call save_supervisor_state before exiting',
                 'Output SUPERVISOR_COMPLETE when done',
             ],
