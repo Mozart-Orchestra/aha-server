@@ -27,35 +27,27 @@ export async function userRoutes(app: Fastify) {
         },
         preHandler: app.authenticate
     }, async (request, reply) => {
-        const { id } = request.params;
+        try {
+            const { id } = request.params;
 
-        // Fetch user
-        const user = await db.account.findUnique({
-            where: {
-                id: id
-            },
-            include: {
-                githubUser: true
+            const user = await db.account.findUnique({
+                where: { id },
+                include: { githubUser: true }
+            });
+
+            if (!user) {
+                return reply.code(404).send({ error: 'User not found' });
             }
-        });
 
-        if (!user) {
-            return reply.code(404).send({ error: 'User not found' });
+            const relationship = await db.userRelationship.findFirst({
+                where: { fromUserId: request.userId, toUserId: id }
+            });
+            const status: RelationshipStatus = relationship?.status || RelationshipStatus.none;
+
+            return reply.send({ user: buildUserProfile(user, status) });
+        } catch (error: any) {
+            return reply.code(500).send({ error: 'Failed to fetch user profile' });
         }
-
-        // Resolve relationship status
-        const relationship = await db.userRelationship.findFirst({
-            where: {
-                fromUserId: request.userId,
-                toUserId: id
-            }
-        });
-        const status: RelationshipStatus = relationship?.status || RelationshipStatus.none;
-
-        // Build user profile
-        return reply.send({
-            user: buildUserProfile(user, status)
-        });
     });
 
     // Search for users
@@ -72,49 +64,36 @@ export async function userRoutes(app: Fastify) {
         },
         preHandler: app.authenticate
     }, async (request, reply) => {
-        const { query } = request.query;
+        try {
+            const { query } = request.query;
 
-        // Search for users by username, first 10 matches
-        const users = await db.account.findMany({
-            where: {
-                username: {
-                    startsWith: query
-                }
-            },
-            include: {
-                githubUser: true
-            },
-            take: 10,
-            orderBy: {
-                username: 'asc'
-            }
-        });
+            const users = await db.account.findMany({
+                where: { username: { startsWith: query } },
+                include: { githubUser: true },
+                take: 10,
+                orderBy: { username: 'asc' }
+            });
 
-        // Performance: Batch fetch all relationships in a single query instead of N+1
-        const userIds = users.map(user => user.id);
-        const relationships = userIds.length > 0
-            ? await db.userRelationship.findMany({
-                where: {
-                    fromUserId: request.userId,
-                    toUserId: { in: userIds }
-                }
-            })
-            : [];
+            const userIds = users.map(user => user.id);
+            const relationships = userIds.length > 0
+                ? await db.userRelationship.findMany({
+                    where: { fromUserId: request.userId, toUserId: { in: userIds } }
+                })
+                : [];
 
-        // Create a map for O(1) lookup
-        const relationshipMap = new Map(
-            relationships.map(rel => [rel.toUserId, rel.status])
-        );
+            const relationshipMap = new Map(
+                relationships.map(rel => [rel.toUserId, rel.status])
+            );
 
-        // Build user profiles with cached relationship status
-        const userProfiles = users.map((user) => {
-            const status = relationshipMap.get(user.id) || RelationshipStatus.none;
-            return buildUserProfile(user as typeof user & { githubUser: { profile: any } | null }, status);
-        });
+            const userProfiles = users.map((user) => {
+                const status = relationshipMap.get(user.id) || RelationshipStatus.none;
+                return buildUserProfile(user as typeof user & { githubUser: { profile: any } | null }, status);
+            });
 
-        return reply.send({
-            users: userProfiles
-        });
+            return reply.send({ users: userProfiles });
+        } catch (error: any) {
+            return reply.code(500).send({ error: 'Failed to search users' });
+        }
     });
 
     // Add friend
@@ -134,8 +113,12 @@ export async function userRoutes(app: Fastify) {
         },
         preHandler: app.authenticate
     }, async (request, reply) => {
-        const user = await friendAdd(Context.create(request.userId), request.body.uid);
-        return reply.send({ user });
+        try {
+            const user = await friendAdd(Context.create(request.userId), request.body.uid);
+            return reply.send({ user });
+        } catch (error: any) {
+            return reply.code(500).send({ error: 'Failed to add friend' });
+        }
     });
 
     app.post('/v1/friends/remove', {
@@ -154,8 +137,12 @@ export async function userRoutes(app: Fastify) {
         },
         preHandler: app.authenticate
     }, async (request, reply) => {
-        const user = await friendRemove(Context.create(request.userId), request.body.uid);
-        return reply.send({ user });
+        try {
+            const user = await friendRemove(Context.create(request.userId), request.body.uid);
+            return reply.send({ user });
+        } catch (error: any) {
+            return reply.code(500).send({ error: 'Failed to remove friend' });
+        }
     });
 
     app.get('/v1/friends', {
@@ -168,8 +155,12 @@ export async function userRoutes(app: Fastify) {
         },
         preHandler: app.authenticate
     }, async (request, reply) => {
-        const friends = await friendList(Context.create(request.userId));
-        return reply.send({ friends });
+        try {
+            const friends = await friendList(Context.create(request.userId));
+            return reply.send({ friends });
+        } catch (error: any) {
+            return reply.code(500).send({ error: 'Failed to list friends' });
+        }
     });
 };
 

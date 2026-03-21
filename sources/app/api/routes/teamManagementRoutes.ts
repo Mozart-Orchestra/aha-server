@@ -51,7 +51,8 @@ export function teamManagementRoutes(app: Fastify) {
         };
 
         try {
-            const teamId = id || randomKeyNaked(24);
+            const requestedTeamId = id?.trim() || undefined;
+            let teamId = requestedTeamId || randomKeyNaked(24);
 
             const board: Record<string, any> = incomingBoard
                 ? JSON.parse(JSON.stringify(incomingBoard))
@@ -87,7 +88,7 @@ export function teamManagementRoutes(app: Fastify) {
                 board.team.members = [];
             }
 
-            const existingArtifact = id
+            const existingArtifact = requestedTeamId
                 ? await db.artifact.findUnique({
                     where: { id: teamId },
                     select: {
@@ -101,34 +102,86 @@ export function teamManagementRoutes(app: Fastify) {
                 : null;
 
             if (existingArtifact && existingArtifact.accountId !== userId) {
-                return reply.code(409).send({ error: 'Team id already belongs to another account' });
+                const fallbackTeamId = randomKeyNaked(24);
+                log(
+                    { module: 'team-management', level: 'warn', requestedTeamId, fallbackTeamId, userId },
+                    `Requested team id ${requestedTeamId} belongs to another account; creating fallback team ${fallbackTeamId}`,
+                );
+                teamId = fallbackTeamId;
             }
 
-            const artifact = existingArtifact
-                ? await db.artifact.update({
-                    where: { id: teamId },
+            const writeTeamArtifact = async (artifactId: string) => {
+                if (existingArtifact && existingArtifact.accountId === userId && artifactId === existingArtifact.id) {
+                    return await db.artifact.update({
+                        where: { id: artifactId },
+                        data: {
+                            header: Buffer.from(JSON.stringify({ name, type: 'team' })),
+                            body: serializeTeamBoard(board),
+                            dataEncryptionKey: Buffer.from('team'),
+                            bodyVersion: { increment: 1 },
+                            updatedAt: new Date(),
+                        },
+                    });
+                }
+
+                return await db.artifact.create({
                     data: {
-                        header: Buffer.from(JSON.stringify({ name, type: 'team' })),
-                        body: serializeTeamBoard(board),
-                        dataEncryptionKey: Buffer.from('team'),
-                        bodyVersion: { increment: 1 },
-                        updatedAt: new Date(),
-                    },
-                })
-                : await db.artifact.create({
-                    data: {
-                        id: teamId,
+                        id: artifactId,
                         accountId: userId,
                         header: Buffer.from(JSON.stringify({ name, type: 'team' })),
                         body: serializeTeamBoard(board),
                         dataEncryptionKey: Buffer.from('team'),
                     },
                 });
+            };
+
+            let artifact;
+            try {
+                artifact = await writeTeamArtifact(teamId);
+            } catch (error: any) {
+                if (error?.code !== 'P2002') {
+                    throw error;
+                }
+
+                const conflictedArtifact = await db.artifact.findUnique({
+                    where: { id: teamId },
+                    select: {
+                        id: true,
+                        accountId: true,
+                        body: true,
+                        createdAt: true,
+                        updatedAt: true,
+                    },
+                });
+
+                if (conflictedArtifact?.accountId === userId) {
+                    artifact = await db.artifact.update({
+                        where: { id: teamId },
+                        data: {
+                            header: Buffer.from(JSON.stringify({ name, type: 'team' })),
+                            body: serializeTeamBoard(board),
+                            dataEncryptionKey: Buffer.from('team'),
+                            bodyVersion: { increment: 1 },
+                            updatedAt: new Date(),
+                        },
+                    });
+                } else {
+                    const fallbackTeamId = randomKeyNaked(24);
+                    log(
+                        { module: 'team-management', level: 'warn', requestedTeamId, conflictedTeamId: teamId, fallbackTeamId, userId },
+                        `Team create raced on ${teamId}; creating fallback team ${fallbackTeamId}`,
+                    );
+                    teamId = fallbackTeamId;
+                    artifact = await writeTeamArtifact(teamId);
+                }
+            }
+
+            const reusedExistingArtifact = existingArtifact?.accountId === userId && existingArtifact.id === teamId;
 
             await invalidateTeamOverviewSnapshot(userId);
             log({ module: 'team-management' }, `Team created: ${teamId} by ${userId}`);
 
-            return reply.code(existingArtifact ? 200 : 201).send({
+            return reply.code(reusedExistingArtifact ? 200 : 201).send({
                 team: summarizeTeamArtifact(artifact),
             });
         } catch (error: any) {
@@ -307,28 +360,34 @@ export function teamManagementRoutes(app: Fastify) {
                 roleId: z.string(),
                 displayName: z.string().optional(),
                 specId: z.string().optional(),
+                customPrompt: z.string().optional(),
                 parentSessionId: z.string().optional(),
                 executionPlane: z.string().optional(),
-                runtimeType: z.string().optional()
+                runtimeType: z.string().optional(),
+                authorities: z.array(z.string()).optional(),
+                teamOverlay: z.record(z.string(), z.unknown()).optional()
             })
         }
     }, async (request, reply) => {
         const userId = request.userId;
         const { teamId } = request.params as { teamId: string };
-        const { memberId, sessionId, sessionTag, roleId, displayName, specId, parentSessionId, executionPlane, runtimeType } = request.body as {
+        const { memberId, sessionId, sessionTag, roleId, displayName, specId, customPrompt, parentSessionId, executionPlane, runtimeType, authorities, teamOverlay } = request.body as {
             memberId?: string;
             sessionId: string;
             sessionTag?: string;
             roleId: string;
             displayName?: string;
             specId?: string;
+            customPrompt?: string;
             parentSessionId?: string;
             executionPlane?: string;
             runtimeType?: string;
+            authorities?: string[];
+            teamOverlay?: Record<string, unknown>;
         };
 
         try {
-            const result = await addTeamMember(userId, teamId, memberId, sessionId, sessionTag, roleId, displayName, specId, parentSessionId, executionPlane, runtimeType);
+            const result = await addTeamMember(userId, teamId, memberId, sessionId, sessionTag, roleId, displayName, specId, customPrompt, parentSessionId, executionPlane, runtimeType, authorities, teamOverlay);
             return reply.send(result);
         } catch (error: any) {
             if (error.message === 'Team not found') {
@@ -551,6 +610,55 @@ export function teamManagementRoutes(app: Fastify) {
         }
     });
 
+    // POST /v1/sessions/batch/unarchive - Restore archived sessions
+    app.post('/v1/sessions/batch/unarchive', {
+        preHandler: app.authenticate,
+        schema: {
+            body: z.object({
+                sessionIds: z.array(z.string()).min(1).max(100)
+            })
+        }
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { sessionIds } = request.body as { sessionIds: string[] };
+
+        try {
+            const result = await batchUnarchiveSessions(userId, sessionIds);
+            return reply.send(result);
+        } catch (error: any) {
+            log({ module: 'team-management', level: 'error' }, `Failed to batch unarchive: ${error}`);
+            return reply.code(500).send({ error: error.message });
+        }
+    });
+
+    // POST /v1/teams/:teamId/unarchive - Restore archived team and its sessions
+    app.post('/v1/teams/:teamId/unarchive', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ teamId: z.string() }),
+            body: z.object({
+                sessionIds: z.array(z.string()).optional()
+            })
+        }
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { teamId } = request.params as { teamId: string };
+        const body = request.body as { sessionIds?: string[] } | undefined;
+        const sessionIds = body?.sessionIds || [];
+
+        try {
+            const result = await unarchiveTeam(userId, teamId, sessionIds);
+            log({ module: 'team-management', teamId }, `Team unarchived with ${result.restoredSessions} sessions`);
+            return reply.send(result);
+        } catch (error: any) {
+            if (error.message === 'Team not found') {
+                return reply.code(404).send({ error: error.message });
+            }
+            log({ module: 'team-management', level: 'error' }, `Failed to unarchive team: ${error}`);
+            return reply.code(500).send({ error: error.message });
+        }
+    });
+
     // POST /v1/teams/batch/delete - Delete multiple teams
     app.post('/v1/teams/batch/delete', {
         preHandler: app.authenticate,
@@ -596,9 +704,12 @@ async function addTeamMember(
     roleId: string,
     displayName?: string,
     specId?: string,
+    customPrompt?: string,
     parentSessionId?: string,
     executionPlane?: string,
-    runtimeType?: string
+    runtimeType?: string,
+    authorities?: string[],
+    teamOverlay?: Record<string, unknown>
 ): Promise<{ success: boolean; member: any }> {
     const artifact = await getAccessibleTeamArtifact(userId, teamId);
 
@@ -631,9 +742,12 @@ async function addTeamMember(
             (sessionTag !== undefined && existing.sessionTag !== sessionTag) ||
             (displayName && existing.displayName !== displayName) ||
             (specId !== undefined && existing.specId !== specId) ||
+            (customPrompt !== undefined && existing.customPrompt !== customPrompt) ||
             (parentSessionId !== undefined && existing.parentSessionId !== parentSessionId) ||
             (executionPlane !== undefined && existing.executionPlane !== executionPlane) ||
-            (runtimeType !== undefined && existing.runtimeType !== runtimeType);
+            (runtimeType !== undefined && existing.runtimeType !== runtimeType) ||
+            (authorities !== undefined && JSON.stringify(existing.authorities ?? []) !== JSON.stringify(authorities)) ||
+            (teamOverlay !== undefined && JSON.stringify(existing.teamOverlay ?? null) !== JSON.stringify(teamOverlay));
 
         if (!hasChanges) {
             return { success: true, member: existing };
@@ -645,9 +759,12 @@ async function addTeamMember(
         if (sessionTag !== undefined) existing.sessionTag = sessionTag;
         existing.displayName = displayName || existing.displayName;
         if (specId !== undefined) existing.specId = specId;
+        if (customPrompt !== undefined) existing.customPrompt = customPrompt;
         if (parentSessionId !== undefined) existing.parentSessionId = parentSessionId;
         if (executionPlane !== undefined) existing.executionPlane = executionPlane;
         if (runtimeType !== undefined) existing.runtimeType = runtimeType;
+        if (authorities !== undefined) existing.authorities = authorities;
+        if (teamOverlay !== undefined) existing.teamOverlay = teamOverlay;
     } else {
         board.team.members.push({
             ...(memberId !== undefined && { memberId }),
@@ -658,9 +775,12 @@ async function addTeamMember(
             focusAreas: [],
             joinedAt: Date.now(),
             ...(specId !== undefined && { specId }),
+            ...(customPrompt !== undefined && { customPrompt }),
             ...(parentSessionId !== undefined && { parentSessionId }),
             ...(executionPlane !== undefined && { executionPlane }),
-            ...(runtimeType !== undefined && { runtimeType })
+            ...(runtimeType !== undefined && { runtimeType }),
+            ...(authorities !== undefined && { authorities }),
+            ...(teamOverlay !== undefined && { teamOverlay })
         });
     }
 
@@ -908,6 +1028,107 @@ async function batchArchiveSessions(
             ? { sessionId, success: true }
             : { sessionId, success: false, error: 'Session not found or not owned by user' }),
     };
+}
+
+async function batchUnarchiveSessions(
+    userId: string,
+    sessionIds: string[]
+): Promise<{ success: boolean; restored: number; results: Array<{ sessionId: string; success: boolean; error?: string }> }> {
+    const ownedSessions = await db.session.findMany({
+        where: {
+            id: { in: sessionIds },
+            accountId: userId,
+        },
+        select: { id: true },
+    });
+
+    const ownedSessionIds = new Set(ownedSessions.map(session => session.id));
+    const restorableIds = [...ownedSessionIds];
+
+    if (restorableIds.length > 0) {
+        await db.session.updateMany({
+            where: {
+                id: { in: restorableIds },
+                accountId: userId
+            },
+            data: {
+                active: true,
+                updatedAt: new Date()
+            }
+        });
+        restorableIds.forEach((sessionId) => activityCache.invalidateSession(sessionId));
+    }
+
+    for (const sessionId of restorableIds) {
+        await broadcastSessionUpdate(userId, sessionId, 'session-unarchived');
+    }
+
+    return {
+        success: true,
+        restored: restorableIds.length,
+        results: sessionIds.map(sessionId => ownedSessionIds.has(sessionId)
+            ? { sessionId, success: true }
+            : { sessionId, success: false, error: 'Session not found or not owned by user' }),
+    };
+}
+
+async function unarchiveTeam(
+    userId: string,
+    teamId: string,
+    sessionIds: string[] = []
+): Promise<{ success: boolean; restoredSessions: number }> {
+    const artifact = await getAccessibleTeamArtifact(userId, teamId);
+
+    if (!artifact) {
+        throw new Error('Team not found');
+    }
+
+    const board = extractTeamBoard(artifact);
+    const managedSessionIds = Array.from(new Set([
+        ...extractTeamMembers(board)
+            .map((member) => member.sessionId)
+            .filter((sessionId): sessionId is string => typeof sessionId === 'string' && sessionId.length > 0),
+        ...sessionIds,
+    ]));
+
+    let restoredCount = 0;
+    if (managedSessionIds.length > 0) {
+        const result = await db.session.updateMany({
+            where: {
+                id: { in: managedSessionIds },
+                accountId: userId
+            },
+            data: {
+                active: true,
+                updatedAt: new Date()
+            }
+        });
+        restoredCount = result.count;
+        managedSessionIds.forEach((sessionId) => activityCache.invalidateSession(sessionId));
+    }
+
+    delete board.archivedAt;
+    if (board.team && typeof board.team === 'object') {
+        delete board.team.archivedAt;
+    }
+
+    await db.artifact.update({
+        where: { id: teamId },
+        data: {
+            body: serializeTeamBoard(board),
+            bodyVersion: { increment: 1 },
+            updatedAt: new Date()
+        }
+    });
+
+    for (const sessionId of managedSessionIds) {
+        await broadcastSessionUpdate(userId, sessionId, 'session-unarchived');
+    }
+
+    await broadcastTeamUpdate(userId, teamId, 'team-unarchived', { restoredSessions: restoredCount });
+    await invalidateTeamOverviewSnapshot(userId);
+
+    return { success: true, restoredSessions: restoredCount };
 }
 
 async function batchDeleteSessions(

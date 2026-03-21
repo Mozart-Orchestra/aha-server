@@ -110,7 +110,10 @@ export function teamKeyRoutes(app: Fastify) {
                 // For now, we'll use a derived key approach
                 // In production, you'd want to use a proper key management system
                 // The key is derived from the team ID and a master secret
-                const masterSecret = process.env.TEAM_KEY_MASTER_SECRET || 'default-team-key-secret';
+                const masterSecret = process.env.TEAM_KEY_MASTER_SECRET;
+                if (!masterSecret) {
+                    return reply.code(503).send({ error: 'Server misconfigured: TEAM_KEY_MASTER_SECRET not set' });
+                }
 
                 // Derive team-specific key using crypto
                 const crypto = require('crypto');

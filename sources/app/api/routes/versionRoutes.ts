@@ -18,7 +18,8 @@ export function versionRoutes(app: Fastify) {
             }
         }
     }, async (request, reply) => {
-        const { platform, version, app_id } = request.body;
+        try {
+            const { platform, version, app_id } = request.body;
 
         // Check ios
         if (platform.toLowerCase() === 'ios') {
@@ -42,5 +43,8 @@ export function versionRoutes(app: Fastify) {
 
         // Fallbacke
         reply.send({ updateUrl: null });
+        } catch (error: any) {
+            return reply.code(500).send({ error: 'Version check failed' });
+        }
     });
 }

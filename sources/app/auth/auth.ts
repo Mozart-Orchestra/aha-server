@@ -31,21 +31,26 @@ class AuthModule {
         }
         
         log({ module: 'auth' }, 'Initializing auth module...');
-        
+
+        const handyMasterSecret = process.env.HANDY_MASTER_SECRET;
+        if (!handyMasterSecret) {
+            throw new Error('HANDY_MASTER_SECRET environment variable is required');
+        }
+
         const generator = await privacyKit.createPersistentTokenGenerator({
             service: 'handy',
-            seed: process.env.HANDY_MASTER_SECRET!
+            seed: handyMasterSecret
         });
 
-        
+
         const verifier = await privacyKit.createPersistentTokenVerifier({
             service: 'handy',
             publicKey: generator.publicKey
         });
-        
+
         const githubGenerator = await privacyKit.createEphemeralTokenGenerator({
             service: 'github-aha',
-            seed: process.env.HANDY_MASTER_SECRET!,
+            seed: handyMasterSecret,
             ttl: 5 * 60 * 1000 // 5 minutes
         });
 

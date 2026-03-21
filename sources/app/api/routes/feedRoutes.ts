@@ -28,13 +28,17 @@ export function feedRoutes(app: Fastify) {
             }
         }
     }, async (request, reply) => {
-        const items = await feedGet(db, Context.create(request.userId), {
-            cursor: {
-                before: request.query?.before,
-                after: request.query?.after
-            },
-            limit: request.query?.limit
-        });
-        return reply.send({ items: items.items, hasMore: items.hasMore });
+        try {
+            const items = await feedGet(db, Context.create(request.userId), {
+                cursor: {
+                    before: request.query?.before,
+                    after: request.query?.after
+                },
+                limit: request.query?.limit
+            });
+            return reply.send({ items: items.items, hasMore: items.hasMore });
+        } catch (error: any) {
+            return reply.code(500).send({ error: 'Failed to fetch feed' });
+        }
     });
 }
