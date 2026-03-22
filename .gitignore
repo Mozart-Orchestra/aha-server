@@ -11,3 +11,4 @@ dist
 
 .claude/
 .gstack/
+prisma/local.db
