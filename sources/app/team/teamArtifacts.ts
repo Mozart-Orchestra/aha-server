@@ -19,6 +19,7 @@ export type TeamMemberRecord = {
     focusAreas?: string[];
     joinedAt?: number;
     specId?: string;
+    customPrompt?: string;
     parentSessionId?: string;
     executionPlane?: string;
     runtimeType?: string;
@@ -95,7 +96,7 @@ export function summarizeTeamArtifact(
     };
 }
 
-export async function getAccessibleTeamArtifact(userId: string, teamId: string): Promise<ArtifactLike | null> {
+export async function getAccessibleTeamArtifact(userId: string, teamId: string, options?: { includeArchived?: boolean }): Promise<ArtifactLike | null> {
     const artifact = await db.artifact.findUnique({
         where: { id: teamId },
         select: {
@@ -112,7 +113,7 @@ export async function getAccessibleTeamArtifact(userId: string, teamId: string):
     }
 
     const board = extractTeamBoard(artifact);
-    if (isArchivedTeamBoard(board)) {
+    if (!options?.includeArchived && isArchivedTeamBoard(board)) {
         return null;
     }
 

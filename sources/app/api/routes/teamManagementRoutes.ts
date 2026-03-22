@@ -294,7 +294,7 @@ export function teamManagementRoutes(app: Fastify) {
         const { teamId } = request.params as { teamId: string };
 
         try {
-            const artifact = await getAccessibleTeamArtifact(request.userId, teamId);
+            const artifact = await getAccessibleTeamArtifact(request.userId, teamId, { includeArchived: true });
             if (!artifact) {
                 return reply.code(404).send({ error: 'Team not found' });
             }
@@ -335,7 +335,7 @@ export function teamManagementRoutes(app: Fastify) {
         const { teamId } = request.params as { teamId: string };
 
         try {
-            const artifact = await getAccessibleTeamArtifact(request.userId, teamId);
+            const artifact = await getAccessibleTeamArtifact(request.userId, teamId, { includeArchived: true });
             if (!artifact) {
                 return reply.code(404).send({ error: 'Team not found' });
             }
@@ -907,7 +907,7 @@ async function deleteTeam(
     teamId: string,
     sessionIds: string[] = []
 ): Promise<{ success: boolean; deletedSessions: number }> {
-    const artifact = await getAccessibleTeamArtifact(userId, teamId);
+    const artifact = await getAccessibleTeamArtifact(userId, teamId, { includeArchived: true });
 
     if (!artifact) {
         throw new Error('Team not found');
@@ -923,6 +923,15 @@ async function deleteTeam(
 
     let deletedCount = 0;
     if (managedSessionIds.length > 0) {
+        await db.sessionMessage.deleteMany({
+            where: { sessionId: { in: managedSessionIds } }
+        });
+        await db.usageReport.deleteMany({
+            where: { sessionId: { in: managedSessionIds } }
+        });
+        await db.accessKey.deleteMany({
+            where: { sessionId: { in: managedSessionIds } }
+        });
         const result = await db.session.deleteMany({
             where: {
                 id: { in: managedSessionIds },
@@ -1077,7 +1086,7 @@ async function unarchiveTeam(
     teamId: string,
     sessionIds: string[] = []
 ): Promise<{ success: boolean; restoredSessions: number }> {
-    const artifact = await getAccessibleTeamArtifact(userId, teamId);
+    const artifact = await getAccessibleTeamArtifact(userId, teamId, { includeArchived: true });
 
     if (!artifact) {
         throw new Error('Team not found');
@@ -1147,6 +1156,15 @@ async function batchDeleteSessions(
     const deletableIds = [...ownedSessionIds];
 
     if (deletableIds.length > 0) {
+        await db.sessionMessage.deleteMany({
+            where: { sessionId: { in: deletableIds } }
+        });
+        await db.usageReport.deleteMany({
+            where: { sessionId: { in: deletableIds } }
+        });
+        await db.accessKey.deleteMany({
+            where: { sessionId: { in: deletableIds } }
+        });
         await db.session.deleteMany({
             where: {
                 id: { in: deletableIds },

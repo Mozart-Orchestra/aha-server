@@ -177,7 +177,8 @@ export async function startApi() {
 
     // Start HTTP 
     const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3005;
-    await app.listen({ port, host: '0.0.0.0' });
+    const host = process.env.HOST?.trim() || '0.0.0.0';
+    await app.listen({ port, host });
     onShutdown('api', async () => {
         await app.close();
     });
