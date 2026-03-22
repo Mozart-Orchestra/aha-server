@@ -26,6 +26,17 @@ describe('taskErrors', () => {
         expect(isTaskOperationError(error, TASK_ERROR_CODES.DUPLICATE_EXECUTION_CONFLICT)).toBe(false);
     });
 
+    it('supports TASK_LOCKED_BY_HUMAN errors', () => {
+        const error = new TaskOperationError(
+            TASK_ERROR_CODES.TASK_LOCKED_BY_HUMAN,
+            'TASK_LOCKED_BY_HUMAN: This task status was manually set by the user. Call list_tasks to see updated status.',
+            { taskId: 'task-1', lockedByDisplayName: 'User' },
+        );
+
+        expect(isTaskOperationError(error, TASK_ERROR_CODES.TASK_LOCKED_BY_HUMAN)).toBe(true);
+        expect(error.details).toEqual({ taskId: 'task-1', lockedByDisplayName: 'User' });
+    });
+
     it('rejects plain errors without typed task codes', () => {
         const error = new Error('plain error');
 

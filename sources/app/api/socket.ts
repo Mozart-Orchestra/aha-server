@@ -1,6 +1,6 @@
 import { onShutdown } from "@/utils/shutdown";
 import { Fastify } from "./types";
-import { buildMachineActivityEphemeral, ClientConnection, eventRouter } from "@/app/events/eventRouter";
+import { buildMachineActivityEphemeral, buildSessionActivityEphemeral, ClientConnection, eventRouter } from "@/app/events/eventRouter";
 import { Server, Socket } from "socket.io";
 import { log } from "@/utils/log";
 import { auth } from "@/app/auth/auth";
@@ -14,6 +14,7 @@ import { machineUpdateHandler } from "./socket/machineUpdateHandler";
 import { artifactUpdateHandler } from "./socket/artifactUpdateHandler";
 import { accessKeyHandler } from "./socket/accessKeyHandler";
 import { getSocketCorsConfig } from "./utils/corsConfig";
+import { activityCache } from "@/app/presence/sessionCache";
 
 export function startSocket(app: Fastify) {
     const io = new Server(app.server, {
@@ -170,6 +171,35 @@ export function startSocket(app: Fastify) {
                     log({ module: 'websocket' }, `Machine ${connection.machineId} marked as offline`);
                 } catch (error) {
                     log({ module: 'websocket', level: 'error' }, `Error marking machine ${connection.machineId} as offline: ${error}`);
+                }
+            }
+
+            if (connection.connectionType === 'session-scoped') {
+                const disconnectedAt = Date.now();
+                try {
+                    const updated = await db.session.updateManyAndReturn({
+                        where: {
+                            id: connection.sessionId,
+                            accountId: userId,
+                            active: true,
+                        },
+                        data: {
+                            active: false,
+                            lastActiveAt: new Date(disconnectedAt),
+                        },
+                    });
+
+                    if (updated.length > 0) {
+                        activityCache.invalidateSession(connection.sessionId);
+                        eventRouter.emitEphemeral({
+                            userId,
+                            payload: buildSessionActivityEphemeral(connection.sessionId, false, disconnectedAt, false),
+                            recipientFilter: { type: 'user-scoped-only' },
+                        });
+                        log({ module: 'websocket' }, `Session ${connection.sessionId} marked as offline on disconnect`);
+                    }
+                } catch (error) {
+                    log({ module: 'websocket', level: 'error' }, `Error marking session ${connection.sessionId} as offline: ${error}`);
                 }
             }
         });

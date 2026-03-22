@@ -161,6 +161,55 @@ describe('teamManagementRoutes', () => {
         await app.close();
     });
 
+    it('falls back to a fresh team id when the requested canonical id belongs to another account', async () => {
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(
+            buildTeamArtifact({
+                name: 'Foreign Team',
+                team: {
+                    name: 'Foreign Team',
+                    members: [],
+                },
+                tasks: [],
+            }, { id: 'foreign-team', accountId: 'other-user' }) as never
+        );
+        vi.mocked(db.artifact.create).mockResolvedValue(
+            buildTeamArtifact({
+                name: 'Canonical Team',
+                team: {
+                    name: 'Canonical Team',
+                    members: [],
+                },
+                tasks: [],
+            }, { id: 'update-id' }) as never
+        );
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/teams',
+            payload: {
+                id: 'foreign-team',
+                name: 'Canonical Team',
+            },
+        });
+
+        expect(response.statusCode).toBe(201);
+        expect(vi.mocked(db.artifact.create)).toHaveBeenCalledWith(expect.objectContaining({
+            data: expect.objectContaining({
+                id: 'update-id',
+                accountId: 'user-1',
+            }),
+        }));
+        expect(response.json()).toEqual({
+            team: expect.objectContaining({
+                id: 'update-id',
+                name: 'Canonical Team',
+            }),
+        });
+
+        await app.close();
+    });
+
     it('lists accessible teams with summary counts', async () => {
         const board = {
             team: {
@@ -361,6 +410,58 @@ describe('teamManagementRoutes', () => {
                 ],
             }),
         });
+
+        await app.close();
+    });
+
+    it('persists member authorities and team overlay on add-member', async () => {
+        const board = {
+            team: {
+                name: 'Overlay Team',
+                members: [],
+            },
+            tasks: [],
+        };
+
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(buildTeamArtifact(board) as never);
+        vi.mocked(db.artifact.update).mockResolvedValue({ id: 'team-1' } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/teams/team-1/members',
+            payload: {
+                sessionId: 'session-3',
+                roleId: 'builder',
+                displayName: 'Builder 3',
+                authorities: ['task.start.self', 'task.complete.self'],
+                teamOverlay: {
+                    promptSuffix: 'Work only from task cards.',
+                },
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(db.artifact.update).toHaveBeenCalledWith(expect.objectContaining({
+            data: expect.objectContaining({
+                body: expect.any(Buffer),
+            }),
+        }));
+
+        const updateCall = vi.mocked(db.artifact.update).mock.calls[0]?.[0];
+        const rawBody = updateCall?.data?.body as Buffer;
+        const parsed = JSON.parse(rawBody.toString());
+        const boardBody = JSON.parse(parsed.body);
+        expect(boardBody.team.members).toEqual([
+            expect.objectContaining({
+                sessionId: 'session-3',
+                roleId: 'builder',
+                authorities: ['task.start.self', 'task.complete.self'],
+                teamOverlay: {
+                    promptSuffix: 'Work only from task cards.',
+                },
+            }),
+        ]);
 
         await app.close();
     });

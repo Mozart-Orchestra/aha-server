@@ -1,0 +1,14 @@
+.git
+.aha
+.gstack
+.happy
+.logs
+.minio
+.pgdata
+.vscode
+node_modules
+dist
+coverage
+.env
+.env.*
+*.log

@@ -55,7 +55,30 @@ function buildGenomeVisibilityWhere(userId: string) {
     };
 }
 
+function withGenomeFeedbackData<T extends { scorecard?: string | null }>(genome: T): T & { feedbackData: string | null } {
+    return {
+        ...genome,
+        feedbackData: genome.scorecard ?? null,
+    };
+}
+
+function parseStoredGenomeScorecard(scorecard: string | null | undefined): Record<string, unknown> | null {
+    if (!scorecard) {
+        return null;
+    }
+
+    try {
+        const parsed = JSON.parse(scorecard) as Record<string, unknown> | null;
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
 function resolveSupervisorStatePath(teamId: string): string | null {
+    if (!/^[a-zA-Z0-9_-]+$/.test(teamId)) {
+        return null;
+    }
     const filename = `state-${teamId}.json`;
     const candidates = [
         join(process.cwd(), '.aha', 'supervisor', filename),
@@ -75,6 +98,10 @@ function readSupervisorStateSnapshot(teamId: string): {
     pendingAction: {
         type: 'notify_help';
         message: string;
+        requestType?: 'stuck' | 'context_overflow' | 'need_collaborator' | 'error' | 'custom';
+        severity?: 'low' | 'medium' | 'high' | 'critical';
+        description?: string;
+        targetSessionId?: string;
     } | {
         type: 'conditional_escalation';
         condition: string;
@@ -151,8 +178,21 @@ export function evolutionRoutes(app: Fastify) {
             }
 
             const board = extractTeamBoard(artifact);
-            const bypassAgents = extractTeamMembers(board)
-                .filter((m: any) => m.executionPlane === 'bypass')
+            const latestByBypassKey = new Map<string, any>();
+            for (const member of extractTeamMembers(board).filter((m: any) => m.executionPlane === 'bypass')) {
+                const roleId = member.roleId || member.role || '';
+                const profile = member.profile || 'periodic';
+                const key = `${roleId}:${profile}`;
+                const previous = latestByBypassKey.get(key);
+                const previousJoinedAt = typeof previous?.joinedAt === 'number' ? previous.joinedAt : 0;
+                const currentJoinedAt = typeof member.joinedAt === 'number' ? member.joinedAt : 0;
+
+                if (!previous || currentJoinedAt >= previousJoinedAt) {
+                    latestByBypassKey.set(key, member);
+                }
+            }
+
+            const bypassAgents = Array.from(latestByBypassKey.values())
                 .map((m: any) => ({
                     agentId: m.sessionId,
                     teamId,
@@ -227,6 +267,10 @@ export function evolutionRoutes(app: Fastify) {
                             z.object({
                                 type: z.literal('notify_help'),
                                 message: z.string(),
+                                requestType: z.enum(['stuck', 'context_overflow', 'need_collaborator', 'error', 'custom']).optional(),
+                                severity: z.enum(['low', 'medium', 'high', 'critical']).optional(),
+                                description: z.string().optional(),
+                                targetSessionId: z.string().optional(),
                             }),
                             z.object({
                                 type: z.literal('conditional_escalation'),
@@ -350,7 +394,7 @@ export function evolutionRoutes(app: Fastify) {
             if (!genome) {
                 return reply.code(404).send({ error: 'Genome not found' });
             }
-            return reply.send({ genome });
+            return reply.send({ genome: withGenomeFeedbackData(genome) });
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome get error: ${error}`);
             return reply.code(500).send({ error: error.message });
@@ -369,7 +413,7 @@ export function evolutionRoutes(app: Fastify) {
                 teamId: z.string().optional(),
                 parentSessionId: z.string().optional(),
                 ownedOnly: z.enum(['true', 'false']).optional(),
-                limit: z.coerce.number().int().min(1).max(100).default(20),
+                limit: z.coerce.number().int().min(1).max(200).default(20),
                 offset: z.coerce.number().int().min(0).default(0),
             }),
         }
@@ -401,7 +445,7 @@ export function evolutionRoutes(app: Fastify) {
                 db.genome.count({ where }),
             ]);
 
-            return reply.send({ genomes, total });
+            return reply.send({ genomes: genomes.map(withGenomeFeedbackData), total });
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genomes list error: ${error}`);
             return reply.code(500).send({ error: error.message });
@@ -504,7 +548,7 @@ export function evolutionRoutes(app: Fastify) {
                     },
                 });
 
-            return reply.code(201).send({ genome });
+            return reply.code(201).send({ genome: withGenomeFeedbackData(genome) });
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome create error: ${error}`);
             return reply.code(500).send({ error: error.message });
@@ -558,7 +602,7 @@ export function evolutionRoutes(app: Fastify) {
                     },
                 });
 
-                return reply.send({ genome, createdNewVersion: false });
+                return reply.send({ genome: withGenomeFeedbackData(genome), createdNewVersion: false });
             }
 
             const nextNamespace = updates.namespace !== undefined ? updates.namespace : current.namespace;
@@ -599,7 +643,7 @@ export function evolutionRoutes(app: Fastify) {
                 },
             });
 
-            return reply.send({ genome, createdNewVersion: true });
+            return reply.send({ genome: withGenomeFeedbackData(genome), createdNewVersion: true });
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome patch error: ${error}`);
             return reply.code(500).send({ error: error.message });
@@ -671,7 +715,7 @@ export function evolutionRoutes(app: Fastify) {
                 orderBy: { version: 'desc' },
             });
             if (!genome) return reply.code(404).send({ error: 'Genome not found' });
-            return reply.send({ genome });
+            return reply.send({ genome: withGenomeFeedbackData(genome) });
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome latest error: ${error}`);
             return reply.code(500).send({ error: error.message });
@@ -736,7 +780,7 @@ export function evolutionRoutes(app: Fastify) {
             if (!genome) return reply.code(404).send({ error: 'Genome not found' });
             // versioned genome is immutable — safe to cache forever
             reply.header('Cache-Control', 'public, immutable, max-age=31536000');
-            return reply.send({ genome });
+            return reply.send({ genome: withGenomeFeedbackData(genome) });
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome version error: ${error}`);
             return reply.code(500).send({ error: error.message });
@@ -772,8 +816,9 @@ export function evolutionRoutes(app: Fastify) {
 
             // 发布到 Marketplace Server
             const spec = JSON.parse(genome.spec);
+            const publishNamespace = genome.namespace ?? spec.namespace ?? '@public';
             const publishBody = {
-                namespace: genome.namespace ?? spec.namespace,
+                namespace: publishNamespace,
                 name: genome.name,
                 version: genome.version,
                 description: genome.description ?? undefined,
@@ -794,6 +839,36 @@ export function evolutionRoutes(app: Fastify) {
                 timeout: 10000,
             });
 
+            const scorecardPayload = parseStoredGenomeScorecard(genome.scorecard);
+            let feedbackSync: { attempted: boolean; synced: boolean; error?: string } | undefined;
+
+            if (scorecardPayload) {
+                try {
+                    await axios.patch(
+                        `${hubUrl}/genomes/${encodeURIComponent(publishNamespace)}/${encodeURIComponent(genome.name)}/feedback`,
+                        scorecardPayload,
+                        {
+                            headers: {
+                                'Content-Type': 'application/json',
+                                ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                            },
+                            timeout: 10000,
+                        },
+                    );
+                    feedbackSync = { attempted: true, synced: true };
+                } catch (feedbackError: any) {
+                    feedbackSync = {
+                        attempted: true,
+                        synced: false,
+                        error: feedbackError?.message ?? 'Failed to sync feedback',
+                    };
+                    log(
+                        { module: 'evolution', level: 'warn' },
+                        `Genome ${id} published but feedback sync failed: ${feedbackSync.error}`,
+                    );
+                }
+            }
+
             const publishedGenome = res.data?.genome;
             const localGenome = await db.genome.update({
                 where: { id: genome.id },
@@ -804,7 +879,11 @@ export function evolutionRoutes(app: Fastify) {
             });
 
             log({ module: 'evolution' }, `Genome ${id} published to marketplace: ${hubUrl}`);
-            return reply.code(201).send({ published: res.data, genome: localGenome });
+            return reply.code(201).send({
+                published: res.data,
+                genome: withGenomeFeedbackData(localGenome),
+                ...(feedbackSync ? { feedbackSync } : {}),
+            });
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome publish error: ${error}`);
             return reply.code(500).send({ error: error.message });

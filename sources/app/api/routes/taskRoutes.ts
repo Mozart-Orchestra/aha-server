@@ -36,6 +36,40 @@ const BlockerSchema = z.object({
     description: z.string().min(1).max(1000)
 });
 
+const TaskCommentSchema = z.object({
+    sessionId: z.string(),
+    role: z.string().optional(),
+    displayName: z.string().optional(),
+    type: z.enum(['note', 'status-change', 'review-feedback', 'handoff', 'blocker', 'decision', 'human-override']).optional(),
+    content: z.string().min(1).max(4000),
+    fromStatus: z.string().optional(),
+    toStatus: z.string().optional(),
+    mentions: z.array(z.string()).optional(),
+});
+
+const TaskActorSchema = z.object({
+    sessionId: z.string().optional(),
+    role: z.string().optional(),
+    displayName: z.string().optional(),
+    kind: z.enum(['human', 'agent']).optional(),
+});
+
+const HumanStatusLockSchema = TaskActorSchema.extend({
+    mode: z.enum(['viewing', 'editing', 'manual-status']),
+    reason: z.string().max(500).optional(),
+    comment: z.string().max(4000).optional(),
+});
+
+const ClearHumanStatusLockSchema = TaskActorSchema.extend({
+    mode: z.enum(['viewing', 'editing', 'manual-status']).optional(),
+    comment: z.string().max(4000).optional(),
+});
+
+const TaskUpdateSchema = TaskSchema.partial().extend({
+    comment: TaskCommentSchema.optional(),
+    actor: TaskActorSchema.optional(),
+});
+
 export function taskRoutes(app: Fastify) {
     log({ module: 'api' }, 'Registering taskRoutes...');
 
@@ -168,7 +202,7 @@ export function taskRoutes(app: Fastify) {
                 teamId: z.string(),
                 taskId: z.string()
             }),
-            body: TaskSchema.partial(),
+            body: TaskUpdateSchema,
             response: {
                 200: z.object({
                     success: z.literal(true),
@@ -185,7 +219,7 @@ export function taskRoutes(app: Fastify) {
     }, async (request, reply) => {
         const userId = request.userId;
         const { teamId, taskId } = request.params as { teamId: string; taskId: string };
-        const updates = request.body as Partial<z.infer<typeof TaskSchema>>;
+        const updates = request.body as z.infer<typeof TaskUpdateSchema>;
 
         try {
             const task = await taskOrchestrator.updateTask(userId, teamId, taskId, updates);
@@ -196,11 +230,90 @@ export function taskRoutes(app: Fastify) {
             if (isTaskOperationError(error, TASK_ERROR_CODES.TASK_ACK_REQUIRED)) {
                 return reply.code(400).send({ error: error.message });
             }
+            if (isTaskOperationError(error, TASK_ERROR_CODES.TASK_LOCKED_BY_HUMAN)) {
+                return reply.code(409).send({ error: error.message });
+            }
             if (error.message === 'Task not found' || error.message === 'Team not found') {
                 return reply.code(404).send({ error: error.message });
             }
             log({ module: 'task-routes', level: 'error' }, `Failed to update task: ${error}`);
             return reply.code(500).send({ error: 'Failed to update task' });
+        }
+    });
+
+    app.post('/v1/teams/:teamId/tasks/:taskId/human-lock', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                teamId: z.string(),
+                taskId: z.string(),
+            }),
+            body: HumanStatusLockSchema,
+            response: {
+                200: z.object({
+                    success: z.literal(true),
+                    task: z.any(),
+                }),
+                404: z.object({ error: z.string() }),
+                500: z.object({ error: z.literal('Failed to set human status lock') }),
+            },
+        }
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { teamId, taskId } = request.params as { teamId: string; taskId: string };
+        const body = request.body as z.infer<typeof HumanStatusLockSchema>;
+
+        try {
+            const task = await taskOrchestrator.setHumanStatusLock(userId, teamId, taskId, body);
+            if (body.sessionId) {
+                await observeSessionActivity(userId, body.sessionId, Date.now());
+            }
+            log({ module: 'task-routes', teamId, taskId }, 'Human status lock set');
+            return reply.send({ success: true, task });
+        } catch (error: any) {
+            if (error.message === 'Task not found' || error.message === 'Team not found') {
+                return reply.code(404).send({ error: error.message });
+            }
+            log({ module: 'task-routes', level: 'error' }, `Failed to set human status lock: ${error}`);
+            return reply.code(500).send({ error: 'Failed to set human status lock' });
+        }
+    });
+
+    app.post('/v1/teams/:teamId/tasks/:taskId/human-lock/clear', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                teamId: z.string(),
+                taskId: z.string(),
+            }),
+            body: ClearHumanStatusLockSchema.optional(),
+            response: {
+                200: z.object({
+                    success: z.literal(true),
+                    task: z.any(),
+                }),
+                404: z.object({ error: z.string() }),
+                500: z.object({ error: z.literal('Failed to clear human status lock') }),
+            },
+        }
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { teamId, taskId } = request.params as { teamId: string; taskId: string };
+        const body = (request.body ?? {}) as z.infer<typeof ClearHumanStatusLockSchema>;
+
+        try {
+            const task = await taskOrchestrator.clearHumanStatusLock(userId, teamId, taskId, body);
+            if (body.sessionId) {
+                await observeSessionActivity(userId, body.sessionId, Date.now());
+            }
+            log({ module: 'task-routes', teamId, taskId }, 'Human status lock cleared');
+            return reply.send({ success: true, task });
+        } catch (error: any) {
+            if (error.message === 'Task not found' || error.message === 'Team not found') {
+                return reply.code(404).send({ error: error.message });
+            }
+            log({ module: 'task-routes', level: 'error' }, `Failed to clear human status lock: ${error}`);
+            return reply.code(500).send({ error: 'Failed to clear human status lock' });
         }
     });
 
@@ -252,7 +365,8 @@ export function taskRoutes(app: Fastify) {
             }),
             body: z.object({
                 sessionId: z.string(),
-                role: z.string().default('builder')
+                role: z.string().default('builder'),
+                comment: TaskCommentSchema.omit({ sessionId: true, role: true, fromStatus: true, toStatus: true }).optional(),
             }),
             response: {
                 200: z.object({
@@ -273,10 +387,14 @@ export function taskRoutes(app: Fastify) {
     }, async (request, reply) => {
         const userId = request.userId;
         const { teamId, taskId } = request.params as { teamId: string; taskId: string };
-        const { sessionId, role } = request.body as { sessionId: string; role: string };
+        const { sessionId, role, comment } = request.body as {
+            sessionId: string;
+            role: string;
+            comment?: { displayName?: string; content: string; mentions?: string[]; type?: 'note' | 'status-change' | 'review-feedback' | 'handoff' | 'blocker' | 'decision' | 'human-override' };
+        };
 
         try {
-            const task = await taskOrchestrator.startTask(userId, teamId, taskId, sessionId, role);
+            const task = await taskOrchestrator.startTask(userId, teamId, taskId, sessionId, role, comment);
             await observeSessionActivity(userId, sessionId, Date.now());
             log({ module: 'task-routes', teamId, taskId, sessionId }, 'Task started');
             return reply.send({ success: true, task });
@@ -286,6 +404,9 @@ export function taskRoutes(app: Fastify) {
             }
             if (isTaskOperationError(error, TASK_ERROR_CODES.DUPLICATE_EXECUTION_CONFLICT)) {
                 return reply.code(400).send({ error: error.message });
+            }
+            if (isTaskOperationError(error, TASK_ERROR_CODES.TASK_LOCKED_BY_HUMAN)) {
+                return reply.code(409).send({ error: error.message });
             }
             log({ module: 'task-routes', level: 'error' }, `Failed to start task: ${error}`);
             return reply.code(500).send({ error: 'Failed to start task' });
@@ -301,7 +422,8 @@ export function taskRoutes(app: Fastify) {
                 taskId: z.string()
             }),
             body: z.object({
-                sessionId: z.string()
+                sessionId: z.string(),
+                comment: TaskCommentSchema.omit({ sessionId: true, fromStatus: true, toStatus: true }).optional(),
             }),
             response: {
                 200: z.object({
@@ -322,10 +444,13 @@ export function taskRoutes(app: Fastify) {
     }, async (request, reply) => {
         const userId = request.userId;
         const { teamId, taskId } = request.params as { teamId: string; taskId: string };
-        const { sessionId } = request.body as { sessionId: string };
+        const { sessionId, comment } = request.body as {
+            sessionId: string;
+            comment?: { role?: string; displayName?: string; content: string; mentions?: string[]; type?: 'note' | 'status-change' | 'review-feedback' | 'handoff' | 'blocker' | 'decision' | 'human-override' };
+        };
 
         try {
-            const task = await taskOrchestrator.completeTask(userId, teamId, taskId, sessionId);
+            const task = await taskOrchestrator.completeTask(userId, teamId, taskId, sessionId, comment);
             await observeSessionActivity(userId, sessionId, Date.now());
             log({ module: 'task-routes', teamId, taskId, sessionId }, 'Task completed');
             return reply.send({ success: true, task });
@@ -335,6 +460,9 @@ export function taskRoutes(app: Fastify) {
             }
             if (error.message?.includes('Cannot complete')) {
                 return reply.code(400).send({ error: error.message });
+            }
+            if (isTaskOperationError(error, TASK_ERROR_CODES.TASK_LOCKED_BY_HUMAN)) {
+                return reply.code(409).send({ error: error.message });
             }
             log({ module: 'task-routes', level: 'error' }, `Failed to complete task: ${error}`);
             return reply.code(500).send({ error: 'Failed to complete task' });
@@ -351,6 +479,10 @@ export function taskRoutes(app: Fastify) {
             }),
             body: z.object({
                 sessionId: z.string(),
+                role: z.string().optional(),
+                displayName: z.string().optional(),
+                mentions: z.array(z.string()).optional(),
+                comment: z.string().optional(),
                 ...BlockerSchema.shape
             }),
             response: {
@@ -369,10 +501,14 @@ export function taskRoutes(app: Fastify) {
     }, async (request, reply) => {
         const userId = request.userId;
         const { teamId, taskId } = request.params as { teamId: string; taskId: string };
-        const { sessionId, type, description } = request.body as {
+        const { sessionId, type, description, role, displayName, mentions, comment } = request.body as {
             sessionId: string;
             type: 'dependency' | 'question' | 'resource' | 'technical';
             description: string;
+            role?: string;
+            displayName?: string;
+            mentions?: string[];
+            comment?: string;
         };
 
         try {
@@ -381,7 +517,7 @@ export function taskRoutes(app: Fastify) {
                 teamId,
                 taskId,
                 sessionId,
-                { type, description }
+                { type, description, role, displayName, mentions, comment }
             );
             await observeSessionActivity(userId, sessionId, Date.now());
             log({ module: 'task-routes', teamId, taskId }, 'Blocker reported');
@@ -389,6 +525,9 @@ export function taskRoutes(app: Fastify) {
         } catch (error: any) {
             if (error.message === 'Task not found' || error.message === 'Team not found') {
                 return reply.code(404).send({ error: error.message });
+            }
+            if (isTaskOperationError(error, TASK_ERROR_CODES.TASK_LOCKED_BY_HUMAN)) {
+                return reply.code(409).send({ error: error.message });
             }
             log({ module: 'task-routes', level: 'error' }, `Failed to report blocker: ${error}`);
             return reply.code(500).send({ error: 'Failed to report blocker' });
@@ -406,7 +545,8 @@ export function taskRoutes(app: Fastify) {
             }),
             body: z.object({
                 sessionId: z.string(),
-                resolution: z.string().min(1).max(1000)
+                resolution: z.string().min(1).max(1000),
+                comment: TaskCommentSchema.omit({ sessionId: true }).optional(),
             }),
             response: {
                 200: z.object({
@@ -428,7 +568,11 @@ export function taskRoutes(app: Fastify) {
             taskId: string;
             blockerId: string;
         };
-        const { sessionId, resolution } = request.body as { sessionId: string; resolution: string };
+        const { sessionId, resolution, comment } = request.body as {
+            sessionId: string;
+            resolution: string;
+            comment?: { role?: string; displayName?: string; type?: 'note' | 'status-change' | 'review-feedback' | 'handoff' | 'blocker' | 'decision' | 'human-override'; content: string; fromStatus?: string; toStatus?: string; mentions?: string[] };
+        };
 
         try {
             const task = await taskOrchestrator.resolveBlocker(
@@ -437,7 +581,8 @@ export function taskRoutes(app: Fastify) {
                 taskId,
                 blockerId,
                 sessionId,
-                resolution
+                resolution,
+                comment
             );
             await observeSessionActivity(userId, sessionId, Date.now());
             log({ module: 'task-routes', teamId, taskId, blockerId }, 'Blocker resolved');
@@ -448,8 +593,52 @@ export function taskRoutes(app: Fastify) {
                 error.message === 'Blocker not found') {
                 return reply.code(404).send({ error: error.message });
             }
+            if (isTaskOperationError(error, TASK_ERROR_CODES.TASK_LOCKED_BY_HUMAN)) {
+                return reply.code(409).send({ error: error.message });
+            }
             log({ module: 'task-routes', level: 'error' }, `Failed to resolve blocker: ${error}`);
             return reply.code(500).send({ error: 'Failed to resolve blocker' });
+        }
+    });
+
+    // POST /v1/teams/:teamId/tasks/:taskId/comments - Add task comment
+    app.post('/v1/teams/:teamId/tasks/:taskId/comments', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                teamId: z.string(),
+                taskId: z.string(),
+            }),
+            body: TaskCommentSchema,
+            response: {
+                200: z.object({
+                    success: z.literal(true),
+                    task: z.any(),
+                }),
+                404: z.object({
+                    error: z.string(),
+                }),
+                500: z.object({
+                    error: z.literal('Failed to add task comment'),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { teamId, taskId } = request.params as { teamId: string; taskId: string };
+        const comment = request.body as z.infer<typeof TaskCommentSchema>;
+
+        try {
+            const task = await taskOrchestrator.addTaskComment(userId, teamId, taskId, comment);
+            await observeSessionActivity(userId, comment.sessionId, Date.now());
+            log({ module: 'task-routes', teamId, taskId }, 'Task comment added');
+            return reply.send({ success: true, task });
+        } catch (error: any) {
+            if (error.message === 'Task not found' || error.message === 'Team not found') {
+                return reply.code(404).send({ error: error.message });
+            }
+            log({ module: 'task-routes', level: 'error' }, `Failed to add task comment: ${error}`);
+            return reply.code(500).send({ error: 'Failed to add task comment' });
         }
     });
 }

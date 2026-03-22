@@ -32,6 +32,7 @@ vi.mock('@/storage/db', () => ({
 vi.mock('axios', () => ({
     default: {
         post: vi.fn(),
+        patch: vi.fn(),
     },
 }));
 
@@ -128,6 +129,59 @@ describe('evolutionRoutes', () => {
         await app.close();
     });
 
+    it('deduplicates bypass agents by role/profile and keeps the latest member', async () => {
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(buildTeamArtifact({
+            team: {
+                members: [
+                    { sessionId: 'help-old', roleId: 'help-agent', executionPlane: 'bypass', profile: 'event', joinedAt: 1000 },
+                    { sessionId: 'help-new', roleId: 'help-agent', executionPlane: 'bypass', profile: 'event', joinedAt: 2000 },
+                    { sessionId: 'supervisor-1', roleId: 'supervisor', executionPlane: 'bypass', profile: 'periodic', joinedAt: 1500 },
+                ],
+            },
+            tasks: [],
+        }) as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/teams/team-1/bypass-agents',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            agents: [
+                {
+                    agentId: 'help-new',
+                    teamId: 'team-1',
+                    roleId: 'help-agent',
+                    profile: 'event',
+                    spawnedAt: 2,
+                    expiresAt: 0,
+                    permissions: {
+                        canSpawnAgents: false,
+                        canCreateTeams: false,
+                        canDeployToProduction: false,
+                    },
+                },
+                {
+                    agentId: 'supervisor-1',
+                    teamId: 'team-1',
+                    roleId: 'supervisor',
+                    profile: 'periodic',
+                    spawnedAt: 1,
+                    expiresAt: 0,
+                    permissions: {
+                        canSpawnAgents: false,
+                        canCreateTeams: false,
+                        canDeployToProduction: false,
+                    },
+                },
+            ],
+        });
+
+        await app.close();
+    });
+
     it('creates a genome with namespace/tags/category metadata', async () => {
         vi.mocked(db.genome.create).mockResolvedValue({
             id: 'genome-1',
@@ -157,6 +211,57 @@ describe('evolutionRoutes', () => {
                 category: 'development',
             }),
         }));
+
+        await app.close();
+    });
+
+    it('aliases local genome scorecards as feedbackData in genome listings', async () => {
+        const scorecard = JSON.stringify({
+            evaluationCount: 3,
+            avgScore: 88,
+            latestAction: 'keep',
+        });
+
+        vi.mocked(db.genome.findMany).mockResolvedValue([
+            {
+                id: 'genome-1',
+                accountId: 'user-1',
+                name: 'builder',
+                description: 'Builder genome',
+                spec: '{"role":"builder"}',
+                parentSessionId: 'session-1',
+                teamId: 'team-1',
+                namespace: '@public',
+                version: 1,
+                tags: '["builder"]',
+                category: 'development',
+                status: 'verified',
+                spawnCount: 2,
+                isPublic: false,
+                scorecard,
+                createdAt: '2026-03-20T00:00:00.000Z',
+                updatedAt: '2026-03-20T00:00:00.000Z',
+            },
+        ] as never);
+        vi.mocked(db.genome.count).mockResolvedValue(1 as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/genomes?ownedOnly=true&limit=200',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            genomes: [
+                expect.objectContaining({
+                    id: 'genome-1',
+                    scorecard,
+                    feedbackData: scorecard,
+                }),
+            ],
+            total: 1,
+        });
 
         await app.close();
     });
@@ -332,6 +437,11 @@ describe('evolutionRoutes', () => {
     });
 
     it('marks the local genome public after successful publish and stores hubGenomeId', async () => {
+        const scorecard = JSON.stringify({
+            evaluationCount: 4,
+            avgScore: 91,
+            latestAction: 'keep',
+        });
         vi.mocked(db.genome.findFirst).mockResolvedValue({
             id: 'genome-1',
             accountId: 'user-1',
@@ -342,6 +452,7 @@ describe('evolutionRoutes', () => {
             spec: '{"role":"builder"}',
             tags: '["builder"]',
             category: 'development',
+            scorecard,
             deletedAt: null,
         } as never);
         vi.mocked(axios.post).mockResolvedValue({
@@ -351,10 +462,14 @@ describe('evolutionRoutes', () => {
                 },
             },
         } as never);
+        vi.mocked(axios.patch).mockResolvedValue({
+            data: { success: true },
+        } as never);
         vi.mocked(db.genome.update).mockResolvedValue({
             id: 'genome-1',
             isPublic: true,
             hubGenomeId: 'hub-genome-1',
+            scorecard,
         } as never);
 
         const app = buildApp();
@@ -374,11 +489,26 @@ describe('evolutionRoutes', () => {
             }),
             expect.any(Object),
         );
+        expect(axios.patch).toHaveBeenCalledWith(
+            expect.stringContaining('/genomes/%40public/builder/feedback'),
+            JSON.parse(scorecard),
+            expect.any(Object),
+        );
         expect(db.genome.update).toHaveBeenCalledWith(expect.objectContaining({
             where: { id: 'genome-1' },
             data: {
                 isPublic: true,
                 hubGenomeId: 'hub-genome-1',
+            },
+        }));
+        expect(response.json()).toEqual(expect.objectContaining({
+            genome: expect.objectContaining({
+                id: 'genome-1',
+                feedbackData: scorecard,
+            }),
+            feedbackSync: {
+                attempted: true,
+                synced: true,
             },
         }));
 

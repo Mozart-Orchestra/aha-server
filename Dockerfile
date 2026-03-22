@@ -1,45 +1,33 @@
-# Stage 1: Building the application
-FROM node:20 AS builder
-
-# Install dependencies
-RUN apt-get update && apt-get install -y python3 ffmpeg make g++ build-essential && rm -rf /var/lib/apt/lists/*
-
+FROM node:22-alpine AS prod-deps
+RUN apk add --no-cache ffmpeg python3 make g++
 WORKDIR /app
 
-# Copy package.json and yarn.lock
 COPY package.json yarn.lock ./
-COPY ./prisma ./prisma
+COPY prisma ./prisma
+RUN yarn install --frozen-lockfile --ignore-engines \
+ && yarn prisma generate \
+ && yarn cache clean
 
-# Install dependencies
-RUN yarn install --frozen-lockfile --ignore-engines
-
-# Copy the rest of the application code
-COPY ./tsconfig.json ./tsconfig.json
-COPY ./vitest.config.ts ./vitest.config.ts
-COPY ./sources ./sources
-
-# Build the Next.js application
-RUN yarn build
-
-# Stage 2: Runtime
-FROM node:20 AS runner
-
+FROM node:22-alpine AS runner
+RUN apk add --no-cache ffmpeg
 WORKDIR /app
 
-# Install dependencies
-RUN apt-get update && apt-get install -y python3 ffmpeg && rm -rf /var/lib/apt/lists/*
+ENV NODE_ENV=production \
+    PORT=3005 \
+    NODE_OPTIONS=--max-old-space-size=2048
 
-# Set environment to production
-ENV NODE_ENV=production
+COPY --from=prod-deps --chown=node:node /app/package.json ./package.json
+COPY --from=prod-deps --chown=node:node /app/yarn.lock ./yarn.lock
+COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
+COPY --from=prod-deps --chown=node:node /app/prisma ./prisma
+COPY --chown=node:node shared ./shared
+COPY --chown=node:node sources ./sources
+COPY --chown=node:node tsconfig.json ./tsconfig.json
 
-# Copy necessary files from the builder stage
-COPY --from=builder /app/tsconfig.json ./tsconfig.json
-COPY --from=builder /app/package.json ./package.json
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/sources ./sources
+RUN mkdir -p /app/.logs /data \
+ && chown -R node:node /app /data
 
-# Expose the port the app will run on
-EXPOSE 3000
+USER node
+EXPOSE 3005
 
-# Command to run the application
-CMD ["yarn", "start"] 
+CMD ["sh", "-c", "npx prisma migrate deploy && node_modules/.bin/tsx ./sources/main.ts"]

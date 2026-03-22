@@ -226,11 +226,12 @@ export function marketListingRoutes(app: Fastify) {
             const [listings, total] = await Promise.all([
                 db.marketListing.findMany({
                     where,
-                    orderBy: sort === "downloads"
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    orderBy: (sort === "downloads"
                         ? { stats: { path: ['downloads'], sort: 'desc' } }
                         : sort === "starRating"
                         ? { stats: { path: ['starRating'], sort: 'desc' } }
-                        : { createdAt: 'desc' },
+                        : { createdAt: 'desc' }) as any,
                     skip: offset,
                     take: limit
                 }),

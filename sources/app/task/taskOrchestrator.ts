@@ -40,6 +40,47 @@ export interface TaskBlocker {
     resolution?: string;
 }
 
+export interface TaskComment {
+    id: string;
+    authorSessionId: string;
+    authorRole?: string;
+    authorDisplayName?: string;
+    type: 'note' | 'status-change' | 'review-feedback' | 'handoff' | 'blocker' | 'decision' | 'human-override';
+    content: string;
+    createdAt: number;
+    updatedAt?: number;
+    fromStatus?: string;
+    toStatus?: string;
+    mentions?: string[];
+}
+
+export interface TaskCommentInput {
+    sessionId: string;
+    role?: string;
+    displayName?: string;
+    type?: TaskComment['type'];
+    content: string;
+    fromStatus?: string;
+    toStatus?: string;
+    mentions?: string[];
+}
+
+export interface TaskActorInfo {
+    sessionId?: string;
+    role?: string;
+    displayName?: string;
+    kind?: 'human' | 'agent';
+}
+
+export interface HumanStatusLock {
+    mode: 'viewing' | 'editing' | 'manual-status';
+    lockedAt: number;
+    lockedBySessionId?: string;
+    lockedByRole?: string;
+    lockedByDisplayName?: string;
+    reason?: string;
+}
+
 export interface StatusPropagation {
     autoCompleteParent: boolean;
     blockParentOnBlocked: boolean;
@@ -63,8 +104,10 @@ export interface KanbanTask {
     hasBlockedChild?: boolean;
     executionLinks?: TaskExecutionLink[];
     blockers?: TaskBlocker[];
+    comments?: TaskComment[];
     labels?: string[];
     approvalStatus?: 'pending' | 'approved' | 'rejected';
+    humanStatusLock?: HumanStatusLock | null;
 }
 
 export interface KanbanColumn {
@@ -170,6 +213,156 @@ export class TaskOrchestrator {
         await this.broadcastTaskEvent(userId, teamId, eventType, taskId, taskData);
     }
 
+    private appendTaskComment(task: KanbanTask, input: TaskCommentInput): TaskComment {
+        const comment: TaskComment = {
+            id: randomKeyNaked(10),
+            authorSessionId: input.sessionId,
+            authorRole: input.role,
+            authorDisplayName: input.displayName,
+            type: input.type ?? 'note',
+            content: input.content.trim(),
+            createdAt: Date.now(),
+            ...(input.fromStatus ? { fromStatus: input.fromStatus } : {}),
+            ...(input.toStatus ? { toStatus: input.toStatus } : {}),
+            ...(input.mentions?.length ? { mentions: input.mentions } : {}),
+        };
+
+        task.comments = task.comments || [];
+        task.comments.push(comment);
+        task.updatedAt = Date.now();
+
+        return comment;
+    }
+
+    private buildAutomaticTransitionComment(input: {
+        sessionId: string;
+        role?: string;
+        displayName?: string;
+        type: TaskComment['type'];
+        content: string;
+        fromStatus?: string;
+        toStatus?: string;
+    }): TaskCommentInput {
+        return {
+            sessionId: input.sessionId,
+            role: input.role,
+            displayName: input.displayName,
+            type: input.type,
+            content: input.content,
+            fromStatus: input.fromStatus,
+            toStatus: input.toStatus,
+        };
+    }
+
+
+    private buildTaskActor(input?: TaskActorInfo | null): TaskActorInfo | undefined {
+        if (!input) {
+            return undefined;
+        }
+
+        const sessionId = input.sessionId?.trim();
+        const role = input.role?.trim();
+        const displayName = input.displayName?.trim();
+        const kind = input.kind;
+
+        if (!sessionId && !role && !displayName && !kind) {
+            return undefined;
+        }
+
+        return {
+            ...(sessionId ? { sessionId } : {}),
+            ...(role ? { role } : {}),
+            ...(displayName ? { displayName } : {}),
+            ...(kind ? { kind } : {}),
+        };
+    }
+
+    private isHumanActor(actor?: TaskActorInfo | null): boolean {
+        if (!actor) {
+            return false;
+        }
+
+        if (actor.kind === 'human') {
+            return true;
+        }
+
+        const normalizedRole = actor.role?.trim().toLowerCase();
+        return normalizedRole === 'user' || normalizedRole === 'human';
+    }
+
+    private buildHumanStatusLock(input: {
+        actor?: TaskActorInfo;
+        mode: HumanStatusLock['mode'];
+        reason?: string;
+    }): HumanStatusLock {
+        return {
+            mode: input.mode,
+            lockedAt: Date.now(),
+            ...(input.actor?.sessionId ? { lockedBySessionId: input.actor.sessionId } : {}),
+            ...(input.actor?.role ? { lockedByRole: input.actor.role } : {}),
+            ...(input.actor?.displayName ? { lockedByDisplayName: input.actor.displayName } : {}),
+            ...(input.reason?.trim() ? { reason: input.reason.trim() } : {}),
+        };
+    }
+
+    private buildHumanLockErrorMessage(lock?: HumanStatusLock | null): string {
+        if (lock?.mode === 'manual-status') {
+            return 'TASK_LOCKED_BY_HUMAN: This task status was manually set by the user. Call list_tasks to see updated status.';
+        }
+
+        const lockedBy = lock?.lockedByDisplayName || lock?.lockedBySessionId || 'a human';
+        return `TASK_LOCKED_BY_HUMAN: This task is currently locked by ${lockedBy}. Call list_tasks to see updated status.`;
+    }
+
+    private assertHumanStatusLockAllowsMutation(task: KanbanTask, actor?: TaskActorInfo): void {
+        if (!task.humanStatusLock) {
+            return;
+        }
+
+        if (this.isHumanActor(actor)) {
+            return;
+        }
+
+        throw new TaskOperationError(
+            TASK_ERROR_CODES.TASK_LOCKED_BY_HUMAN,
+            this.buildHumanLockErrorMessage(task.humanStatusLock),
+            {
+                taskId: task.id,
+                humanStatusLock: task.humanStatusLock,
+                attemptedBySessionId: actor?.sessionId,
+                attemptedByRole: actor?.role,
+            },
+        );
+    }
+
+    private applyManualHumanStatusLock(
+        task: KanbanTask,
+        actor: TaskActorInfo | undefined,
+        previousStatus: string,
+        nextStatus: string,
+        explicitComment?: string,
+    ): void {
+        if (!this.isHumanActor(actor) || previousStatus === nextStatus) {
+            return;
+        }
+
+        task.humanStatusLock = this.buildHumanStatusLock({
+            actor,
+            mode: 'manual-status',
+            reason: explicitComment || `Manual status change to ${nextStatus}`,
+        });
+
+        this.appendTaskComment(task, {
+            sessionId: actor?.sessionId ?? 'user',
+            role: actor?.role ?? 'user',
+            displayName: actor?.displayName,
+            type: 'human-override',
+            content: explicitComment || `${actor?.displayName || 'User'} manually changed status from ${previousStatus} to ${nextStatus}. Agent status changes are now locked until the human clears the lock.`,
+            fromStatus: previousStatus,
+            toStatus: nextStatus,
+        });
+    }
+
     /**
      * Broadcast task event to all team member sessions
      *
@@ -267,6 +460,114 @@ export class TaskOrchestrator {
         return board.tasks.find(t => t.id === taskId) || null;
     }
 
+    async addTaskComment(
+        userId: string,
+        teamId: string,
+        taskId: string,
+        commentInput: TaskCommentInput
+    ): Promise<KanbanTask> {
+        const board = await this.getBoard(userId, teamId);
+        if (!board) throw new Error('Team not initialized. Please create/open this team in Kanban dashboard first. See DOC/TEAM_CREATION_WORKFLOW.md for details.');
+
+        const taskIndex = board.tasks.findIndex((task) => task.id === taskId);
+        if (taskIndex === -1) throw new Error('Task not found');
+
+        const task = board.tasks[taskIndex];
+        this.appendTaskComment(task, commentInput);
+        board.tasks[taskIndex] = task;
+
+        await this.saveBoard(userId, teamId, board, 'task-updated', taskId, task);
+
+        log({ module: 'task-orchestrator', teamId, taskId }, 'Task comment added');
+        return task;
+    }
+
+    async setHumanStatusLock(
+        userId: string,
+        teamId: string,
+        taskId: string,
+        input: TaskActorInfo & {
+            mode: HumanStatusLock['mode'];
+            reason?: string;
+            comment?: string;
+        }
+    ): Promise<KanbanTask> {
+        const board = await this.getBoard(userId, teamId);
+        if (!board) throw new Error('Team not initialized. Please create/open this team in Kanban dashboard first. See DOC/TEAM_CREATION_WORKFLOW.md for details.');
+
+        const taskIndex = board.tasks.findIndex((task) => task.id === taskId);
+        if (taskIndex === -1) throw new Error('Task not found');
+
+        const task = board.tasks[taskIndex];
+        const actor = this.buildTaskActor({
+            ...input,
+            kind: input.kind ?? 'human',
+        });
+        task.humanStatusLock = this.buildHumanStatusLock({
+            actor,
+            mode: input.mode,
+            reason: input.reason,
+        });
+        task.updatedAt = Date.now();
+
+        if (input.comment?.trim()) {
+            this.appendTaskComment(task, {
+                sessionId: actor?.sessionId ?? 'user',
+                role: actor?.role ?? 'user',
+                displayName: actor?.displayName,
+                type: 'human-override',
+                content: input.comment.trim(),
+            });
+        }
+
+        board.tasks[taskIndex] = task;
+        await this.saveBoard(userId, teamId, board, 'task-updated', taskId, task);
+
+        log({ module: 'task-orchestrator', teamId, taskId }, 'Human status lock set');
+        return task;
+    }
+
+    async clearHumanStatusLock(
+        userId: string,
+        teamId: string,
+        taskId: string,
+        input?: TaskActorInfo & { comment?: string; mode?: HumanStatusLock['mode'] }
+    ): Promise<KanbanTask> {
+        const board = await this.getBoard(userId, teamId);
+        if (!board) throw new Error('Team not initialized. Please create/open this team in Kanban dashboard first. See DOC/TEAM_CREATION_WORKFLOW.md for details.');
+
+        const taskIndex = board.tasks.findIndex((task) => task.id === taskId);
+        if (taskIndex === -1) throw new Error('Task not found');
+
+        const task = board.tasks[taskIndex];
+        if (!task.humanStatusLock) {
+            return task;
+        }
+        if (input?.mode && task.humanStatusLock.mode !== input.mode) {
+            return task;
+        }
+
+        const actor = this.buildTaskActor(input ?? { kind: 'human' });
+        task.humanStatusLock = null;
+        task.updatedAt = Date.now();
+
+        if (input?.comment?.trim()) {
+            this.appendTaskComment(task, {
+                sessionId: actor?.sessionId ?? 'user',
+                role: actor?.role ?? 'user',
+                displayName: actor?.displayName,
+                type: 'human-override',
+                content: input.comment.trim(),
+            });
+        }
+
+        board.tasks[taskIndex] = task;
+        await this.saveBoard(userId, teamId, board, 'task-updated', taskId, task);
+
+        log({ module: 'task-orchestrator', teamId, taskId }, 'Human status lock cleared');
+        return task;
+    }
+
     /**
      * Create a new task
      */
@@ -284,6 +585,7 @@ export class TaskOrchestrator {
             status: task.status || 'todo',
             createdAt: Date.now(),
             updatedAt: Date.now(),
+            comments: task.comments || [],
             depth: task.parentTaskId ? this.getTaskDepth(board, task.parentTaskId) + 1 : 0,
             statusPropagation: task.statusPropagation || { ...DEFAULT_STATUS_PROPAGATION }
         };
@@ -321,7 +623,7 @@ export class TaskOrchestrator {
         userId: string,
         teamId: string,
         taskId: string,
-        updates: Partial<KanbanTask>
+        updates: Partial<KanbanTask> & { comment?: TaskCommentInput; actor?: TaskActorInfo }
     ): Promise<KanbanTask> {
         const board = await this.getBoard(userId, teamId);
         if (!board) throw new Error('Team not initialized. Please create/open this team in Kanban dashboard first. See DOC/TEAM_CREATION_WORKFLOW.md for details.');
@@ -331,37 +633,99 @@ export class TaskOrchestrator {
 
         const task = board.tasks[taskIndex];
         const previousStatus = task.status;
+        const previousAssignee = task.assigneeId ?? null;
+        const previousApprovalStatus = task.approvalStatus;
+        const { comment, actor: rawActor, ...taskUpdates } = updates;
+        const actor = this.buildTaskActor(rawActor ?? {
+            sessionId: comment?.sessionId,
+            role: comment?.role,
+            displayName: comment?.displayName,
+            kind: comment?.role === 'user' ? 'human' : undefined,
+        });
 
-        if (updates.status === 'in-progress' && previousStatus !== 'in-progress') {
+        if (taskUpdates.status === 'in-progress' && previousStatus !== 'in-progress') {
             throw new TaskOperationError(
                 TASK_ERROR_CODES.TASK_ACK_REQUIRED,
                 'Use start_task to move a task into in-progress; update_task cannot be used as task ack.',
             );
         }
 
-        // Apply updates (preserve id, createdAt)
+        if (taskUpdates.status && taskUpdates.status !== previousStatus) {
+            this.assertHumanStatusLockAllowsMutation(task, actor);
+        }
+
         const updatedTask: KanbanTask = {
             ...task,
-            ...updates,
+            ...taskUpdates,
             id: taskId,
             createdAt: task.createdAt,
             updatedAt: Date.now()
         };
 
-        if (updates.status === 'review' || updates.status === 'done') {
+        if (taskUpdates.status === 'review' || taskUpdates.status === 'done') {
             updatedTask.executionLinks = cleanupActiveExecutionLinks(
                 updatedTask.executionLinks,
                 updatedTask.assigneeId,
             );
         }
 
+        const explicitComment = comment?.content?.trim();
+        let consumedExplicitComment = false;
+
+        if (taskUpdates.status && taskUpdates.status !== previousStatus) {
+            const isHuman = this.isHumanActor(actor);
+            this.appendTaskComment(updatedTask, this.buildAutomaticTransitionComment({
+                sessionId: actor?.sessionId ?? comment?.sessionId ?? updatedTask.assigneeId ?? task.assigneeId ?? 'system',
+                role: actor?.role ?? comment?.role,
+                displayName: actor?.displayName ?? comment?.displayName,
+                type: taskUpdates.status === 'review' ? 'review-feedback' : 'status-change',
+                content: isHuman
+                    ? `Status changed from ${previousStatus} to ${taskUpdates.status}.`
+                    : (explicitComment || `Status changed from ${previousStatus} to ${taskUpdates.status}.`),
+                fromStatus: previousStatus,
+                toStatus: taskUpdates.status,
+            }));
+
+            if (isHuman) {
+                this.applyManualHumanStatusLock(updatedTask, actor, previousStatus, taskUpdates.status, explicitComment);
+            }
+
+            consumedExplicitComment = Boolean(explicitComment);
+        } else if (comment?.content?.trim()) {
+            this.appendTaskComment(updatedTask, comment);
+            consumedExplicitComment = true;
+        }
+
+        if (taskUpdates.assigneeId !== undefined && taskUpdates.assigneeId !== previousAssignee) {
+            this.appendTaskComment(updatedTask, this.buildAutomaticTransitionComment({
+                sessionId: actor?.sessionId ?? comment?.sessionId ?? previousAssignee ?? updatedTask.assigneeId ?? 'system',
+                role: actor?.role ?? comment?.role,
+                displayName: actor?.displayName ?? comment?.displayName,
+                type: 'handoff',
+                content: consumedExplicitComment
+                    ? `Task reassigned from ${previousAssignee ?? 'unassigned'} to ${taskUpdates.assigneeId ?? 'unassigned'}.`
+                    : (explicitComment || `Task reassigned from ${previousAssignee ?? 'unassigned'} to ${taskUpdates.assigneeId ?? 'unassigned'}.`),
+            }));
+        }
+
+        if (taskUpdates.approvalStatus && taskUpdates.approvalStatus !== previousApprovalStatus) {
+            this.appendTaskComment(updatedTask, this.buildAutomaticTransitionComment({
+                sessionId: actor?.sessionId ?? comment?.sessionId ?? updatedTask.assigneeId ?? 'system',
+                role: actor?.role ?? comment?.role,
+                displayName: actor?.displayName ?? comment?.displayName,
+                type: taskUpdates.approvalStatus === 'rejected' ? 'review-feedback' : 'decision',
+                content: consumedExplicitComment
+                    ? `Approval status changed to ${taskUpdates.approvalStatus}.`
+                    : (explicitComment || `Approval status changed to ${taskUpdates.approvalStatus}.`),
+            }));
+        }
+
         board.tasks[taskIndex] = updatedTask;
 
-        // Handle status change propagation
-        if (updates.status && updates.status !== previousStatus) {
-            if (updates.status === 'done') {
+        if (taskUpdates.status && taskUpdates.status !== previousStatus) {
+            if (taskUpdates.status === 'done') {
                 await this.handleTaskCompletion(board, updatedTask);
-            } else if (updates.status === 'blocked') {
+            } else if (taskUpdates.status === 'blocked') {
                 this.propagateBlockerToParent(board, task.parentTaskId);
             }
         }
@@ -413,7 +777,8 @@ export class TaskOrchestrator {
         teamId: string,
         taskId: string,
         sessionId: string,
-        role: string
+        role: string,
+        comment?: Omit<TaskCommentInput, 'sessionId' | 'role' | 'fromStatus' | 'toStatus'>
     ): Promise<KanbanTask> {
         const board = await this.getBoard(userId, teamId);
         if (!board) throw new Error('Team not initialized. Please create/open this team in Kanban dashboard first. See DOC/TEAM_CREATION_WORKFLOW.md for details.');
@@ -421,7 +786,14 @@ export class TaskOrchestrator {
         const task = board.tasks.find(t => t.id === taskId);
         if (!task) throw new Error('Task not found');
 
-        // Check for existing active link
+        const actor = this.buildTaskActor({
+            sessionId,
+            role,
+            displayName: comment?.displayName,
+            kind: role === 'user' ? 'human' : undefined,
+        });
+        this.assertHumanStatusLockAllowsMutation(task, actor);
+
         const activeLink = task.executionLinks?.find(l => l.status === 'active');
         if (activeLink && activeLink.sessionId !== sessionId) {
             throw new TaskOperationError(
@@ -443,27 +815,42 @@ export class TaskOrchestrator {
         if (duplicateConflict) {
             throw new TaskOperationError(
                 TASK_ERROR_CODES.DUPLICATE_EXECUTION_CONFLICT,
-                `Duplicate execution blocked: task overlaps with active task ${duplicateConflict.conflictingTaskId} ` +
-                `owned by ${duplicateConflict.conflictingSessionId} (${duplicateConflict.reason}: ${duplicateConflict.overlap}).`,
+                `Task overlaps with active work on ${duplicateConflict.conflictingTaskId}`,
                 duplicateConflict,
             );
         }
 
-        // Add execution link
         task.executionLinks = task.executionLinks || [];
-        task.executionLinks.push({
-            sessionId,
-            linkedAt: Date.now(),
-            role: 'primary',
-            status: 'active'
-        });
+        const existingLink = task.executionLinks.find(l => l.sessionId === sessionId);
+        if (existingLink) {
+            existingLink.status = 'active';
+            existingLink.linkedAt = Date.now();
+            existingLink.role = 'primary';
+        } else {
+            task.executionLinks.push({
+                sessionId,
+                linkedAt: Date.now(),
+                role: 'primary',
+                status: 'active'
+            });
+        }
 
-        // Update status
+        const previousStatus = task.status;
         if (task.status === 'todo') {
             task.status = 'in-progress';
         }
         task.assigneeId = sessionId;
         task.updatedAt = Date.now();
+        this.appendTaskComment(task, {
+            sessionId,
+            role,
+            displayName: comment?.displayName,
+            type: 'status-change',
+            content: comment?.content?.trim() || `Task started by ${comment?.displayName || role || sessionId}.`,
+            fromStatus: previousStatus,
+            toStatus: task.status,
+            mentions: comment?.mentions,
+        });
 
         const taskIndex = board.tasks.findIndex(t => t.id === taskId);
         board.tasks[taskIndex] = task;
@@ -481,7 +868,8 @@ export class TaskOrchestrator {
         userId: string,
         teamId: string,
         taskId: string,
-        sessionId: string
+        sessionId: string,
+        comment?: Omit<TaskCommentInput, 'sessionId' | 'fromStatus' | 'toStatus'>
     ): Promise<KanbanTask> {
         const board = await this.getBoard(userId, teamId);
         if (!board) throw new Error('Team not initialized. Please create/open this team in Kanban dashboard first. See DOC/TEAM_CREATION_WORKFLOW.md for details.');
@@ -489,7 +877,13 @@ export class TaskOrchestrator {
         const task = board.tasks.find(t => t.id === taskId);
         if (!task) throw new Error('Task not found');
 
-        // Check for incomplete subtasks
+        this.assertHumanStatusLockAllowsMutation(task, this.buildTaskActor({
+            sessionId,
+            role: comment?.role,
+            displayName: comment?.displayName,
+            kind: comment?.role === 'user' ? 'human' : undefined,
+        }));
+
         if (task.subtaskIds?.length) {
             const subtasks = board.tasks.filter(t => task.subtaskIds!.includes(t.id));
             const incomplete = subtasks.filter(st => st.status !== 'done');
@@ -500,15 +894,24 @@ export class TaskOrchestrator {
 
         task.executionLinks = cleanupActiveExecutionLinks(task.executionLinks, sessionId);
 
+        const previousStatus = task.status;
         task.status = 'done';
         task.updatedAt = Date.now();
+        this.appendTaskComment(task, {
+            sessionId,
+            role: comment?.role,
+            displayName: comment?.displayName,
+            type: 'status-change',
+            content: comment?.content?.trim() || `Task completed by ${comment?.displayName || comment?.role || sessionId}.`,
+            fromStatus: previousStatus,
+            toStatus: 'done',
+            mentions: comment?.mentions,
+        });
 
         const taskIndex = board.tasks.findIndex(t => t.id === taskId);
         board.tasks[taskIndex] = task;
 
-        // Handle completion propagation
         await this.handleTaskCompletion(board, task);
-
         await this.saveBoard(userId, teamId, board, 'task-updated', taskId, task);
 
         log({ module: 'task-orchestrator', teamId, taskId }, 'Task completed');
@@ -523,13 +926,20 @@ export class TaskOrchestrator {
         teamId: string,
         taskId: string,
         sessionId: string,
-        blocker: { type: TaskBlocker['type']; description: string }
+        blocker: { type: TaskBlocker['type']; description: string; role?: string; displayName?: string; mentions?: string[]; comment?: string }
     ): Promise<KanbanTask> {
         const board = await this.getBoard(userId, teamId);
         if (!board) throw new Error('Team not initialized. Please create/open this team in Kanban dashboard first. See DOC/TEAM_CREATION_WORKFLOW.md for details.');
 
         const task = board.tasks.find(t => t.id === taskId);
         if (!task) throw new Error('Task not found');
+
+        this.assertHumanStatusLockAllowsMutation(task, this.buildTaskActor({
+            sessionId,
+            role: blocker.role,
+            displayName: blocker.displayName,
+            kind: blocker.role === 'user' ? 'human' : undefined,
+        }));
 
         const newBlocker: TaskBlocker = {
             id: randomKeyNaked(8),
@@ -541,10 +951,20 @@ export class TaskOrchestrator {
 
         task.blockers = task.blockers || [];
         task.blockers.push(newBlocker);
+        const previousStatus = task.status;
         task.status = 'blocked';
         task.updatedAt = Date.now();
+        this.appendTaskComment(task, {
+            sessionId,
+            role: blocker.role,
+            displayName: blocker.displayName,
+            type: 'blocker',
+            content: blocker.comment?.trim() || blocker.description,
+            fromStatus: previousStatus,
+            toStatus: 'blocked',
+            mentions: blocker.mentions,
+        });
 
-        // Propagate blocker to parent
         this.propagateBlockerToParent(board, task.parentTaskId);
 
         const taskIndex = board.tasks.findIndex(t => t.id === taskId);
@@ -565,7 +985,8 @@ export class TaskOrchestrator {
         taskId: string,
         blockerId: string,
         sessionId: string,
-        resolution: string
+        resolution: string,
+        comment?: Omit<TaskCommentInput, 'sessionId'>
     ): Promise<KanbanTask> {
         const board = await this.getBoard(userId, teamId);
         if (!board) throw new Error('Team not initialized. Please create/open this team in Kanban dashboard first. See DOC/TEAM_CREATION_WORKFLOW.md for details.');
@@ -576,18 +997,35 @@ export class TaskOrchestrator {
         const blocker = task.blockers?.find(b => b.id === blockerId);
         if (!blocker) throw new Error('Blocker not found');
 
+        const actor = this.buildTaskActor({
+            sessionId,
+            role: comment?.role,
+            displayName: comment?.displayName,
+            kind: comment?.role === 'user' ? 'human' : undefined,
+        });
+        const unresolvedBlockers = task.blockers?.filter(b => !b.resolvedAt) || [];
+        if (unresolvedBlockers.length <= 1) {
+            this.assertHumanStatusLockAllowsMutation(task, actor);
+        }
+
         blocker.resolvedAt = Date.now();
         blocker.resolvedBy = sessionId;
         blocker.resolution = resolution;
 
-        // Check if all blockers resolved
-        const unresolvedBlockers = task.blockers?.filter(b => !b.resolvedAt) || [];
-        if (unresolvedBlockers.length === 0) {
+        const remainingBlockers = task.blockers?.filter(b => !b.resolvedAt) || [];
+        if (remainingBlockers.length === 0) {
             task.status = 'in-progress';
         }
         task.updatedAt = Date.now();
+        this.appendTaskComment(task, {
+            sessionId,
+            role: comment?.role,
+            displayName: comment?.displayName,
+            type: 'decision',
+            content: comment?.content?.trim() || resolution,
+            mentions: comment?.mentions,
+        });
 
-        // Update parent's hasBlockedChild
         this.updateParentBlockedStatus(board, task.parentTaskId);
 
         const taskIndex = board.tasks.findIndex(t => t.id === taskId);

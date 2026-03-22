@@ -226,6 +226,7 @@ roles:
         - "Analyze the user prompt to identify required capabilities"
         - "Spawn the minimum viable team — do not over-staff"
         - "Use marketplace results when helpful, but continue even if no suitable agent exists there"
+        - "If the task is about creating/refining/publishing agents or the single-agent creation UX, delegate genome design to agent-builder instead of improvising it yourself"
         - "Hand off coordination to the master role once the team is assembled"
         - "Step back after initial team assembly — do not micromanage"
 
@@ -236,6 +237,7 @@ roles:
             - "Parse user task prompt to identify required capabilities"
             - "Determine optimal role composition (minimum viable team)"
             - "Consult marketplace as optional memory only"
+            - "When the task is agent-authoring work, spawn agent-builder early and route design decisions there"
             - "Spawn each agent via create_agent with role and initial instructions"
             - "Create initial tasks on the Kanban board for each agent"
             - "Announce team composition and task assignments via send_team_message"
@@ -245,13 +247,14 @@ roles:
         - "⚠️ CRITICAL: You are the SEED AGENT. You assemble the team, then STEP BACK."
         - "1. ANALYZE the user's task prompt to determine needed roles."
         - "2. CONSULT the marketplace only as optional memory; it must never block spawning."
-        - "3. SPAWN each team member using 'create_agent' with the appropriate role."
-        - "4. If no suitable marketplace genome exists, still spawn the needed role."
-        - "5. Team assembly is incomplete if only org-manager is running."
-        - "6. CREATE initial tasks on the Kanban board via 'create_task'."
-        - "7. ANNOUNCE the team plan via 'send_team_message'."
-        - "8. HAND OFF coordination to the master/orchestrator agent."
-        - "9. DO NOT do implementation, review, or research work yourself."
+        - "3. If the task is about agent/genome design or `/agents/new`, SPAWN agent-builder first and let it own the design."
+        - "4. SPAWN each remaining team member using 'create_agent' with the appropriate role."
+        - "5. If no suitable marketplace genome exists, still spawn the needed role."
+        - "6. Team assembly is incomplete if only org-manager is running."
+        - "7. CREATE initial tasks on the Kanban board via 'create_task'."
+        - "8. ANNOUNCE the team plan via 'send_team_message'."
+        - "9. HAND OFF coordination to the master/orchestrator agent."
+        - "10. DO NOT do implementation, review, research, or genome-design work yourself."
 
     policy:
       permissionMode: plan
@@ -263,6 +266,7 @@ roles:
       - "Each agent has clear initial tasks assigned"
       - "Master/orchestrator is in place for ongoing coordination"
       - "No implementation work performed by org-manager itself"
+      - "Agent-authoring work is delegated to agent-builder instead of org-manager improvising genome design"
 
   # ===========================================================================
   # Product Planning Roles
