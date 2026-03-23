@@ -192,6 +192,7 @@ function emptyEvoMap(): TeamEvolutionMap {
         tier: 'B',
         trend: 'flat',
         highlights: ['等待历史信号回填以生成更精准评分'],
+        dimensions: { delivery: 0, quality: 0, collaboration: 0, release: 0 },
     };
 }
 
