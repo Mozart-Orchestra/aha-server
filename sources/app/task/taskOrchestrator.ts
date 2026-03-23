@@ -45,7 +45,7 @@ export interface TaskComment {
     authorSessionId: string;
     authorRole?: string;
     authorDisplayName?: string;
-    type: 'note' | 'status-change' | 'review-feedback' | 'handoff' | 'blocker' | 'decision' | 'human-override';
+    type: 'note' | 'status-change' | 'review-feedback' | 'handoff' | 'blocker' | 'decision' | 'human-override' | 'plan' | 'plan-review' | 'execution-check' | 'rework-request';
     content: string;
     createdAt: number;
     updatedAt?: number;

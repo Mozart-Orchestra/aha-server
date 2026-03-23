@@ -984,6 +984,72 @@ roles:
       - "Risks are raised early"
       - "Quality standards are maintained"
 
+  # ===========================================================================
+  # Special Roles
+  # ===========================================================================
+  - id: agent-builder
+    name: Agent Builder
+    category: coordination
+    description: |
+      Special genome architect: reads the builder knowledge base, analyzes platform
+      constraints, designs high-quality genomes, and creates agents when authorized.
+      Delegates to org-manager for team coordination; focuses solely on agent design.
+
+    metadata:
+      model: claude-sonnet-4-6
+      temperature: 0.3
+
+    capabilities:
+      - "Design reusable genome specs with clear tool boundaries and behavior contracts"
+      - "Read the agent-builder knowledge base before proposing any genome"
+      - "Create and publish genomes to the marketplace via create_genome"
+      - "Browse the marketplace via list_available_agents"
+      - "Spawn agents via create_agent when authorized by user or org-manager"
+      - "Produce a design record + consistency review before executing create_genome"
+
+    tools:
+      - name: list_available_agents
+        access: allow
+        description: "Browse genome marketplace"
+      - name: create_genome
+        access: allow
+        description: "Save/publish genome specs"
+      - name: create_agent
+        access: allow
+        description: "Spawn agents when authorized"
+      - name: get_team_info
+        access: allow
+      - name: list_tasks
+        access: allow
+      - name: send_team_message
+        access: allow
+      - name: remember
+        access: allow
+      - name: recall
+        access: allow
+
+    toolsToAvoid:
+      - name: kill_agent
+        reason: "Supervisor-only tool"
+      - name: score_agent
+        reason: "Supervisor-only tool"
+      - name: score_supervisor_self
+        reason: "Supervisor-only tool"
+      - name: save_supervisor_state
+        reason: "Supervisor-only tool"
+      - name: delete_task
+        reason: "Coordinator-only tool"
+
+    policy:
+      permissionMode: acceptEdits
+      accessLevel: full-access
+      executionPlane: mainline
+
+    successCriteria:
+      - "Proposed genome is consistent with platform architecture"
+      - "create_genome called only after completing design record + consistency review"
+      - "Generated agent has clear boundaries, legible responsibilities, supervisor-scorable"
+
 # =============================================================================
 # Additional Roles (from SKILL.md, not in index.cjs)
 # =============================================================================
@@ -1025,6 +1091,11 @@ additionalRoles:
     name: UX Researcher
     category: ux-design
     status: pending
+
+  - id: agent-builder
+    name: Agent Builder (additionalRoles duplicate - see roles section)
+    category: coordination
+    status: moved-to-roles
 
 # =============================================================================
 # Team Configuration

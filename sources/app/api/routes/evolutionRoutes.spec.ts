@@ -436,6 +436,68 @@ describe('evolutionRoutes', () => {
         await app.close();
     });
 
+    it('proxies genome feedback updates to genome-hub', async () => {
+        vi.mocked(axios.patch).mockResolvedValue({
+            status: 200,
+            data: {
+                genome: {
+                    id: 'hub-genome-1',
+                    feedbackData: '{"avgScore":91}',
+                },
+            },
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'PATCH',
+            url: '/v1/genomes/%40official/implementer/feedback',
+            payload: {
+                evaluationCount: 3,
+                avgScore: 91,
+                sessionScore: {
+                    taskCompletion: 90,
+                    codeQuality: 92,
+                    collaboration: 91,
+                    overall: 91,
+                },
+                dimensions: {
+                    delivery: 90,
+                    integrity: 91,
+                    efficiency: 89,
+                    collaboration: 92,
+                    reliability: 91,
+                },
+                distribution: {
+                    excellent: 2,
+                    good: 1,
+                    fair: 0,
+                    poor: 0,
+                },
+                latestAction: 'keep',
+                suggestions: ['Keeps work well-scoped.'],
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(axios.patch).toHaveBeenCalledWith(
+            expect.stringContaining('/genomes/%40official/implementer/feedback'),
+            expect.objectContaining({
+                evaluationCount: 3,
+                avgScore: 91,
+                latestAction: 'keep',
+            }),
+            expect.any(Object),
+        );
+        expect(response.json()).toEqual({
+            genome: {
+                id: 'hub-genome-1',
+                feedbackData: '{"avgScore":91}',
+            },
+        });
+
+        await app.close();
+    });
+
     it('marks the local genome public after successful publish and stores hubGenomeId', async () => {
         const scorecard = JSON.stringify({
             evaluationCount: 4,

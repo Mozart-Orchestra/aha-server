@@ -48,6 +48,32 @@ const GenomePatchSchema = z.object({
     message: 'At least one field must be provided',
 });
 
+const GenomeFeedbackPayloadSchema = z.object({
+    evaluationCount: z.number().int().min(1),
+    avgScore: z.number().min(0).max(100),
+    sessionScore: z.object({
+        taskCompletion: z.number().min(0).max(100),
+        codeQuality: z.number().min(0).max(100),
+        collaboration: z.number().min(0).max(100),
+        overall: z.number().min(0).max(100),
+    }).optional(),
+    dimensions: z.object({
+        delivery: z.number().min(0).max(100),
+        integrity: z.number().min(0).max(100),
+        efficiency: z.number().min(0).max(100),
+        collaboration: z.number().min(0).max(100),
+        reliability: z.number().min(0).max(100),
+    }),
+    distribution: z.object({
+        excellent: z.number().int().min(0),
+        good: z.number().int().min(0),
+        fair: z.number().int().min(0),
+        poor: z.number().int().min(0),
+    }).optional(),
+    latestAction: z.enum(['keep', 'keep_with_guardrails', 'mutate', 'discard']),
+    suggestions: z.array(z.string().max(200)).max(10),
+});
+
 function buildGenomeVisibilityWhere(userId: string) {
     return {
         deletedAt: null,
@@ -784,6 +810,49 @@ export function evolutionRoutes(app: Fastify) {
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome version error: ${error}`);
             return reply.code(500).send({ error: error.message });
+        }
+    });
+
+    // =========================================================================
+    // PATCH /v1/genomes/:namespace/:name/feedback
+    // Proxy supervisor aggregate feedback writes to genome-hub so clients do not
+    // need direct access to the marketplace service.
+    // =========================================================================
+    app.patch('/v1/genomes/:namespace/:name/feedback', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                namespace: z.string(),
+                name: z.string(),
+            }),
+            body: GenomeFeedbackPayloadSchema,
+        },
+    }, async (request, reply) => {
+        const { namespace, name } = request.params as { namespace: string; name: string };
+        const payload = request.body as z.infer<typeof GenomeFeedbackPayloadSchema>;
+
+        try {
+            const hubUrl = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
+            const hubPublishKey = process.env.GENOME_HUB_PUBLISH_KEY;
+            const { default: axios } = await import('axios');
+
+            const upstream = await axios.patch(
+                `${hubUrl}/genomes/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/feedback`,
+                payload,
+                {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(upstream.data);
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `genome feedback proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy genome feedback' });
         }
     });
 

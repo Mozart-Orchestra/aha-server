@@ -40,7 +40,7 @@ const TaskCommentSchema = z.object({
     sessionId: z.string(),
     role: z.string().optional(),
     displayName: z.string().optional(),
-    type: z.enum(['note', 'status-change', 'review-feedback', 'handoff', 'blocker', 'decision', 'human-override']).optional(),
+    type: z.enum(['note', 'status-change', 'review-feedback', 'handoff', 'blocker', 'decision', 'human-override', 'plan', 'plan-review', 'execution-check', 'rework-request']).optional(),
     content: z.string().min(1).max(4000),
     fromStatus: z.string().optional(),
     toStatus: z.string().optional(),
@@ -390,7 +390,7 @@ export function taskRoutes(app: Fastify) {
         const { sessionId, role, comment } = request.body as {
             sessionId: string;
             role: string;
-            comment?: { displayName?: string; content: string; mentions?: string[]; type?: 'note' | 'status-change' | 'review-feedback' | 'handoff' | 'blocker' | 'decision' | 'human-override' };
+            comment?: { displayName?: string; content: string; mentions?: string[]; type?: 'note' | 'status-change' | 'review-feedback' | 'handoff' | 'blocker' | 'decision' | 'human-override' | 'plan' | 'plan-review' | 'execution-check' | 'rework-request' };
         };
 
         try {
@@ -446,7 +446,7 @@ export function taskRoutes(app: Fastify) {
         const { teamId, taskId } = request.params as { teamId: string; taskId: string };
         const { sessionId, comment } = request.body as {
             sessionId: string;
-            comment?: { role?: string; displayName?: string; content: string; mentions?: string[]; type?: 'note' | 'status-change' | 'review-feedback' | 'handoff' | 'blocker' | 'decision' | 'human-override' };
+            comment?: { role?: string; displayName?: string; content: string; mentions?: string[]; type?: 'note' | 'status-change' | 'review-feedback' | 'handoff' | 'blocker' | 'decision' | 'human-override' | 'plan' | 'plan-review' | 'execution-check' | 'rework-request' };
         };
 
         try {
@@ -571,7 +571,7 @@ export function taskRoutes(app: Fastify) {
         const { sessionId, resolution, comment } = request.body as {
             sessionId: string;
             resolution: string;
-            comment?: { role?: string; displayName?: string; type?: 'note' | 'status-change' | 'review-feedback' | 'handoff' | 'blocker' | 'decision' | 'human-override'; content: string; fromStatus?: string; toStatus?: string; mentions?: string[] };
+            comment?: { role?: string; displayName?: string; type?: 'note' | 'status-change' | 'review-feedback' | 'handoff' | 'blocker' | 'decision' | 'human-override' | 'plan' | 'plan-review' | 'execution-check' | 'rework-request'; content: string; fromStatus?: string; toStatus?: string; mentions?: string[] };
         };
 
         try {

@@ -5,7 +5,10 @@
  * supervisor, help-agent, org-manager get a genome record in the DB
  * so they are usable out-of-the-box without a CLI release.
  *
- * Strategy: upsert by namespace+name+version=1; never overwrites higher versions.
+ * Strategy:
+ * - Create v1 if missing
+ * - Update existing v1 in place so official system-genome fixes propagate
+ * - Never overwrite higher versions
  */
 import { db } from '@/storage/db';
 import { log } from '@/utils/log';
@@ -33,11 +36,13 @@ const SYSTEM_GENOMES: SystemGenomeSeed[] = [
             allowedTools: [
                 'read_team_log', 'read_cc_log', 'read_runtime_log', 'list_team_cc_logs', 'list_team_runtime_logs',
                 'list_team_agents', 'score_agent', 'score_supervisor_self', 'update_genome_feedback', 'update_team_feedback',
-                'compact_agent', 'kill_agent', 'request_help',
+                'compact_agent', 'kill_agent', 'request_help', 'create_agent',
                 'save_supervisor_state', 'send_team_message',
                 'git_diff_summary', 'get_team_pulse',
             ],
-            capabilities: ['monitor_agents', 'score_agents', 'detect_stuck', 'trigger_help'],
+            authorities: ['agent.spawn'],
+            behavior: { onIdle: 'wait', onBlocked: 'escalate', canSpawnAgents: true, requireExplicitAssignment: false },
+            capabilities: ['monitor_agents', 'score_agents', 'detect_stuck', 'trigger_help', 'spawn_recovery_agents'],
             responsibilities: [
                 'Observe team agent activity via logs',
                 'Score agents on delivery, integrity, efficiency',
@@ -45,6 +50,7 @@ const SYSTEM_GENOMES: SystemGenomeSeed[] = [
                 'Upload aggregate genome feedback back to the marketplace',
                 'Upload aggregate team feedback back to the server scorecard',
                 'Trigger help-agent when needed via pendingAction',
+                '在恢复/换人/治理场景下创建 replacement 或 recovery agents',
             ],
             protocol: [
                 'Phase 1: read_team_log with cursor, check hasNewContent',
@@ -58,6 +64,7 @@ const SYSTEM_GENOMES: SystemGenomeSeed[] = [
                 '  NEVER call read_cc_log directly with aha sessionId — it will fail with "No Claude log found"',
                 'Cross-validate: compare agent team message claims vs actual CC log evidence',
                 'Phase 2b (code contributors): Call git_diff_summary for repos modified by agents to see actual code changes (insertions/deletions/files touched). CC logs alone miss the value of code-level work.',
+                '只在 team continuity / replacement / recovery 场景下使用 create_agent，不接管普通交付编排',
                 'After scoring, call update_genome_feedback for each role/genome that now has enough evaluations',
                 'After scoring the whole team, call update_team_feedback with the team-level verdict',
                 'Always call save_supervisor_state before exiting',
@@ -359,6 +366,18 @@ export async function seedSystemGenomes(): Promise<void> {
                     },
                 });
                 log({ module: 'startup' }, `Created @official/${seed.name}:v1`);
+            } else if (existing.version === 1) {
+                await db.genome.update({
+                    where: { id: existing.id },
+                    data: {
+                        description: seed.description,
+                        category: seed.category,
+                        tags: JSON.stringify(seed.tags),
+                        spec: JSON.stringify(seed.spec),
+                        isPublic: true,
+                    },
+                });
+                log({ module: 'startup' }, `Updated @official/${seed.name}:v1`);
             } else {
                 log({ module: 'startup' }, `@official/${seed.name}:v${existing.version} already exists, skipping`);
             }
