@@ -11,6 +11,7 @@
 import { Fastify } from "../types";
 import { log, logger } from "@/utils/log";
 import { RolePermissionService } from "@/services/rolePermissionService";
+import { mapPermissionRouteToOperation, resolvePermissionUserInfo } from "@/utils/permissionRequest";
 
 /**
  * Permission interceptor options
@@ -86,21 +87,17 @@ export async function enablePermissionInterceptor(
     }
 
     try {
-      // Extract user role from request
-      // First check if authentication set userRole
-      let userRole = (request as any).userRole;
+      const resolvedUser = await resolvePermissionUserInfo(request.headers as Record<string, unknown>);
+      const userRole = (request as any).userRole || resolvedUser.role;
 
-      // If not set, try to extract from headers
-      if (!userRole) {
-        const roleHeader = request.headers['x-role'] as string;
-        userRole = roleHeader || 'builder'; // Default to builder for compatibility
-      }
-
-      // Store role in request for later use
+      // Store resolved identity on request for later use/audit
+      (request as any).userId = (request as any).userId || resolvedUser.userId;
       (request as any).userRole = userRole;
+      (request as any).teamId = (request as any).teamId || resolvedUser.teamId;
+      (request as any).sessionId = (request as any).sessionId || resolvedUser.sessionId;
 
       // Map route to operation name
-      const operationName = mapRouteToOperation(request.url, request.method);
+      const operationName = mapPermissionRouteToOperation(request.url, request.method);
 
       // Check permission
       const result = rolePermissionService.isOperationAllowed(userRole, {
@@ -198,39 +195,6 @@ function shouldBypass(url: string, bypassPaths: string[]): boolean {
  * - PUT /api/tasks/123 -> update_task
  * - DELETE /api/tasks/123 -> delete_task
  */
-function mapRouteToOperation(url: string, method: string): string {
-  // Remove query string
-  const pathWithoutQuery = url.split('?')[0];
-
-  // Remove /api prefix if present
-  const route = pathWithoutQuery.replace(/^\/api\//, '');
-
-  // Convert to operation name
-  const parts = route.split('/').filter(Boolean);
-  const resource = parts[0] || 'unknown';
-
-  if (parts.length === 1) {
-    // Collection operations
-    if (method === 'GET') {
-      return `list_${resource}`;
-    } else if (method === 'POST') {
-      return `create_${resource}`;
-    }
-  } else if (parts.length >= 2) {
-    // Single resource operations
-    if (method === 'GET') {
-      return `get_${resource}`;
-    } else if (method === 'PUT' || method === 'PATCH') {
-      return `update_${resource}`;
-    } else if (method === 'DELETE') {
-      return `delete_${resource}`;
-    }
-  }
-
-  // Default: method_resource
-  return `${method.toLowerCase()}_${resource}`;
-}
-
 /**
  * Export role permission service getter for manual permission checks
  */

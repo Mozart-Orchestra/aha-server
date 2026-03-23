@@ -8,6 +8,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { RolePermissionService } from './rolePermissionService';
 import { PermissionInterceptor } from '../middleware/permissionInterceptor';
+import { auth } from '@/app/auth/auth';
 
 // Mock logger
 vi.mock('../utils/log', () => ({
@@ -19,10 +20,17 @@ vi.mock('../utils/log', () => ({
   }
 }));
 
+vi.mock('@/app/auth/auth', () => ({
+  auth: {
+    verifyToken: vi.fn(),
+  }
+}));
+
 describe('RolePermissionService', () => {
   let service: RolePermissionService;
 
   beforeEach(() => {
+    vi.mocked(auth.verifyToken).mockResolvedValue(null);
     service = new RolePermissionService();
   });
 
@@ -174,6 +182,7 @@ describe('PermissionInterceptor', () => {
   let mockNext: any;
 
   beforeEach(() => {
+    vi.mocked(auth.verifyToken).mockResolvedValue(null);
     roleService = new RolePermissionService();
     interceptor = new PermissionInterceptor(roleService, {
       enabled: true,
@@ -249,7 +258,7 @@ describe('PermissionInterceptor', () => {
     it('should extract user info from request', () => {
       const userInfo = (interceptor as any).extractUserInfo(mockRequest);
 
-      expect(userInfo).toEqual({
+      return expect(userInfo).resolves.toEqual({
         userId: 'user-123',
         teamId: 'team-456',
         role: 'builder',
@@ -266,8 +275,38 @@ describe('PermissionInterceptor', () => {
 
       const userInfo = (interceptor as any).extractUserInfo(requestWithoutHeaders);
 
-      expect(userInfo.userId).toBeDefined();
-      expect(userInfo.role).toBeDefined();
+      return expect(userInfo).resolves.toMatchObject({
+        userId: expect.any(String),
+        role: expect.any(String),
+      });
+    });
+
+    it('should prefer verified auth token identity when available', async () => {
+      vi.mocked(auth.verifyToken).mockResolvedValue({
+        userId: 'token-user',
+        extras: {
+          role: 'master',
+          teamId: 'team-from-token',
+          sessionId: 'session-from-token',
+        }
+      });
+
+      const userInfo = await (interceptor as any).extractUserInfo({
+        path: '/v1/teams/team-1/tasks',
+        method: 'GET',
+        headers: {
+          authorization: 'Bearer header.payload.signature',
+          'x-role': 'builder',
+          'x-user-id': 'header-user',
+        }
+      });
+
+      expect(userInfo).toEqual({
+        userId: 'token-user',
+        role: 'master',
+        teamId: 'team-from-token',
+        sessionId: 'session-from-token',
+      });
     });
   });
 
@@ -294,6 +333,18 @@ describe('PermissionInterceptor', () => {
       const operation = (interceptor as any).mapRouteToOperation('/api/tasks/123', 'DELETE');
 
       expect(operation).toBe('delete_task');
+    });
+
+    it('should map POST /v1/teams/:teamId/tasks/:taskId/start to start_task', () => {
+      const operation = (interceptor as any).mapRouteToOperation('/v1/teams/team-1/tasks/task-1/start', 'POST');
+
+      expect(operation).toBe('start_task');
+    });
+
+    it('should map GET /v1/teams/:teamId/tasks to list_tasks', () => {
+      const operation = (interceptor as any).mapRouteToOperation('/v1/teams/team-1/tasks', 'GET');
+
+      expect(operation).toBe('list_tasks');
     });
   });
 });

@@ -4,6 +4,58 @@ import { db } from "@/storage/db";
 import { log } from "@/utils/log";
 import crypto from "crypto";
 
+function buildListingRef(namespace: string, name: string, version: number): string {
+    return `${namespace}/${name}:${version}`;
+}
+
+function parseListingVersion(ref: string, refPrefix: string): number | null {
+    if (!ref.startsWith(refPrefix)) {
+        return null;
+    }
+
+    const suffix = ref.slice(refPrefix.length);
+    const version = Number.parseInt(suffix, 10);
+    if (!Number.isSafeInteger(version) || version <= 0) {
+        return null;
+    }
+
+    return version;
+}
+
+async function getNextListingVersion(namespace: string, name: string): Promise<number> {
+    const refPrefix = `${namespace}/${name}:`;
+    const existingListings = await db.marketListing.findMany({
+        where: {
+            ref: {
+                startsWith: refPrefix
+            }
+        },
+        select: {
+            ref: true
+        }
+    });
+
+    const maxVersion = existingListings.reduce((currentMax, listing) => {
+        const parsedVersion = parseListingVersion(listing.ref, refPrefix);
+        return parsedVersion ? Math.max(currentMax, parsedVersion) : currentMax;
+    }, 0);
+
+    return maxVersion + 1;
+}
+
+function isUniqueRefConflict(error: unknown): boolean {
+    const prismaError = error as { code?: string; meta?: { target?: unknown } } | undefined;
+    if (prismaError?.code !== 'P2002') {
+        return false;
+    }
+
+    const targets = Array.isArray(prismaError.meta?.target)
+        ? prismaError.meta?.target
+        : [prismaError.meta?.target];
+
+    return targets.some((target) => String(target).includes('ref'));
+}
+
 // Schema definitions
 const VisibilitySchema = z.object({
     isPublic: z.boolean(),
@@ -97,58 +149,56 @@ export function marketListingRoutes(app: Fastify) {
         const body = request.body as z.infer<typeof CreateListingSchema>;
 
         try {
-            // Generate version number for this namespace+name
-            const existingVersions = await db.marketListing.findMany({
-                where: {
-                    market: {
-                        path: ['namespace'],
-                        equals: body.market.namespace
-                    },
-                    // @ts-ignore - JSON path query
-                    display: {
-                        path: ['name'],
-                        equals: body.spec.name
-                    }
-                },
-                orderBy: { createdAt: 'desc' },
-                take: 1
-            });
-
-            const version = existingVersions.length > 0 ? 1 : 1; // TODO: implement version increment
-
             // Generate digest from genome spec
             const digest = `sha256:${crypto
                 .createHash('sha256')
                 .update(JSON.stringify(body.spec))
                 .digest('hex')}`;
+            const createListingData = {
+                digest,
+                publisherId: userId!,
+                genome: body.spec as any,
+                visibility: body.visibility as any,
+                display: body.display as any,
+                market: {
+                    ...body.market,
+                    lifecycle: body.market.lifecycle || 'active'
+                } as any,
+                compatibility: body.compatibility as any || null,
+                pricing: body.pricing as any || null,
+                stats: {
+                    downloads: 0,
+                    activeInstances: 0,
+                    starRating: 0,
+                    reviewCount: 0
+                },
+                publishedAt: new Date()
+            };
 
-            // Create ref: @namespace/name:version
-            const ref = `${body.market.namespace}/${body.spec.name}:${version}`;
+            let listing;
+            for (let attempt = 0; attempt < 3; attempt++) {
+                const version = await getNextListingVersion(body.market.namespace, body.spec.name);
+                const ref = buildListingRef(body.market.namespace, body.spec.name, version);
 
-            // Create listing
-            const listing = await db.marketListing.create({
-                data: {
-                    ref,
-                    digest,
-                    publisherId: userId!,
-                    genome: body.spec as any,
-                    visibility: body.visibility as any,
-                    display: body.display as any,
-                    market: {
-                        ...body.market,
-                        lifecycle: body.market.lifecycle || 'active'
-                    } as any,
-                    compatibility: body.compatibility as any || null,
-                    pricing: body.pricing as any || null,
-                    stats: {
-                        downloads: 0,
-                        activeInstances: 0,
-                        starRating: 0,
-                        reviewCount: 0
-                    },
-                    publishedAt: new Date()
+                try {
+                    listing = await db.marketListing.create({
+                        data: {
+                            ...createListingData,
+                            ref,
+                        }
+                    });
+                    break;
+                } catch (error) {
+                    if (isUniqueRefConflict(error)) {
+                        continue;
+                    }
+                    throw error;
                 }
-            });
+            }
+
+            if (!listing) {
+                throw new Error(`Failed to allocate a unique listing version for ${body.market.namespace}/${body.spec.name}`);
+            }
 
             return reply.code(201).send({
                 listingId: listing.id,

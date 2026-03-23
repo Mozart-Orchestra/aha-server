@@ -8,9 +8,9 @@
  * @since 2026-01-18
  */
 
-import { Request, Response, NextFunction } from 'express';
 import { RolePermissionService, UserInfo, Operation } from '../services/rolePermissionService';
 import { logger } from '@/utils/log';
+import { decodePermissionToken, mapPermissionRouteToOperation, resolvePermissionUserInfo } from '@/utils/permissionRequest';
 
 /**
  * Permission interceptor options
@@ -22,10 +22,21 @@ export interface PermissionInterceptorOptions {
   bypassPaths: string[]; // Paths to bypass permission check
 }
 
+type PermissionNextFunction = () => void;
+
+interface PermissionResponseLike {
+  status(code: number): PermissionResponseLike;
+  json(payload: unknown): PermissionResponseLike;
+}
+
 /**
- * Express request with user info
+ * Express-like request with user info
  */
-interface AuthenticatedRequest extends Request {
+interface AuthenticatedRequest {
+  path: string;
+  method: string;
+  headers: Record<string, unknown>;
+  body?: unknown;
   user?: UserInfo;
 }
 
@@ -42,7 +53,7 @@ export class PermissionInterceptor {
       bypassPaths: ['/health', '/ping', '/metrics']
     }
   ) {
-    logger.info('[PermissionInterceptor] Initialized with options', this.options);
+    logger.info({ options: this.options }, '[PermissionInterceptor] Initialized with options');
   }
 
   /**
@@ -50,8 +61,8 @@ export class PermissionInterceptor {
    */
   async intercept(
     req: AuthenticatedRequest,
-    res: Response,
-    next: NextFunction
+    res: PermissionResponseLike,
+    next: PermissionNextFunction
   ): Promise<void> {
     // Skip if disabled
     if (!this.options.enabled) {
@@ -65,7 +76,7 @@ export class PermissionInterceptor {
 
     try {
       // Extract user info from request
-      const userInfo = this.extractUserInfo(req);
+      const userInfo = await this.extractUserInfo(req);
 
       // Attach user info to request
       req.user = userInfo;
@@ -86,20 +97,20 @@ export class PermissionInterceptor {
 
       if (result.allowed) {
         // Allowed - continue to route handler
-        logger.debug('[PermissionInterceptor] Access granted', {
+        logger.debug({
           userId: userInfo.userId,
           role: userInfo.role,
           operation: operation.name
-        });
+        }, '[PermissionInterceptor] Access granted');
         return next();
       } else {
         // Denied - return 403
-        logger.warn('[PermissionInterceptor] Access denied', {
+        logger.warn({
           userId: userInfo.userId,
           role: userInfo.role,
           operation: operation.name,
           reason: result.reason
-        });
+        }, '[PermissionInterceptor] Access denied');
 
         res.status(403).json({
           error: 'Forbidden',
@@ -111,7 +122,7 @@ export class PermissionInterceptor {
         return;
       }
     } catch (error) {
-      logger.error('[PermissionInterceptor] Error checking permission', error);
+      logger.error({ error }, '[PermissionInterceptor] Error checking permission');
 
       // If we can't verify permissions, deny access for safety
       res.status(500).json({
@@ -138,45 +149,14 @@ export class PermissionInterceptor {
   /**
    * Extract user info from request
    */
-  private extractUserInfo(req: AuthenticatedRequest): UserInfo {
-    // TODO: Extract from auth token or session
-    // For now, use mock data or extract from headers
-
-    const authHeader = req.headers.authorization;
-    const teamId = req.headers['x-team-id'] as string;
-    const role = req.headers['x-role'] as string;
-    const sessionId = req.headers['x-session-id'] as string;
-
-    if (authHeader) {
-      // Parse JWT token
-      try {
-        const token = authHeader.replace('Bearer ', '');
-        const decoded = this.decodeToken(token);
-
-        return {
-          userId: decoded.userId,
-          teamId: decoded.teamId || teamId || 'default-team',
-          role: decoded.role || role || 'builder',
-          sessionId: decoded.sessionId || sessionId || 'default-session'
-        };
-      } catch (error) {
-        logger.warn('[PermissionInterceptor] Failed to decode token', error);
-      }
-    }
-
-    // Fallback to headers or defaults
-    return {
-      userId: req.headers['x-user-id'] as string || 'anonymous',
-      teamId: teamId || 'default-team',
-      role: role || 'builder',
-      sessionId: sessionId || 'default-session'
-    };
+  private async extractUserInfo(req: AuthenticatedRequest): Promise<UserInfo> {
+    return resolvePermissionUserInfo(req.headers as Record<string, unknown>);
   }
 
   /**
    * Extract operation from request
    */
-  private extractOperation(req: Request): Operation {
+  private extractOperation(req: AuthenticatedRequest): Operation {
     const path = req.path;
     const method = req.method;
 
@@ -194,80 +174,14 @@ export class PermissionInterceptor {
    * Map route to operation name
    */
   private mapRouteToOperation(path: string, method: string): string {
-    // Remove /api prefix if present
-    const route = path.replace(/^\/api\//, '');
-
-    // Convert to operation name
-    // Examples:
-    // GET /api/tasks -> list_tasks
-    // POST /api/tasks -> create_task
-    // PUT /api/tasks/123 -> update_task
-    // DELETE /api/tasks/123 -> delete_task
-
-    const parts = route.split('/').filter(Boolean);
-    const resource = parts[0];
-
-    if (parts.length === 1) {
-      // Collection operations - use singular form for create too
-      const singularResource = this.singularize(resource);
-      if (method === 'GET') {
-        return `list_${resource}`;
-      } else if (method === 'POST') {
-        return `create_${singularResource}`;
-      }
-    } else if (parts.length >= 2) {
-      // Single resource operations - use singular form
-      const singularResource = this.singularize(resource);
-      if (method === 'GET') {
-        return `get_${singularResource}`;
-      } else if (method === 'PUT' || method === 'PATCH') {
-        return `update_${singularResource}`;
-      } else if (method === 'DELETE') {
-        return `delete_${singularResource}`;
-      }
-    }
-
-    // Default: method_resource
-    return `${method.toLowerCase()}_${resource}`;
-  }
-
-  /**
-   * Simple singularizer for common English plurals
-   */
-  private singularize(word: string): string {
-    // Common patterns
-    if (word.endsWith('ies')) {
-      return word.slice(0, -3) + 'y'; // activities -> activity
-    } else if (word.endsWith('ses') || word.endsWith('xes')) {
-      return word.slice(0, -2); // boxes -> box
-    } else if (word.endsWith('s')) {
-      return word.slice(0, -1); // tasks -> task
-    }
-    return word;
+    return mapPermissionRouteToOperation(path, method);
   }
 
   /**
    * Decode JWT token
-   * TODO: Implement proper JWT decoding
    */
   private decodeToken(token: string): any {
-    // For now, return mock data
-    // In production, use jwt.decode() or similar
-
-    try {
-      // Split token into parts (header.payload.signature)
-      const parts = token.split('.');
-      if (parts.length !== 3) {
-        throw new Error('Invalid token format');
-      }
-
-      // Decode payload (base64url)
-      const payload = parts[1];
-      const decoded = Buffer.from(payload, 'base64url').toString('utf8');
-      return JSON.parse(decoded);
-    } catch (error) {
-      throw new Error(`[PermissionInterceptor] Could not decode token: ${(error as Error).message}`);
-    }
+    return decodePermissionToken(token);
   }
 
   /**
@@ -290,12 +204,12 @@ export class PermissionInterceptor {
     };
 
     if (result.allowed) {
-      logger.debug('[PermissionInterceptor] Permission check passed', logData);
+      logger.debug(logData, '[PermissionInterceptor] Permission check passed');
     } else {
-      logger.warn('[PermissionInterceptor] Permission check failed', {
+      logger.warn({
         ...logData,
         reason: result.reason
-      });
+      }, '[PermissionInterceptor] Permission check failed');
     }
   }
 
