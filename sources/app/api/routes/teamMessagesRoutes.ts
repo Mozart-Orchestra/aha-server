@@ -11,6 +11,7 @@ import { encryptString, decryptString } from "@/modules/encrypt";
 import { teamMessagesCounter, teamTaskOperationsCounter } from "@/app/monitoring/metrics2";
 import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
 import { observeSessionActivity } from "@/app/presence/observeSessionActivity";
+import { pushToWeixinIfBound } from "@/app/channels/weixinOutbound";
 
 /**
  * Team Messages Routes
@@ -347,6 +348,9 @@ export function teamMessagesRoutes(app: Fastify) {
                     recipientFilter: { type: 'specific-sessions', sessionIds }
                 });
             }
+
+            // Push to WeChat if user has an active bridge (fire-and-forget)
+            pushToWeixinIfBound(userId, teamId, message).catch(() => { /* non-fatal */ });
 
             log({ module: 'team-messages', teamId, messageId: message.id }, 'Message broadcasted');
 

@@ -12,6 +12,8 @@ import { initEncrypt } from "./modules/encrypt";
 import { initGithub } from "./modules/github";
 import { loadFiles } from "./storage/files";
 import { seedSystemGenomes } from "./app/startup/seedSystemGenomes";
+import { startAllBridges } from "@/app/channels/weixin/weixinBridge";
+import { handleInboundWeixinMessage } from "@/app/channels/weixinInbound";
 
 async function main() {
 
@@ -42,6 +44,9 @@ async function main() {
     await startMetricsServer();
     startDatabaseMetricsUpdater();
     startTimeout();
+
+    // Start WeChat bridges for all bound users
+    startAllBridges(handleInboundWeixinMessage).catch(() => { /* non-fatal on startup */ });
 
     //
     // Ready
