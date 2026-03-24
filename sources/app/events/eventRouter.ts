@@ -181,6 +181,17 @@ export type UpdateEvent = {
     sessionId: string;
     eventType: 'session-archived' | 'session-deleted' | 'session-renamed';
     details?: any;
+} | {
+    type: 'wechat-message';
+    teamId: string;
+    wechat: {
+        fromUser: string;
+        toUser: string;
+        msgType: string;
+        content: string;
+        createTime: number;
+        msgId?: string;
+    };
 };
 
 // === EPHEMERAL EVENT TYPES (Transient) ===
