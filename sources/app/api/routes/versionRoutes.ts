@@ -14,6 +14,9 @@ export function versionRoutes(app: Fastify) {
             response: {
                 200: z.object({
                     updateUrl: z.string().nullable()
+                }),
+                500: z.object({
+                    error: z.literal('Version check failed')
                 })
             }
         }
