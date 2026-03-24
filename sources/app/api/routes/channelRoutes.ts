@@ -88,7 +88,16 @@ export function channelRoutes(app: Fastify) {
                 return { error: `iLink API error: ${res.status}` };
             }
             const data = await res.json() as any;
-            return { status: (data.status ?? 'wait') as string };
+            const status = (data.status ?? 'wait') as string;
+            return {
+                status,
+                credentials: status === 'confirmed' ? {
+                    token: data.bot_token as string,
+                    baseUrl: (data.baseurl ?? 'https://ilinkai.weixin.qq.com/') as string,
+                    weixinUserId: data.ilink_user_id as string | undefined,
+                    accountId: data.ilink_bot_id as string | undefined,
+                } : undefined,
+            };
         } catch (e: any) {
             if (e?.name === 'AbortError') return { status: 'wait' };
             reply.code(502);
