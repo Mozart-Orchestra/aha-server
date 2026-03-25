@@ -2,6 +2,7 @@ import { Fastify } from "../types";
 import { z } from "zod";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { parseGenomeSpec } from "@/shared/genomeSpec";
 import { eventRouter } from "@/app/events/eventRouter";
 import { activityCache } from "@/app/presence/sessionCache";
 import { allocateUserSeq } from "@/storage/seq";
@@ -884,7 +885,7 @@ export function evolutionRoutes(app: Fastify) {
             const hubUrl = marketplaceUrl ?? process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
 
             // 发布到 Marketplace Server
-            const spec = JSON.parse(genome.spec);
+            const spec = parseGenomeSpec(genome.spec);
             const publishNamespace = genome.namespace ?? spec.namespace ?? '@public';
             const publishBody = {
                 namespace: publishNamespace,
