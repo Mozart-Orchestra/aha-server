@@ -97,12 +97,6 @@ export function channelRoutes(app: Fastify) {
                     baseUrl: (data.baseurl ?? 'https://ilinkai.weixin.qq.com/') as string,
                     weixinUserId: data.ilink_user_id as string | undefined,
                     accountId: data.ilink_bot_id as string | undefined,
-                    credentials: {
-                        token: data.bot_token as string,
-                        baseUrl: (data.baseurl ?? 'https://ilinkai.weixin.qq.com/') as string,
-                        weixinUserId: data.ilink_user_id as string | undefined,
-                        accountId: data.ilink_bot_id as string | undefined,
-                    },
                 };
             }
 
