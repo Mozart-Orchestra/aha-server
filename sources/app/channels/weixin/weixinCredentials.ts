@@ -9,6 +9,8 @@ export interface WeixinCredentials {
     baseUrl: string;
     weixinUserId?: string;
     accountId?: string;
+    lastSenderId?: string;
+    lastContextToken?: string;
     pushPolicy: 'all' | 'important' | 'silent';
 }
 

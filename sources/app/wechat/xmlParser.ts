@@ -33,6 +33,27 @@ export interface WechatVoiceMessage {
   MsgId: string
 }
 
+export interface WechatVideoMessage {
+  ToUserName: string
+  FromUserName: string
+  CreateTime: number
+  MsgType: 'video' | 'shortvideo'
+  MediaId: string
+  ThumbMediaId: string
+  MsgId: string
+}
+
+export interface WechatLinkMessage {
+  ToUserName: string
+  FromUserName: string
+  CreateTime: number
+  MsgType: 'link'
+  Title: string
+  Description: string
+  Url: string
+  MsgId: string
+}
+
 export interface WechatEventMessage {
   ToUserName: string
   FromUserName: string
@@ -46,6 +67,8 @@ export type WechatIncomingMessage =
   | WechatTextMessage
   | WechatImageMessage
   | WechatVoiceMessage
+  | WechatVideoMessage
+  | WechatLinkMessage
   | WechatEventMessage
 
 /**
@@ -92,9 +115,14 @@ export function extractMessageText(msg: WechatIncomingMessage): string {
     case 'text':
       return msg.Content
     case 'image':
-      return '(图片消息)'
+      return `[图片] ${msg.PicUrl}`
     case 'voice':
       return msg.Recognition ?? '(语音消息)'
+    case 'video':
+    case 'shortvideo':
+      return `[视频] mediaId=${msg.MediaId}`
+    case 'link':
+      return `[链接] ${msg.Title}\n${msg.Description}\n${msg.Url}`
     case 'event':
       return `(事件: ${msg.Event})`
     default:
