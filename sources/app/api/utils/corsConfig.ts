@@ -50,8 +50,37 @@ function isProduction(): boolean {
     return process.env.NODE_ENV === 'production';
 }
 
+function shouldAllowLocalOrigins(): boolean {
+    return process.env.ALLOW_LOCALHOST_ORIGINS === 'true';
+}
+
+function getDevelopmentOriginHandler(): NonNullable<FastifyCorsOptions['origin']> {
+    return ((origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+        // Allow requests with no origin (mobile apps, curl, etc.)
+        if (!origin) {
+            callback(null, true);
+            return;
+        }
+
+        const isAllowed = ALLOWED_ORIGINS_DEVELOPMENT.some(allowed => {
+            if (typeof allowed === 'string') {
+                return origin === allowed;
+            }
+            return allowed.test(origin);
+        });
+
+        if (isAllowed) {
+            callback(null, true);
+        } else {
+            // In development, allow all but log unexpected origins
+            console.warn(`[CORS] Unexpected origin in development: ${origin}`);
+            callback(null, true);
+        }
+    }) as NonNullable<FastifyCorsOptions['origin']>;
+}
+
 export function getCorsConfig(): FastifyCorsOptions {
-    if (isProduction()) {
+    if (isProduction() && !shouldAllowLocalOrigins()) {
         return {
             origin: ALLOWED_ORIGINS_PRODUCTION,
             allowedHeaders: ALLOWED_HEADERS,
@@ -63,29 +92,7 @@ export function getCorsConfig(): FastifyCorsOptions {
 
     // Development: more permissive but still structured
     return {
-        origin: (origin, callback) => {
-            // Allow requests with no origin (mobile apps, curl, etc.)
-            if (!origin) {
-                callback(null, true);
-                return;
-            }
-
-            // Check against development allowed origins
-            const isAllowed = ALLOWED_ORIGINS_DEVELOPMENT.some(allowed => {
-                if (typeof allowed === 'string') {
-                    return origin === allowed;
-                }
-                return allowed.test(origin);
-            });
-
-            if (isAllowed) {
-                callback(null, true);
-            } else {
-                // In development, allow all but log unexpected origins
-                console.warn(`[CORS] Unexpected origin in development: ${origin}`);
-                callback(null, true);
-            }
-        },
+        origin: getDevelopmentOriginHandler(),
         allowedHeaders: [...ALLOWED_HEADERS, '*'], // More permissive in dev
         methods: ALLOWED_METHODS,
         credentials: true,
@@ -94,7 +101,7 @@ export function getCorsConfig(): FastifyCorsOptions {
 
 // Export for WebSocket configuration
 export function getSocketCorsConfig() {
-    if (isProduction()) {
+    if (isProduction() && !shouldAllowLocalOrigins()) {
         return {
             origin: ALLOWED_ORIGINS_PRODUCTION,
             methods: ['GET', 'POST', 'OPTIONS'],
@@ -104,26 +111,7 @@ export function getSocketCorsConfig() {
     }
 
     return {
-        origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-            if (!origin) {
-                callback(null, true);
-                return;
-            }
-
-            const isAllowed = ALLOWED_ORIGINS_DEVELOPMENT.some(allowed => {
-                if (typeof allowed === 'string') {
-                    return origin === allowed;
-                }
-                return allowed.test(origin);
-            });
-
-            if (isAllowed) {
-                callback(null, true);
-            } else {
-                console.warn(`[Socket CORS] Unexpected origin in development: ${origin}`);
-                callback(null, true);
-            }
-        },
+        origin: getDevelopmentOriginHandler(),
         methods: ['GET', 'POST', 'OPTIONS'],
         credentials: true,
         allowedHeaders: [...ALLOWED_HEADERS, '*'],

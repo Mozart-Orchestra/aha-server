@@ -7,11 +7,12 @@ import { allocateUserSeq } from "@/storage/seq";
 import { log } from "@/utils/log";
 import { kvList } from "@/app/kv/kvList";
 import { kvMutate } from "@/app/kv/kvMutate";
-import { encryptString, decryptString } from "@/modules/encrypt";
+import { encryptString } from "@/modules/encrypt";
 import { teamMessagesCounter, teamTaskOperationsCounter } from "@/app/monitoring/metrics2";
 import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
 import { observeSessionActivity } from "@/app/presence/observeSessionActivity";
 import { pushToWeixinIfBound } from "@/app/channels/weixinOutbound";
+import { buildTeamMessageEncryptionPath, decryptTeamMessage } from "@/app/team/teamMessageCrypto";
 
 /**
  * Team Messages Routes
@@ -49,10 +50,6 @@ const TeamMessageSchema = z.object({
     timestamp: z.number(),
     metadata: TeamMessageMetadataSchema.optional()
 });
-
-function buildEncryptionPath(userId: string, teamId: string, messageId: string) {
-    return ['user', userId, 'teams', teamId, 'messages', messageId];
-}
 
 async function canUserAccessTeam(userId: string, teamId: string): Promise<boolean> {
     const ownedTeam = await db.artifact.findFirst({
@@ -160,10 +157,7 @@ export function teamMessagesRoutes(app: Fastify) {
                 try {
                     const parts = item.key.split('.');
                     const messageId = parts[parts.length - 1];
-                    const decrypted = decryptString(
-                        buildEncryptionPath(userId, teamId, messageId),
-                        item.value!
-                    );
+                    const decrypted = decryptTeamMessage(userId, teamId, messageId, item.value!);
                     messages.push({ ...JSON.parse(decrypted), _key: item.key });
                 } catch {
                     // skip corrupted entries silently
@@ -299,7 +293,10 @@ export function teamMessagesRoutes(app: Fastify) {
 
             // Persist message in KV store for this account (encrypted per-message)
             const kvKey = `team_messages.${teamId}.${message.timestamp}.${message.id}`;
-            const encryptedMessage = encryptString(buildEncryptionPath(userId, teamId, message.id), JSON.stringify(message));
+            const encryptedMessage = encryptString(
+                buildTeamMessageEncryptionPath(userId, teamId, message.id),
+                JSON.stringify(message),
+            );
             const serializedMessage = Buffer.from(encryptedMessage).toString('base64');
 
             await kvMutate({ uid: userId }, [{

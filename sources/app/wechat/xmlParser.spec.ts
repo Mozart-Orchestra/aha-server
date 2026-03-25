@@ -6,6 +6,8 @@ import {
   WechatTextMessage,
   WechatImageMessage,
   WechatVoiceMessage,
+  WechatVideoMessage,
+  WechatLinkMessage,
   WechatEventMessage,
 } from './xmlParser'
 
@@ -44,6 +46,42 @@ describe('parseWechatXml', () => {
     expect(msg.MsgType).toBe('image')
     expect(msg.PicUrl).toBe('http://example.com/pic.jpg')
     expect(msg.MediaId).toBe('media_id_123')
+  })
+
+  it('should parse a video message', () => {
+    const xml = `<xml>
+      <ToUserName><![CDATA[gh_test]]></ToUserName>
+      <FromUserName><![CDATA[o_user]]></FromUserName>
+      <CreateTime>1348831860</CreateTime>
+      <MsgType><![CDATA[video]]></MsgType>
+      <MediaId><![CDATA[media_video_1]]></MediaId>
+      <ThumbMediaId><![CDATA[thumb_1]]></ThumbMediaId>
+      <MsgId>789012</MsgId>
+    </xml>`
+
+    const msg = parseWechatXml(xml) as WechatVideoMessage
+    expect(msg.MsgType).toBe('video')
+    expect(msg.MediaId).toBe('media_video_1')
+    expect(msg.ThumbMediaId).toBe('thumb_1')
+  })
+
+  it('should parse a link message', () => {
+    const xml = `<xml>
+      <ToUserName><![CDATA[gh_test]]></ToUserName>
+      <FromUserName><![CDATA[o_user]]></FromUserName>
+      <CreateTime>1348831860</CreateTime>
+      <MsgType><![CDATA[link]]></MsgType>
+      <Title><![CDATA[好文推荐]]></Title>
+      <Description><![CDATA[这是一篇好文章]]></Description>
+      <Url><![CDATA[https://example.com/article]]></Url>
+      <MsgId>345678</MsgId>
+    </xml>`
+
+    const msg = parseWechatXml(xml) as WechatLinkMessage
+    expect(msg.MsgType).toBe('link')
+    expect(msg.Title).toBe('好文推荐')
+    expect(msg.Description).toBe('这是一篇好文章')
+    expect(msg.Url).toBe('https://example.com/article')
   })
 
   it('should parse a subscribe event', () => {
@@ -108,7 +146,7 @@ describe('extractMessageText', () => {
     expect(extractMessageText(msg)).toBe('Hello')
   })
 
-  it('should return placeholder for image message', () => {
+  it('should return PicUrl for image message', () => {
     const msg: WechatImageMessage = {
       ToUserName: 'gh_test',
       FromUserName: 'o_user',
@@ -118,7 +156,7 @@ describe('extractMessageText', () => {
       MediaId: 'media_123',
       MsgId: '123',
     }
-    expect(extractMessageText(msg)).toBe('(图片消息)')
+    expect(extractMessageText(msg)).toBe('[图片] http://example.com/pic.jpg')
   })
 
   it('should return recognition text for voice message', () => {
@@ -146,6 +184,46 @@ describe('extractMessageText', () => {
       MsgId: '123',
     }
     expect(extractMessageText(msg)).toBe('(语音消息)')
+  })
+
+  it('should return mediaId for video message', () => {
+    const msg: WechatVideoMessage = {
+      ToUserName: 'gh_test',
+      FromUserName: 'o_user',
+      CreateTime: 1348831860,
+      MsgType: 'video',
+      MediaId: 'media_video_1',
+      ThumbMediaId: 'thumb_1',
+      MsgId: '123',
+    }
+    expect(extractMessageText(msg)).toBe('[视频] mediaId=media_video_1')
+  })
+
+  it('should return mediaId for shortvideo message', () => {
+    const msg: WechatVideoMessage = {
+      ToUserName: 'gh_test',
+      FromUserName: 'o_user',
+      CreateTime: 1348831860,
+      MsgType: 'shortvideo',
+      MediaId: 'media_shortvideo_1',
+      ThumbMediaId: 'thumb_2',
+      MsgId: '456',
+    }
+    expect(extractMessageText(msg)).toBe('[视频] mediaId=media_shortvideo_1')
+  })
+
+  it('should return formatted link for link message', () => {
+    const msg: WechatLinkMessage = {
+      ToUserName: 'gh_test',
+      FromUserName: 'o_user',
+      CreateTime: 1348831860,
+      MsgType: 'link',
+      Title: '好文推荐',
+      Description: '这是描述',
+      Url: 'https://example.com/article',
+      MsgId: '789',
+    }
+    expect(extractMessageText(msg)).toBe('[链接] 好文推荐\n这是描述\nhttps://example.com/article')
   })
 
   it('should return event info for event message', () => {

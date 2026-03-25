@@ -1,4 +1,5 @@
 import { pushToWeixin, isConnected } from "@/app/channels/weixin/weixinBridge";
+import { error, log } from "@/utils/log";
 
 const ROLE_EMOJI: Record<string, string> = {
     orchestrator: '✨', master: '🎯',
@@ -31,20 +32,89 @@ function format(message: any): string {
  */
 export async function pushToWeixinIfBound(
     uid: string,
-    _teamId: string,
+    teamId: string,
     message: any
 ): Promise<void> {
-    if (!isConnected(uid)) return;
+    if (!isConnected(uid)) {
+        log({ module: 'weixin-outbound', uid, teamId, messageId: message.id, reason: 'bridge-not-connected' }, 'Skipping Weixin push');
+        return;
+    }
 
     // Import creds to check push policy
     const { loadWeixinCredentials } = await import('@/app/channels/weixin/weixinCredentials');
     const creds = await loadWeixinCredentials(uid);
-    if (!creds || creds.pushPolicy === 'silent') return;
-    if (creds.pushPolicy === 'important' && !isImportant(message)) return;
+    if (!creds) {
+        log({ module: 'weixin-outbound', uid, teamId, messageId: message.id, reason: 'missing-credentials' }, 'Skipping Weixin push');
+        return;
+    }
+    if (creds.pushPolicy === 'silent') {
+        log({ module: 'weixin-outbound', uid, teamId, messageId: message.id, reason: 'push-policy-silent' }, 'Skipping Weixin push');
+        return;
+    }
+    if (creds.pushPolicy === 'important' && !isImportant(message)) {
+        log({ module: 'weixin-outbound', uid, teamId, messageId: message.id, reason: 'not-important' }, 'Skipping Weixin push');
+        return;
+    }
 
     // Skip messages sent by the user themselves (fromRole === 'user')
-    if (message.fromRole === 'user') return;
+    if (message.fromRole === 'user') {
+        log({ module: 'weixin-outbound', uid, teamId, messageId: message.id, reason: 'user-message' }, 'Skipping Weixin push');
+        return;
+    }
 
     const text = format(message);
-    await pushToWeixin(uid, text);
+    log(
+        {
+            module: 'weixin-outbound',
+            uid,
+            teamId,
+            messageId: message.id,
+            messageType: message.type,
+            fromRole: message.fromRole,
+        },
+        'Dispatching Weixin push',
+    );
+
+    try {
+        const sent = await pushToWeixin(uid, text);
+        if (!sent) {
+            log(
+                {
+                    module: 'weixin-outbound',
+                    uid,
+                    teamId,
+                    messageId: message.id,
+                    messageType: message.type,
+                    fromRole: message.fromRole,
+                },
+                'Weixin push was skipped by the bridge',
+            );
+            return;
+        }
+        log(
+            {
+                module: 'weixin-outbound',
+                uid,
+                teamId,
+                messageId: message.id,
+                messageType: message.type,
+                fromRole: message.fromRole,
+            },
+            'Dispatched Weixin push',
+        );
+    } catch (cause) {
+        error(
+            {
+                module: 'weixin-outbound',
+                uid,
+                teamId,
+                messageId: message.id,
+                messageType: message.type,
+                fromRole: message.fromRole,
+                cause: cause instanceof Error ? cause.message : String(cause),
+            },
+            'Failed to dispatch Weixin push',
+        );
+        throw cause;
+    }
 }

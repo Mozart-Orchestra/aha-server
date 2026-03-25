@@ -8,6 +8,7 @@ import {
   extractMessageText,
   WechatIncomingMessage,
 } from '@/app/wechat/xmlParser'
+import { publishInboundWeixinMessage } from '@/app/channels/weixinInbound'
 import { eventRouter } from '@/app/events/eventRouter'
 import { randomKeyNaked } from '@/utils/randomKeyNaked'
 import { allocateUserSeq } from '@/storage/seq'
@@ -83,7 +84,7 @@ async function routeToTeamEvents(
         toUser: msg.ToUserName,
         msgType: msg.MsgType,
         content: text,
-        createTime: msg.CreateTime,
+        createTime: Number(msg.CreateTime),
         msgId: 'MsgId' in msg ? msg.MsgId : undefined,
       },
     },
@@ -236,6 +237,30 @@ export function wechatRoutes(app: Fastify) {
       // Route to team event system (fire-and-forget, don't block reply)
       const target = await resolveMessageTarget()
       if (target?.teamId) {
+        publishInboundWeixinMessage({
+          uid: target.accountId,
+          teamId: target.teamId,
+          text,
+          fromDisplayName: '公众号用户',
+          metadata: {
+            channel: 'wechat',
+            wechat: {
+              source: 'official-account',
+              fromUser: msg.FromUserName,
+              toUser: msg.ToUserName,
+              msgType: msg.MsgType,
+              createTime: Number(msg.CreateTime),
+              msgId: 'MsgId' in msg ? msg.MsgId : undefined,
+              ...(msg.MsgType === 'image' ? { picUrl: msg.PicUrl, mediaId: msg.MediaId } : {}),
+              ...(msg.MsgType === 'voice' ? { mediaId: msg.MediaId, format: msg.Format, recognition: msg.Recognition } : {}),
+              ...((msg.MsgType === 'video' || msg.MsgType === 'shortvideo') ? { mediaId: msg.MediaId, thumbMediaId: msg.ThumbMediaId } : {}),
+              ...(msg.MsgType === 'link' ? { title: msg.Title, description: msg.Description, url: msg.Url } : {}),
+            },
+          },
+        }).catch((err) =>
+          log({ module: 'wechat', level: 'error' }, `Failed to persist inbound message: ${err}`)
+        )
+
         routeToTeamEvents(msg, text, target.accountId, target.teamId).catch((err) =>
           log({ module: 'wechat', level: 'error' }, `Failed to route message: ${err}`)
         )

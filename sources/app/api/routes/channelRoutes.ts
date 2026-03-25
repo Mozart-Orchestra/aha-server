@@ -89,15 +89,24 @@ export function channelRoutes(app: Fastify) {
             }
             const data = await res.json() as any;
             const status = (data.status ?? 'wait') as string;
-            return {
-                status,
-                credentials: status === 'confirmed' ? {
-                    token: data.bot_token as string,
+
+            if (status === 'confirmed') {
+                return {
+                    status,
+                    token: data.bot_token as string | undefined,
                     baseUrl: (data.baseurl ?? 'https://ilinkai.weixin.qq.com/') as string,
                     weixinUserId: data.ilink_user_id as string | undefined,
                     accountId: data.ilink_bot_id as string | undefined,
-                } : undefined,
-            };
+                    credentials: {
+                        token: data.bot_token as string,
+                        baseUrl: (data.baseurl ?? 'https://ilinkai.weixin.qq.com/') as string,
+                        weixinUserId: data.ilink_user_id as string | undefined,
+                        accountId: data.ilink_bot_id as string | undefined,
+                    },
+                };
+            }
+
+            return { status };
         } catch (e: any) {
             if (e?.name === 'AbortError') return { status: 'wait' };
             reply.code(502);
