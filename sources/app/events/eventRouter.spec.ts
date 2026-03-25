@@ -7,7 +7,12 @@ import {
     type UpdatePayload,
 } from './eventRouter';
 
-function makeConnection(connection: ClientConnection): ClientConnection {
+type MockConnectionInput =
+    | { connectionType: 'session-scoped'; userId: string; sessionId: string }
+    | { connectionType: 'user-scoped'; userId: string }
+    | { connectionType: 'machine-scoped'; userId: string; machineId: string };
+
+function makeConnection(connection: MockConnectionInput) {
     return {
         ...connection,
         socket: {
