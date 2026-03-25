@@ -22,6 +22,9 @@ export async function userRoutes(app: Fastify) {
                 }),
                 404: z.object({
                     error: z.literal('User not found')
+                }),
+                500: z.object({
+                    error: z.string()
                 })
             }
         },
@@ -59,6 +62,9 @@ export async function userRoutes(app: Fastify) {
             response: {
                 200: z.object({
                     users: z.array(UserProfileSchema)
+                }),
+                500: z.object({
+                    error: z.string()
                 })
             }
         },
@@ -108,6 +114,9 @@ export async function userRoutes(app: Fastify) {
                 }),
                 404: z.object({
                     error: z.literal('User not found')
+                }),
+                500: z.object({
+                    error: z.string()
                 })
             }
         },
@@ -132,6 +141,9 @@ export async function userRoutes(app: Fastify) {
                 }),
                 404: z.object({
                     error: z.literal('User not found')
+                }),
+                500: z.object({
+                    error: z.string()
                 })
             }
         },
@@ -150,6 +162,9 @@ export async function userRoutes(app: Fastify) {
             response: {
                 200: z.object({
                     friends: z.array(UserProfileSchema)
+                }),
+                500: z.object({
+                    error: z.string()
                 })
             }
         },
