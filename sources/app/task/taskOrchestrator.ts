@@ -1050,13 +1050,16 @@ export class TaskOrchestrator {
         if (!task?.subtaskIds) return;
 
         for (const subtaskId of task.subtaskIds) {
+            if (ids.has(subtaskId)) continue; // cycle guard
             ids.add(subtaskId);
             this.collectSubtaskIds(board, subtaskId, ids);
         }
     }
 
-    private async handleTaskCompletion(board: KanbanBoard, task: KanbanTask): Promise<void> {
+    private async handleTaskCompletion(board: KanbanBoard, task: KanbanTask, visited: Set<string> = new Set()): Promise<void> {
         if (!task.parentTaskId) return;
+        if (visited.has(task.parentTaskId)) return; // cycle guard
+        visited.add(task.parentTaskId);
 
         const propagation = task.statusPropagation ?? DEFAULT_STATUS_PROPAGATION;
         if (!propagation.autoCompleteParent) return;
@@ -1074,12 +1077,14 @@ export class TaskOrchestrator {
             parent.executionLinks = cleanupActiveExecutionLinks(parent.executionLinks, parent.assigneeId);
 
             // Recurse up
-            await this.handleTaskCompletion(board, parent);
+            await this.handleTaskCompletion(board, parent, visited);
         }
     }
 
-    private propagateBlockerToParent(board: KanbanBoard, parentId: string | null | undefined): void {
+    private propagateBlockerToParent(board: KanbanBoard, parentId: string | null | undefined, visited: Set<string> = new Set()): void {
         if (!parentId) return;
+        if (visited.has(parentId)) return; // cycle guard
+        visited.add(parentId);
 
         const parent = board.tasks.find(t => t.id === parentId);
         if (!parent) return;
@@ -1091,11 +1096,13 @@ export class TaskOrchestrator {
         parent.updatedAt = Date.now();
 
         // Recurse up
-        this.propagateBlockerToParent(board, parent.parentTaskId);
+        this.propagateBlockerToParent(board, parent.parentTaskId, visited);
     }
 
-    private updateParentBlockedStatus(board: KanbanBoard, parentId: string | null | undefined): void {
+    private updateParentBlockedStatus(board: KanbanBoard, parentId: string | null | undefined, visited: Set<string> = new Set()): void {
         if (!parentId) return;
+        if (visited.has(parentId)) return; // cycle guard
+        visited.add(parentId);
 
         const parent = board.tasks.find(t => t.id === parentId);
         if (!parent) return;
@@ -1108,7 +1115,7 @@ export class TaskOrchestrator {
         parent.updatedAt = Date.now();
 
         // Recurse up
-        this.updateParentBlockedStatus(board, parent.parentTaskId);
+        this.updateParentBlockedStatus(board, parent.parentTaskId, visited);
     }
 }
 
