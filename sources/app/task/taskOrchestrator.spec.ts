@@ -41,15 +41,17 @@ const DEFAULT_PROPAGATION: StatusPropagation = {
 };
 
 function buildTask(overrides: Partial<KanbanTask> & Pick<KanbanTask, 'id' | 'title'>): KanbanTask {
+    const { id, title, ...rest } = overrides;
+
     return {
-        id: overrides.id,
-        title: overrides.title,
+        id,
+        title,
         status: overrides.status ?? 'todo',
         createdAt: overrides.createdAt ?? 1,
         updatedAt: overrides.updatedAt ?? 1,
         comments: overrides.comments ?? [],
         statusPropagation: overrides.statusPropagation ?? { ...DEFAULT_PROPAGATION },
-        ...overrides,
+        ...rest,
     };
 }
 
@@ -192,6 +194,7 @@ describe('TaskOrchestrator', () => {
         await orchestrator.completeTask('user-1', 'team-1', 'child-1', 'session-1', {
             role: 'builder',
             displayName: 'Backend Builder',
+            content: '完成子任务',
         });
 
         expect(child.status).toBe('done');
@@ -224,6 +227,7 @@ describe('TaskOrchestrator', () => {
 
         await orchestrator.completeTask('user-1', 'team-1', 'child-1', 'session-1', {
             role: 'builder',
+            content: '完成子任务',
         });
 
         expect(child.status).toBe('done');
