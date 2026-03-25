@@ -18,6 +18,15 @@ vi.mock('@/storage/db', () => ({
             updateMany: vi.fn(),
             deleteMany: vi.fn(),
         },
+        sessionMessage: {
+            deleteMany: vi.fn(),
+        },
+        usageReport: {
+            deleteMany: vi.fn(),
+        },
+        accessKey: {
+            deleteMany: vi.fn(),
+        },
     },
 }));
 
@@ -54,14 +63,16 @@ function buildTeamArtifact(board: Record<string, unknown>, overrides?: Partial<{
     };
 }
 
-function buildApp() {
+function buildApp(options?: {
+    authenticate?: (request: any, reply: any) => unknown | Promise<unknown>;
+}) {
     const app = fastify();
     app.setValidatorCompiler(validatorCompiler);
     app.setSerializerCompiler(serializerCompiler);
     const typed = app.withTypeProvider<ZodTypeProvider>() as any;
-    typed.decorate('authenticate', async (request: any) => {
+    typed.decorate('authenticate', options?.authenticate || (async (request: any) => {
         request.userId = 'user-1';
-    });
+    }));
     teamManagementRoutes(typed);
     return typed;
 }
@@ -106,6 +117,22 @@ describe('teamManagementRoutes', () => {
                 body: expect.any(Buffer),
             }),
         }));
+
+        await app.close();
+    });
+
+    it('rejects invalid team creation payloads via zod validation', async () => {
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/teams',
+            payload: {
+                name: '',
+            },
+        });
+
+        expect(response.statusCode).toBe(400);
+        expect(vi.mocked(db.artifact.create)).not.toHaveBeenCalled();
 
         await app.close();
     });
@@ -327,6 +354,24 @@ describe('teamManagementRoutes', () => {
         await app.close();
     });
 
+    it('requires authentication before listing teams', async () => {
+        const app = buildApp({
+            authenticate: async (_request, reply) => {
+                return reply.code(401).send({ error: 'Unauthorized' });
+            },
+        });
+
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/teams',
+        });
+
+        expect(response.statusCode).toBe(401);
+        expect(vi.mocked(db.artifact.findMany)).not.toHaveBeenCalled();
+
+        await app.close();
+    });
+
     it('archives member sessions discovered from the stored team board', async () => {
         const board = {
             team: {
@@ -466,6 +511,72 @@ describe('teamManagementRoutes', () => {
         await app.close();
     });
 
+    it('lists members from the stored board', async () => {
+        const board = {
+            team: {
+                name: 'Member Team',
+                members: [
+                    { sessionId: 'session-1', roleId: 'builder', displayName: 'Builder' },
+                    { sessionId: 'session-2', roleId: 'reviewer', displayName: 'Reviewer' },
+                ],
+            },
+            tasks: [],
+        };
+
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(buildTeamArtifact(board) as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/teams/team-1/members',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            members: [
+                expect.objectContaining({ sessionId: 'session-1', roleId: 'builder' }),
+                expect.objectContaining({ sessionId: 'session-2', roleId: 'reviewer' }),
+            ],
+        });
+
+        await app.close();
+    });
+
+    it('removes a member and persists the updated team board', async () => {
+        const board = {
+            team: {
+                name: 'Member Team',
+                members: [
+                    { sessionId: 'session-1', roleId: 'builder', displayName: 'Builder' },
+                    { sessionId: 'session-2', roleId: 'reviewer', displayName: 'Reviewer' },
+                ],
+            },
+            tasks: [],
+        };
+
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(buildTeamArtifact(board) as never);
+        vi.mocked(db.artifact.update).mockResolvedValue({ id: 'team-1' } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'DELETE',
+            url: '/v1/teams/team-1/members/session-2',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({ success: true });
+
+        const updateCall = vi.mocked(db.artifact.update).mock.calls[0]?.[0];
+        const rawBody = updateCall?.data?.body as Buffer;
+        const parsed = JSON.parse(rawBody.toString());
+        const boardBody = JSON.parse(parsed.body);
+        expect(boardBody.team.members).toEqual([
+            expect.objectContaining({ sessionId: 'session-1', roleId: 'builder' }),
+        ]);
+
+        await app.close();
+    });
+
     it('renames a team and returns the updated team envelope', async () => {
         const board = {
             name: 'Old Team Name',
@@ -523,6 +634,124 @@ describe('teamManagementRoutes', () => {
                 { sessionId: 'session-1', success: true },
                 { sessionId: 'session-2', success: false, error: 'Session not found or not owned by user' },
             ],
+        });
+
+        await app.close();
+    });
+
+    it('restores only owned sessions during batch unarchive and reports per-session results', async () => {
+        vi.mocked(db.session.findMany).mockResolvedValue([{ id: 'session-1' }] as never);
+        vi.mocked(db.session.updateMany).mockResolvedValue({ count: 1 } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/sessions/batch/unarchive',
+            payload: { sessionIds: ['session-1', 'session-2'] },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            success: true,
+            restored: 1,
+            results: [
+                { sessionId: 'session-1', success: true },
+                { sessionId: 'session-2', success: false, error: 'Session not found or not owned by user' },
+            ],
+        });
+
+        await app.close();
+    });
+
+    it('unarchives a team and all discovered member sessions', async () => {
+        const board = {
+            archivedAt: 1710800000000,
+            team: {
+                name: 'Ops Team',
+                archivedAt: 1710800000000,
+                members: [
+                    { sessionId: 'session-1', roleId: 'builder' },
+                    { sessionId: 'session-2', roleId: 'reviewer' },
+                ],
+            },
+            tasks: [],
+        };
+
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(buildTeamArtifact(board) as never);
+        vi.mocked(db.session.updateMany).mockResolvedValue({ count: 2 } as never);
+        vi.mocked(db.artifact.update).mockResolvedValue({ id: 'team-1' } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/teams/team-1/unarchive',
+            payload: {},
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            success: true,
+            restoredSessions: 2,
+        });
+
+        const updateCall = vi.mocked(db.artifact.update).mock.calls[0]?.[0];
+        const rawBody = updateCall?.data?.body as Buffer;
+        const parsed = JSON.parse(rawBody.toString());
+        const boardBody = JSON.parse(parsed.body);
+        expect(boardBody.archivedAt).toBeUndefined();
+        expect(boardBody.team.archivedAt).toBeUndefined();
+
+        await app.close();
+    });
+
+    it('deletes a team plus all owned member session records', async () => {
+        const board = {
+            team: {
+                name: 'Delete Team',
+                members: [
+                    { sessionId: 'session-1', roleId: 'builder' },
+                    { sessionId: 'session-2', roleId: 'reviewer' },
+                ],
+            },
+            tasks: [],
+        };
+
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(buildTeamArtifact(board) as never);
+        vi.mocked(db.sessionMessage.deleteMany).mockResolvedValue({ count: 2 } as never);
+        vi.mocked(db.usageReport.deleteMany).mockResolvedValue({ count: 2 } as never);
+        vi.mocked(db.accessKey.deleteMany).mockResolvedValue({ count: 2 } as never);
+        vi.mocked(db.session.deleteMany).mockResolvedValue({ count: 2 } as never);
+        vi.mocked(db.artifact.delete).mockResolvedValue({ id: 'team-1' } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'DELETE',
+            url: '/v1/teams/team-1',
+            payload: {},
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            success: true,
+            deletedSessions: 2,
+        });
+        expect(db.sessionMessage.deleteMany).toHaveBeenCalledWith({
+            where: { sessionId: { in: ['session-1', 'session-2'] } },
+        });
+        expect(db.usageReport.deleteMany).toHaveBeenCalledWith({
+            where: { sessionId: { in: ['session-1', 'session-2'] } },
+        });
+        expect(db.accessKey.deleteMany).toHaveBeenCalledWith({
+            where: { sessionId: { in: ['session-1', 'session-2'] } },
+        });
+        expect(db.session.deleteMany).toHaveBeenCalledWith({
+            where: {
+                id: { in: ['session-1', 'session-2'] },
+                accountId: 'user-1',
+            },
+        });
+        expect(db.artifact.delete).toHaveBeenCalledWith({
+            where: { id: 'team-1' },
         });
 
         await app.close();

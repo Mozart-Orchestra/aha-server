@@ -106,15 +106,21 @@ export function marketListingRoutes(app: Fastify) {
                     },
                     // @ts-ignore - JSON path query
                     display: {
-                        path: ['name'],
-                        equals: body.spec.name
+                        path: ['displayName'],
+                        equals: body.display.displayName
                     }
                 },
-                orderBy: { createdAt: 'desc' },
-                take: 1
             });
 
-            const version = existingVersions.length > 0 ? 1 : 1; // TODO: implement version increment
+            const version = existingVersions.reduce((maxVersion, listing) => {
+                const rawRef = typeof listing.ref === 'string' ? listing.ref : '';
+                const parsedVersion = Number.parseInt(rawRef.split(':').pop() || '', 10);
+                if (!Number.isFinite(parsedVersion)) {
+                    return maxVersion;
+                }
+
+                return Math.max(maxVersion, parsedVersion);
+            }, 0) + 1;
 
             // Generate digest from genome spec
             const digest = `sha256:${crypto
