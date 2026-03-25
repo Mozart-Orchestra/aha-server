@@ -64,12 +64,12 @@ function buildPayload(overrides?: Partial<{
 describe('marketListingRoutes', () => {
     beforeEach(() => {
         vi.clearAllMocks();
-        vi.mocked(db.marketListing.create).mockImplementation(async ({ data }: any) => ({
+        vi.mocked(db.marketListing.create).mockImplementation((async ({ data }: any) => ({
             id: 'listing-1',
             ref: data.ref,
             digest: data.digest,
             publishedAt: new Date('2026-03-25T08:00:00.000Z'),
-        }) as never);
+        })) as never);
     });
 
     it('starts new listings at version 1', async () => {

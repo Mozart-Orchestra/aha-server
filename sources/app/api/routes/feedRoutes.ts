@@ -24,7 +24,8 @@ export function feedRoutes(app: Fastify) {
                         createdAt: z.number()
                     })),
                     hasMore: z.boolean()
-                })
+                }),
+                500: z.object({ error: z.string() })
             }
         }
     }, async (request, reply) => {
