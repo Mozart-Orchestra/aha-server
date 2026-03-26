@@ -74,11 +74,24 @@ const GenomeFeedbackPayloadSchema = z.object({
     suggestions: z.array(z.string().max(200)).max(10),
 });
 
+const GenomePromotePayloadSchema = z.object({
+    description: z.string().max(256).optional(),
+    spec: z.string(),
+    tags: z.string().max(256).optional(),
+    category: z.string().max(256).optional(),
+    isPublic: z.boolean().default(true),
+    minAvgScore: z.number().min(0).max(100).default(80),
+});
+
 function buildGenomeVisibilityWhere(userId: string) {
     return {
         deletedAt: null,
         OR: [{ accountId: userId }, { isPublic: true }],
     };
+}
+
+function resolveGenomeHubPublishKey(): string | undefined {
+    return process.env.GENOME_HUB_PUBLISH_KEY || process.env.HUB_PUBLISH_KEY;
 }
 
 function withGenomeFeedbackData<T extends { scorecard?: string | null }>(genome: T): T & { feedbackData: string | null } {
@@ -833,7 +846,7 @@ export function evolutionRoutes(app: Fastify) {
 
         try {
             const hubUrl = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
-            const hubPublishKey = process.env.GENOME_HUB_PUBLISH_KEY;
+            const hubPublishKey = resolveGenomeHubPublishKey();
             const { default: axios } = await import('axios');
 
             const upstream = await axios.patch(
@@ -853,6 +866,49 @@ export function evolutionRoutes(app: Fastify) {
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome feedback proxy error: ${error}`);
             return reply.code(502).send({ error: error?.message ?? 'Failed to proxy genome feedback' });
+        }
+    });
+
+    // =========================================================================
+    // POST /v1/genomes/:namespace/:name/promote
+    // Proxy marketplace promotion writes so supervisors do not need direct
+    // HUB_PUBLISH_KEY access on the client.
+    // =========================================================================
+    app.post('/v1/genomes/:namespace/:name/promote', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                namespace: z.string(),
+                name: z.string(),
+            }),
+            body: GenomePromotePayloadSchema,
+        },
+    }, async (request, reply) => {
+        const { namespace, name } = request.params as { namespace: string; name: string };
+        const payload = request.body as z.infer<typeof GenomePromotePayloadSchema>;
+
+        try {
+            const hubUrl = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
+            const hubPublishKey = resolveGenomeHubPublishKey();
+            const { default: axios } = await import('axios');
+
+            const upstream = await axios.post(
+                `${hubUrl}/genomes/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/promote`,
+                payload,
+                {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(upstream.data);
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `genome promote proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy genome promotion' });
         }
     });
 
@@ -899,7 +955,7 @@ export function evolutionRoutes(app: Fastify) {
 
             // 使用动态 import 避免循环依赖；axios 已存在于 happy-server
             const { default: axios } = await import('axios');
-            const hubPublishKey = process.env.GENOME_HUB_PUBLISH_KEY;
+            const hubPublishKey = resolveGenomeHubPublishKey();
             const res = await axios.post(`${hubUrl}/genomes`, publishBody, {
                 headers: {
                     'Content-Type': 'application/json',

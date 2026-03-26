@@ -498,6 +498,70 @@ describe('evolutionRoutes', () => {
         await app.close();
     });
 
+    it('proxies genome promotion updates to genome-hub using the shared publish key fallback', async () => {
+        const previousHubPublishKey = process.env.HUB_PUBLISH_KEY;
+        const previousGenomeHubPublishKey = process.env.GENOME_HUB_PUBLISH_KEY;
+        delete process.env.GENOME_HUB_PUBLISH_KEY;
+        process.env.HUB_PUBLISH_KEY = 'shared-hub-key';
+
+        vi.mocked(axios.post).mockResolvedValue({
+            status: 201,
+            data: {
+                genome: {
+                    id: 'hub-genome-2',
+                    version: 2,
+                },
+            },
+        } as never);
+
+        try {
+            const app = buildApp();
+            const response = await app.inject({
+                method: 'POST',
+                url: '/v1/genomes/%40official/supervisor/promote',
+                payload: {
+                    spec: '{"displayName":"Supervisor"}',
+                    minAvgScore: 60,
+                    isPublic: true,
+                },
+            });
+
+            expect(response.statusCode).toBe(201);
+            expect(axios.post).toHaveBeenCalledWith(
+                expect.stringContaining('/genomes/%40official/supervisor/promote'),
+                expect.objectContaining({
+                    spec: '{"displayName":"Supervisor"}',
+                    minAvgScore: 60,
+                    isPublic: true,
+                }),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(response.json()).toEqual({
+                genome: {
+                    id: 'hub-genome-2',
+                    version: 2,
+                },
+            });
+
+            await app.close();
+        } finally {
+            if (previousHubPublishKey === undefined) {
+                delete process.env.HUB_PUBLISH_KEY;
+            } else {
+                process.env.HUB_PUBLISH_KEY = previousHubPublishKey;
+            }
+            if (previousGenomeHubPublishKey === undefined) {
+                delete process.env.GENOME_HUB_PUBLISH_KEY;
+            } else {
+                process.env.GENOME_HUB_PUBLISH_KEY = previousGenomeHubPublishKey;
+            }
+        }
+    });
+
     it('marks the local genome public after successful publish and stores hubGenomeId', async () => {
         const scorecard = JSON.stringify({
             evaluationCount: 4,
