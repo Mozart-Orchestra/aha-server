@@ -858,6 +858,53 @@ export function evolutionRoutes(app: Fastify) {
     });
 
     // =========================================================================
+    // POST /v1/genomes/:namespace/:name/promote
+    // Proxy supervisor genome evolution promote calls to genome-hub so clients
+    // do not need direct access (HUB_PUBLISH_KEY) to the marketplace service.
+    // =========================================================================
+    app.post('/v1/genomes/:namespace/:name/promote', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                namespace: z.string(),
+                name: z.string(),
+            }),
+            body: z.object({
+                spec: z.string(),
+                minAvgScore: z.number().optional(),
+                isPublic: z.boolean().optional(),
+            }),
+        },
+    }, async (request, reply) => {
+        const { namespace, name } = request.params as { namespace: string; name: string };
+        const payload = request.body as { spec: string; minAvgScore?: number; isPublic?: boolean };
+
+        try {
+            const hubUrl = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
+            const hubPublishKey = process.env.GENOME_HUB_PUBLISH_KEY;
+            const { default: axios } = await import('axios');
+
+            const upstream = await axios.post(
+                `${hubUrl}/genomes/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/promote`,
+                payload,
+                {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(upstream.data);
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `genome promote proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy genome promote' });
+        }
+    });
+
+    // =========================================================================
     // POST /v1/genomes/:id/publish
     // Publish a private genome from Channel Server to Marketplace Server.
     // =========================================================================
