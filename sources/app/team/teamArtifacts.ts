@@ -13,6 +13,7 @@ export type TeamMemberRecord = {
     memberId?: string;
     sessionId: string;
     sessionTag?: string;
+    candidateId?: string;
     roleId?: string;
     role?: string;
     displayName?: string;

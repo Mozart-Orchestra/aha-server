@@ -432,6 +432,7 @@ describe('teamManagementRoutes', () => {
             url: '/v1/teams/team-1/members',
             payload: {
                 sessionId: 'session-3',
+                candidateId: 'spec:builder-3',
                 roleId: 'builder',
                 displayName: 'Builder 3',
                 authorities: ['task.start.self', 'task.complete.self'],
@@ -455,6 +456,7 @@ describe('teamManagementRoutes', () => {
         expect(boardBody.team.members).toEqual([
             expect.objectContaining({
                 sessionId: 'session-3',
+                candidateId: 'spec:builder-3',
                 roleId: 'builder',
                 authorities: ['task.start.self', 'task.complete.self'],
                 teamOverlay: {

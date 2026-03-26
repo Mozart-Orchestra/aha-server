@@ -357,6 +357,7 @@ export function teamManagementRoutes(app: Fastify) {
                 memberId: z.string().optional(),
                 sessionId: z.string(),
                 sessionTag: z.string().optional(),
+                candidateId: z.string().optional(),
                 roleId: z.string(),
                 displayName: z.string().optional(),
                 specId: z.string().optional(),
@@ -371,10 +372,11 @@ export function teamManagementRoutes(app: Fastify) {
     }, async (request, reply) => {
         const userId = request.userId;
         const { teamId } = request.params as { teamId: string };
-        const { memberId, sessionId, sessionTag, roleId, displayName, specId, customPrompt, parentSessionId, executionPlane, runtimeType, authorities, teamOverlay } = request.body as {
+        const { memberId, sessionId, sessionTag, candidateId, roleId, displayName, specId, customPrompt, parentSessionId, executionPlane, runtimeType, authorities, teamOverlay } = request.body as {
             memberId?: string;
             sessionId: string;
             sessionTag?: string;
+            candidateId?: string;
             roleId: string;
             displayName?: string;
             specId?: string;
@@ -387,7 +389,7 @@ export function teamManagementRoutes(app: Fastify) {
         };
 
         try {
-            const result = await addTeamMember(userId, teamId, memberId, sessionId, sessionTag, roleId, displayName, specId, customPrompt, parentSessionId, executionPlane, runtimeType, authorities, teamOverlay);
+            const result = await addTeamMember(userId, teamId, memberId, sessionId, sessionTag, candidateId, roleId, displayName, specId, customPrompt, parentSessionId, executionPlane, runtimeType, authorities, teamOverlay);
             return reply.send(result);
         } catch (error: any) {
             if (error.message === 'Team not found') {
@@ -701,6 +703,7 @@ async function addTeamMember(
     memberId: string | undefined,
     sessionId: string,
     sessionTag: string | undefined,
+    candidateId: string | undefined,
     roleId: string,
     displayName?: string,
     specId?: string,
@@ -740,6 +743,7 @@ async function addTeamMember(
             existing.roleId !== roleId ||
             (memberId !== undefined && existing.memberId !== memberId) ||
             (sessionTag !== undefined && existing.sessionTag !== sessionTag) ||
+            (candidateId !== undefined && existing.candidateId !== candidateId) ||
             (displayName && existing.displayName !== displayName) ||
             (specId !== undefined && existing.specId !== specId) ||
             (customPrompt !== undefined && existing.customPrompt !== customPrompt) ||
@@ -757,6 +761,7 @@ async function addTeamMember(
         if (memberId !== undefined) existing.memberId = memberId;
         existing.roleId = roleId;
         if (sessionTag !== undefined) existing.sessionTag = sessionTag;
+        if (candidateId !== undefined) existing.candidateId = candidateId;
         existing.displayName = displayName || existing.displayName;
         if (specId !== undefined) existing.specId = specId;
         if (customPrompt !== undefined) existing.customPrompt = customPrompt;
@@ -770,6 +775,7 @@ async function addTeamMember(
             ...(memberId !== undefined && { memberId }),
             sessionId,
             ...(sessionTag !== undefined && { sessionTag }),
+            ...(candidateId !== undefined && { candidateId }),
             roleId,
             displayName: displayName || `Agent ${roleId}`,
             focusAreas: [],
