@@ -15,6 +15,7 @@ import { artifactUpdateHandler } from "./socket/artifactUpdateHandler";
 import { accessKeyHandler } from "./socket/accessKeyHandler";
 import { getSocketCorsConfig } from "./utils/corsConfig";
 import { activityCache } from "@/app/presence/sessionCache";
+import { observeSessionActivity } from "@/app/presence/observeSessionActivity";
 
 export function startSocket(app: Fastify) {
     const io = new Server(app.server, {
@@ -107,6 +108,12 @@ export function startSocket(app: Fastify) {
         }
         eventRouter.addConnection(userId, connection);
         incrementWebSocketConnection(connection.connectionType);
+
+        if (connection.connectionType === 'session-scoped') {
+            void observeSessionActivity(userId, connection.sessionId).catch((error) => {
+                log({ module: 'websocket', level: 'warn', userId, sessionId: connection.sessionId }, `Failed to mark session online on connect: ${error}`);
+            });
+        }
 
         // Broadcast daemon online status
         if (connection.connectionType === 'machine-scoped') {
