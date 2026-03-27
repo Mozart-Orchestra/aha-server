@@ -1,4 +1,5 @@
 import type { FastifyCorsOptions } from '@fastify/cors';
+import type { CorsOptions as SocketCorsOptions } from 'cors';
 
 // Security: Allowed origins for production
 const ALLOWED_ORIGINS_PRODUCTION = [
@@ -79,6 +80,32 @@ function getDevelopmentOriginHandler(): NonNullable<FastifyCorsOptions['origin']
     }) as NonNullable<FastifyCorsOptions['origin']>;
 }
 
+type SocketOriginHandler = NonNullable<SocketCorsOptions['origin']>;
+
+function getDevelopmentSocketOriginHandler(): SocketOriginHandler {
+    return ((origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+        // Allow requests with no origin (mobile apps, curl, etc.)
+        if (!origin) {
+            callback(null, true);
+            return;
+        }
+
+        const isAllowed = ALLOWED_ORIGINS_DEVELOPMENT.some(allowed => {
+            if (typeof allowed === 'string') {
+                return origin === allowed;
+            }
+            return allowed.test(origin);
+        });
+
+        if (isAllowed) {
+            callback(null, true);
+        } else {
+            console.warn(`[Socket CORS] Unexpected origin in development: ${origin}`);
+            callback(null, true);
+        }
+    }) as SocketOriginHandler;
+}
+
 export function getCorsConfig(): FastifyCorsOptions {
     if (isProduction() && !shouldAllowLocalOrigins()) {
         return {
@@ -100,7 +127,7 @@ export function getCorsConfig(): FastifyCorsOptions {
 }
 
 // Export for WebSocket configuration
-export function getSocketCorsConfig() {
+export function getSocketCorsConfig(): SocketCorsOptions {
     if (isProduction() && !shouldAllowLocalOrigins()) {
         return {
             origin: ALLOWED_ORIGINS_PRODUCTION,
@@ -111,7 +138,7 @@ export function getSocketCorsConfig() {
     }
 
     return {
-        origin: getDevelopmentOriginHandler(),
+        origin: getDevelopmentSocketOriginHandler(),
         methods: ['GET', 'POST', 'OPTIONS'],
         credentials: true,
         allowedHeaders: [...ALLOWED_HEADERS, '*'],
