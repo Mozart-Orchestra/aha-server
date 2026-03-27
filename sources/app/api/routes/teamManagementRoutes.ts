@@ -928,30 +928,40 @@ async function deleteTeam(
     ]));
 
     let deletedCount = 0;
-    if (managedSessionIds.length > 0) {
-        await db.sessionMessage.deleteMany({
-            where: { sessionId: { in: managedSessionIds } }
-        });
-        await db.usageReport.deleteMany({
-            where: { sessionId: { in: managedSessionIds } }
-        });
-        await db.accessKey.deleteMany({
-            where: { sessionId: { in: managedSessionIds } }
-        });
-        const result = await db.session.deleteMany({
-            where: {
-                id: { in: managedSessionIds },
-                accountId: userId
-            }
-        });
-        deletedCount = result.count;
-        managedSessionIds.forEach((sessionId) => activityCache.invalidateSession(sessionId));
-    }
+    await db.$transaction(async (tx) => {
+        if (managedSessionIds.length > 0) {
+            await tx.sessionMessage.deleteMany({
+                where: { sessionId: { in: managedSessionIds } }
+            });
+            await tx.usageReport.deleteMany({
+                where: { sessionId: { in: managedSessionIds } }
+            });
+            await tx.accessKey.deleteMany({
+                where: { sessionId: { in: managedSessionIds } }
+            });
+            const result = await tx.session.deleteMany({
+                where: {
+                    id: { in: managedSessionIds },
+                    accountId: userId
+                }
+            });
+            deletedCount = result.count;
+        }
 
-    // Delete team artifact
-    await db.artifact.delete({
-        where: { id: teamId }
+        await tx.teamContextEntry.deleteMany({
+            where: {
+                accountId: userId,
+                teamId,
+            },
+        });
+
+        // Delete team artifact last, after dependent team-scoped data is gone.
+        await tx.artifact.delete({
+            where: { id: teamId }
+        });
     });
+
+    managedSessionIds.forEach((sessionId) => activityCache.invalidateSession(sessionId));
 
     // Broadcast delete events
     for (const sessionId of managedSessionIds) {
