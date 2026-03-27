@@ -579,6 +579,14 @@ export class TaskOrchestrator {
         const board = await this.getBoard(userId, teamId);
         if (!board) throw new Error('Team not initialized. Please create/open this team in Kanban dashboard first. See DOC/TEAM_CREATION_WORKFLOW.md for details.');
 
+        const parentTask = task.parentTaskId
+            ? board.tasks.find(t => t.id === task.parentTaskId)
+            : null;
+
+        if (task.parentTaskId && !parentTask) {
+            throw new Error('Parent task not found');
+        }
+
         const newTask: KanbanTask = {
             ...task,
             id: randomKeyNaked(12),
@@ -586,7 +594,7 @@ export class TaskOrchestrator {
             createdAt: Date.now(),
             updatedAt: Date.now(),
             comments: task.comments || [],
-            depth: task.parentTaskId ? this.getTaskDepth(board, task.parentTaskId) + 1 : 0,
+            depth: parentTask ? (parentTask.depth ?? 0) + 1 : 0,
             statusPropagation: task.statusPropagation || { ...DEFAULT_STATUS_PROPAGATION }
         };
 
@@ -596,16 +604,13 @@ export class TaskOrchestrator {
         }
 
         // If creating subtask, update parent
-        if (task.parentTaskId) {
-            const parent = board.tasks.find(t => t.id === task.parentTaskId);
-            if (parent) {
-                parent.subtaskIds = parent.subtaskIds || [];
-                parent.subtaskIds.push(newTask.id);
-                parent.updatedAt = Date.now();
-                // Auto-start parent if it's todo
-                if (parent.status === 'todo') {
-                    parent.status = 'in-progress';
-                }
+        if (parentTask) {
+            parentTask.subtaskIds = parentTask.subtaskIds || [];
+            parentTask.subtaskIds.push(newTask.id);
+            parentTask.updatedAt = Date.now();
+            // Auto-start parent if it's todo
+            if (parentTask.status === 'todo') {
+                parentTask.status = 'in-progress';
             }
         }
 
@@ -1061,11 +1066,11 @@ export class TaskOrchestrator {
         if (visited.has(task.parentTaskId)) return; // cycle guard
         visited.add(task.parentTaskId);
 
-        const propagation = task.statusPropagation ?? DEFAULT_STATUS_PROPAGATION;
-        if (!propagation.autoCompleteParent) return;
-
         const parent = board.tasks.find(t => t.id === task.parentTaskId);
         if (!parent) return;
+
+        const propagation = parent.statusPropagation ?? DEFAULT_STATUS_PROPAGATION;
+        if (!propagation.autoCompleteParent) return;
 
         // Check if all siblings are done
         const siblings = board.tasks.filter(t => parent.subtaskIds?.includes(t.id));
