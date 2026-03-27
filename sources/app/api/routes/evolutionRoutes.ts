@@ -2,6 +2,7 @@ import { Fastify } from "../types";
 import { z } from "zod";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { parseGenomeSpec } from "@/shared/genomeSpec";
 import { eventRouter } from "@/app/events/eventRouter";
 import { activityCache } from "@/app/presence/sessionCache";
 import { allocateUserSeq } from "@/storage/seq";
@@ -871,8 +872,8 @@ export function evolutionRoutes(app: Fastify) {
 
     // =========================================================================
     // POST /v1/genomes/:namespace/:name/promote
-    // Proxy marketplace promotion writes so supervisors do not need direct
-    // HUB_PUBLISH_KEY access on the client.
+    // Proxy supervisor genome evolution promote calls to genome-hub so clients
+    // do not need direct access (HUB_PUBLISH_KEY) to the marketplace service.
     // =========================================================================
     app.post('/v1/genomes/:namespace/:name/promote', {
         preHandler: app.authenticate,
@@ -940,7 +941,7 @@ export function evolutionRoutes(app: Fastify) {
             const hubUrl = marketplaceUrl ?? process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
 
             // 发布到 Marketplace Server
-            const spec = JSON.parse(genome.spec);
+            const spec = parseGenomeSpec(genome.spec);
             const publishNamespace = genome.namespace ?? spec.namespace ?? '@public';
             const publishBody = {
                 namespace: publishNamespace,

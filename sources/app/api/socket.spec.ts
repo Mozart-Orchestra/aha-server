@@ -275,4 +275,21 @@ describe('startSocket', () => {
         expect(socket.disconnect).toHaveBeenCalled();
         expect(addConnection).not.toHaveBeenCalled();
     });
+
+    it('rejects session-scoped reconnect without sessionId', async () => {
+        startSocket({ server: {} } as any);
+        const socket = new FakeSocket({
+            token: 'valid-token',
+            clientType: 'session-scoped',
+        });
+
+        await connectionHandler!(socket);
+
+        expect(socket.emitted).toContainEqual({
+            event: 'error',
+            payload: { message: 'Session ID required for session-scoped clients' },
+        });
+        expect(socket.disconnect).toHaveBeenCalled();
+        expect(verifyToken).not.toHaveBeenCalled();
+    });
 });

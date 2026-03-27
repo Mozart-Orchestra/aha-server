@@ -110,9 +110,7 @@ export function startSocket(app: Fastify) {
         incrementWebSocketConnection(connection.connectionType);
 
         if (connection.connectionType === 'session-scoped') {
-            void observeSessionActivity(userId, connection.sessionId).catch((error) => {
-                log({ module: 'websocket', level: 'warn', userId, sessionId: connection.sessionId }, `Failed to mark session online on connect: ${error}`);
-            });
+            await observeSessionActivity(userId, connection.sessionId);
         }
 
         // Broadcast daemon online status

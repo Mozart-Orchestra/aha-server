@@ -24,7 +24,7 @@ export async function userRoutes(app: Fastify) {
                     error: z.literal('User not found')
                 }),
                 500: z.object({
-                    error: z.literal('Failed to fetch user profile')
+                    error: z.string()
                 })
             }
         },
@@ -64,7 +64,7 @@ export async function userRoutes(app: Fastify) {
                     users: z.array(UserProfileSchema)
                 }),
                 500: z.object({
-                    error: z.literal('Failed to search users')
+                    error: z.string()
                 })
             }
         },
@@ -116,7 +116,7 @@ export async function userRoutes(app: Fastify) {
                     error: z.literal('User not found')
                 }),
                 500: z.object({
-                    error: z.literal('Failed to add friend')
+                    error: z.string()
                 })
             }
         },
@@ -143,7 +143,7 @@ export async function userRoutes(app: Fastify) {
                     error: z.literal('User not found')
                 }),
                 500: z.object({
-                    error: z.literal('Failed to remove friend')
+                    error: z.string()
                 })
             }
         },
@@ -164,7 +164,7 @@ export async function userRoutes(app: Fastify) {
                     friends: z.array(UserProfileSchema)
                 }),
                 500: z.object({
-                    error: z.literal('Failed to list friends')
+                    error: z.string()
                 })
             }
         },

@@ -25,9 +25,7 @@ export function feedRoutes(app: Fastify) {
                     })),
                     hasMore: z.boolean()
                 }),
-                500: z.object({
-                    error: z.literal('Failed to fetch feed')
-                })
+                500: z.object({ error: z.string() })
             }
         }
     }, async (request, reply) => {
