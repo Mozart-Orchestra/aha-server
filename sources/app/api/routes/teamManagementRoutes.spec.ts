@@ -4,6 +4,7 @@ import { serializerCompiler, validatorCompiler, ZodTypeProvider } from 'fastify-
 
 vi.mock('@/storage/db', () => ({
     db: {
+        $transaction: vi.fn(),
         artifact: {
             create: vi.fn(),
             findMany: vi.fn(),
@@ -25,6 +26,9 @@ vi.mock('@/storage/db', () => ({
             deleteMany: vi.fn(),
         },
         accessKey: {
+            deleteMany: vi.fn(),
+        },
+        teamContextEntry: {
             deleteMany: vi.fn(),
         },
     },
@@ -80,6 +84,7 @@ function buildApp(options?: {
 describe('teamManagementRoutes', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        vi.mocked(db.$transaction).mockImplementation(async (callback: any) => callback(db as any));
     });
 
     it('creates a canonical team artifact with the provided id and initial board', async () => {
@@ -723,6 +728,7 @@ describe('teamManagementRoutes', () => {
         vi.mocked(db.usageReport.deleteMany).mockResolvedValue({ count: 2 } as never);
         vi.mocked(db.accessKey.deleteMany).mockResolvedValue({ count: 2 } as never);
         vi.mocked(db.session.deleteMany).mockResolvedValue({ count: 2 } as never);
+        vi.mocked(db.teamContextEntry.deleteMany).mockResolvedValue({ count: 3 } as never);
         vi.mocked(db.artifact.delete).mockResolvedValue({ id: 'team-1' } as never);
 
         const app = buildApp();
@@ -750,6 +756,12 @@ describe('teamManagementRoutes', () => {
             where: {
                 id: { in: ['session-1', 'session-2'] },
                 accountId: 'user-1',
+            },
+        });
+        expect(db.teamContextEntry.deleteMany).toHaveBeenCalledWith({
+            where: {
+                accountId: 'user-1',
+                teamId: 'team-1',
             },
         });
         expect(db.artifact.delete).toHaveBeenCalledWith({
