@@ -914,6 +914,51 @@ export function evolutionRoutes(app: Fastify) {
     });
 
     // =========================================================================
+    // POST /v1/genomes/hub-create
+    // Proxy genome creation to genome-hub marketplace so clients do not need
+    // direct access (HUB_PUBLISH_KEY) to the marketplace service.
+    // Used by the mutate_genome MCP tool as fallback when direct hub access
+    // returns 401/403.  Must be registered before /v1/genomes/:id/publish to
+    // avoid Fastify treating "hub-create" as a parametric :id segment.
+    // =========================================================================
+    app.post('/v1/genomes/hub-create', {
+        preHandler: app.authenticate,
+        schema: {
+            body: z.object({
+                namespace: z.string(),
+                name: z.string(),
+                version: z.number().int().optional(),
+                description: z.string().optional(),
+                spec: z.string(),
+                isPublic: z.boolean().optional(),
+                category: z.string().optional(),
+                tags: z.string().optional(),
+            }),
+        },
+    }, async (request, reply) => {
+        const payload = request.body;
+        try {
+            const hubUrl = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
+            const hubPublishKey = resolveGenomeHubPublishKey();
+            const { default: axios } = await import('axios');
+
+            const upstream = await axios.post(`${hubUrl}/genomes`, payload, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                },
+                timeout: 10000,
+                validateStatus: () => true,
+            });
+
+            return reply.code(upstream.status).send(upstream.data);
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `genome hub-create proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy genome creation' });
+        }
+    });
+
+    // =========================================================================
     // POST /v1/genomes/:id/publish
     // Publish a private genome from Channel Server to Marketplace Server.
     // =========================================================================
