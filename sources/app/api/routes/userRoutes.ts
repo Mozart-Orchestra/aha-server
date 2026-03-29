@@ -48,7 +48,7 @@ export async function userRoutes(app: Fastify) {
             const status: RelationshipStatus = relationship?.status || RelationshipStatus.none;
 
             return reply.send({ user: buildUserProfile(user, status) });
-        } catch (error: any) {
+        } catch (_error: unknown) {
             return reply.code(500).send({ error: 'Failed to fetch user profile' });
         }
     });
@@ -97,7 +97,7 @@ export async function userRoutes(app: Fastify) {
             });
 
             return reply.send({ users: userProfiles });
-        } catch (error: any) {
+        } catch (_error: unknown) {
             return reply.code(500).send({ error: 'Failed to search users' });
         }
     });
@@ -125,7 +125,7 @@ export async function userRoutes(app: Fastify) {
         try {
             const user = await friendAdd(Context.create(request.userId), request.body.uid);
             return reply.send({ user });
-        } catch (error: any) {
+        } catch (_error: unknown) {
             return reply.code(500).send({ error: 'Failed to add friend' });
         }
     });
@@ -152,7 +152,7 @@ export async function userRoutes(app: Fastify) {
         try {
             const user = await friendRemove(Context.create(request.userId), request.body.uid);
             return reply.send({ user });
-        } catch (error: any) {
+        } catch (_error: unknown) {
             return reply.code(500).send({ error: 'Failed to remove friend' });
         }
     });
@@ -173,7 +173,7 @@ export async function userRoutes(app: Fastify) {
         try {
             const friends = await friendList(Context.create(request.userId));
             return reply.send({ friends });
-        } catch (error: any) {
+        } catch (_error: unknown) {
             return reply.code(500).send({ error: 'Failed to list friends' });
         }
     });

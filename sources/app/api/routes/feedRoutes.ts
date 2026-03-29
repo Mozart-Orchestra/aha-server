@@ -38,7 +38,7 @@ export function feedRoutes(app: Fastify) {
                 limit: request.query?.limit
             });
             return reply.send({ items: items.items, hasMore: items.hasMore });
-        } catch (error: any) {
+        } catch (_error: unknown) {
             return reply.code(500).send({ error: 'Failed to fetch feed' });
         }
     });

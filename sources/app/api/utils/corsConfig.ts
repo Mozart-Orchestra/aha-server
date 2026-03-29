@@ -14,15 +14,36 @@ const ALLOWED_ORIGINS_PRODUCTION = [
     'exp://localhost:19000',
 ];
 
+const ALLOWED_ORIGINS_LOCALHOST = [
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'http://localhost:3005',
+    'http://localhost:3008',
+    'http://localhost:8081',
+    'http://localhost:8082',
+    'http://localhost:19000',
+    'http://localhost:19006',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:3001',
+    'http://127.0.0.1:3005',
+    'http://127.0.0.1:3008',
+    'http://127.0.0.1:8081',
+    'http://127.0.0.1:8082',
+    'http://127.0.0.1:19000',
+    'http://127.0.0.1:19006',
+];
+
 // Development origins
 const ALLOWED_ORIGINS_DEVELOPMENT = [
     'http://localhost:3000',
     'http://localhost:3001',
+    'http://localhost:8082',
     'http://localhost:8081',
     'http://localhost:19000',
     'http://localhost:19006',
     'http://127.0.0.1:3000',
     'http://127.0.0.1:8081',
+    'http://127.0.0.1:8082',
     // Expo development
     /^exp:\/\/.*$/,
     /^http:\/\/192\.168\.\d+\.\d+:\d+$/,
@@ -53,6 +74,32 @@ function isProduction(): boolean {
 
 function shouldAllowLocalOrigins(): boolean {
     return process.env.ALLOW_LOCALHOST_ORIGINS === 'true';
+}
+
+function normalizeOrigin(origin: string): string {
+    return origin.trim().replace(/\/+$/, '');
+}
+
+function getExtraProductionOrigins(): string[] {
+    const rawOrigins = process.env.CORS_ALLOWED_ORIGINS ?? '';
+    if (!rawOrigins.trim()) {
+        return [];
+    }
+
+    return rawOrigins
+        .split(',')
+        .map(origin => normalizeOrigin(origin))
+        .filter(Boolean);
+}
+
+function getProductionAllowedOrigins(): string[] {
+    const origins = [...ALLOWED_ORIGINS_PRODUCTION, ...getExtraProductionOrigins()];
+
+    if (shouldAllowLocalOrigins()) {
+        origins.push(...ALLOWED_ORIGINS_LOCALHOST);
+    }
+
+    return [...new Set(origins)];
 }
 
 function getDevelopmentOriginHandler(): NonNullable<FastifyCorsOptions['origin']> {
@@ -107,9 +154,9 @@ function getDevelopmentSocketOriginHandler(): SocketOriginHandler {
 }
 
 export function getCorsConfig(): FastifyCorsOptions {
-    if (isProduction() && !shouldAllowLocalOrigins()) {
+    if (isProduction()) {
         return {
-            origin: ALLOWED_ORIGINS_PRODUCTION,
+            origin: getProductionAllowedOrigins(),
             allowedHeaders: ALLOWED_HEADERS,
             methods: ALLOWED_METHODS,
             credentials: true,
@@ -128,9 +175,9 @@ export function getCorsConfig(): FastifyCorsOptions {
 
 // Export for WebSocket configuration
 export function getSocketCorsConfig(): SocketCorsOptions {
-    if (isProduction() && !shouldAllowLocalOrigins()) {
+    if (isProduction()) {
         return {
-            origin: ALLOWED_ORIGINS_PRODUCTION,
+            origin: getProductionAllowedOrigins(),
             methods: ['GET', 'POST', 'OPTIONS'],
             credentials: true,
             allowedHeaders: ALLOWED_HEADERS,

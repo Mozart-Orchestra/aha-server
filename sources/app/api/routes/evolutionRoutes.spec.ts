@@ -9,6 +9,8 @@ vi.mock('node:fs', () => ({
 
 vi.mock('@/storage/db', () => ({
     db: {
+        $transaction: vi.fn(),
+        $executeRaw: vi.fn(),
         artifact: {
             findUnique: vi.fn(),
             update: vi.fn(),
@@ -25,6 +27,16 @@ vi.mock('@/storage/db', () => ({
             upsert: vi.fn(),
             create: vi.fn(),
             update: vi.fn(),
+        },
+        trial: {
+            create: vi.fn(),
+            findMany: vi.fn(),
+            update: vi.fn(),
+            updateMany: vi.fn(),
+        },
+        verdict: {
+            create: vi.fn(),
+            findMany: vi.fn(),
         },
     },
 }));
@@ -82,6 +94,7 @@ describe('evolutionRoutes', () => {
         vi.clearAllMocks();
         vi.mocked(existsSync).mockReturnValue(false);
         vi.mocked(readFileSync).mockReset();
+        vi.mocked(db.$transaction).mockImplementation(async (callback: any) => callback(db));
     });
 
     it('retires a bypass agent by removing it from the team roster', async () => {
@@ -637,6 +650,319 @@ describe('evolutionRoutes', () => {
                 synced: true,
             },
         }));
+
+        await app.close();
+    });
+
+    it('creates a new session trial, prefers open trials when listing, and closes sibling open rows on patch', async () => {
+        vi.mocked(db.trial.findMany)
+            .mockResolvedValueOnce([] as never)
+            .mockResolvedValueOnce([
+                {
+                    id: 'trial-closed',
+                    hubEntityId: 'spec-1',
+                    entityVersion: 7,
+                    teamId: 'team-1',
+                    sessionId: 'session-1',
+                    contextNarrative: null,
+                    logRefs: '[]',
+                    startedAt: new Date('2026-03-29T00:01:00.000Z'),
+                    endedAt: new Date('2026-03-29T00:03:00.000Z'),
+                },
+                {
+                    id: 'trial-open',
+                    hubEntityId: 'spec-1',
+                    entityVersion: 7,
+                    teamId: 'team-1',
+                    sessionId: 'session-1',
+                    contextNarrative: null,
+                    logRefs: '[]',
+                    startedAt: new Date('2026-03-29T00:00:00.000Z'),
+                    endedAt: null,
+                },
+            ] as never);
+        vi.mocked(db.trial.create).mockResolvedValue({
+            id: 'trial-open',
+            hubEntityId: 'spec-1',
+            entityVersion: 7,
+            teamId: 'team-1',
+            sessionId: 'session-1',
+            contextNarrative: null,
+            logRefs: '[]',
+            startedAt: new Date('2026-03-29T00:00:00.000Z'),
+            endedAt: null,
+        } as never);
+        vi.mocked(db.trial.update).mockResolvedValue({
+            id: 'trial-open',
+            hubEntityId: 'spec-1',
+            entityVersion: 7,
+            teamId: 'team-1',
+            sessionId: 'session-1',
+            contextNarrative: null,
+            logRefs: '[{\"kind\":\"aha-session\",\"sessionId\":\"session-1\"}]',
+            startedAt: new Date('2026-03-29T00:00:00.000Z'),
+            endedAt: new Date('2026-03-29T00:05:00.000Z'),
+        } as never);
+        vi.mocked(db.trial.updateMany).mockResolvedValue({ count: 1 } as never);
+
+        const app = buildApp();
+
+        const createResponse = await app.inject({
+            method: 'POST',
+            url: '/v1/trials',
+            payload: {
+                hubEntityId: 'spec-1',
+                entityVersion: 7,
+                teamId: 'team-1',
+                sessionId: 'session-1',
+                logRefs: '[]',
+            },
+        });
+        expect(createResponse.statusCode).toBe(201);
+        expect(db.trial.create).toHaveBeenCalledWith({
+            data: expect.objectContaining({
+                hubEntityId: 'spec-1',
+                entityVersion: 7,
+                teamId: 'team-1',
+                sessionId: 'session-1',
+            }),
+        });
+
+        const listResponse = await app.inject({
+            method: 'GET',
+            url: '/v1/trials?sessionId=session-1&limit=1',
+        });
+        expect(listResponse.statusCode).toBe(200);
+        expect(db.trial.findMany).toHaveBeenLastCalledWith({
+            where: { sessionId: 'session-1' },
+            orderBy: [
+                { startedAt: 'desc' },
+                { id: 'desc' },
+            ],
+        });
+        expect(listResponse.json()).toEqual({
+            trials: [
+                expect.objectContaining({
+                    id: 'trial-open',
+                    endedAt: null,
+                }),
+            ],
+        });
+
+        const patchResponse = await app.inject({
+            method: 'PATCH',
+            url: '/v1/trials/trial-open',
+            payload: {
+                endedAt: '2026-03-29T00:05:00.000Z',
+                logRefs: '[{\"kind\":\"aha-session\",\"sessionId\":\"session-1\"}]',
+            },
+        });
+        expect(patchResponse.statusCode).toBe(200);
+        expect(db.trial.update).toHaveBeenCalledWith({
+            where: { id: 'trial-open' },
+            data: {
+                endedAt: new Date('2026-03-29T00:05:00.000Z'),
+                logRefs: '[{\"kind\":\"aha-session\",\"sessionId\":\"session-1\"}]',
+            },
+        });
+        expect(db.trial.updateMany).toHaveBeenCalledWith({
+            where: {
+                sessionId: 'session-1',
+                endedAt: null,
+                id: { not: 'trial-open' },
+            },
+            data: {
+                endedAt: new Date('2026-03-29T00:05:00.000Z'),
+            },
+        });
+
+        await app.close();
+    });
+
+    it('reuses an existing open session trial and closes duplicate open rows', async () => {
+        vi.mocked(db.trial.findMany).mockResolvedValue([
+            {
+                id: 'trial-primary',
+                hubEntityId: 'spec-1',
+                entityVersion: 7,
+                teamId: 'team-1',
+                sessionId: 'session-1',
+                contextNarrative: null,
+                logRefs: '[]',
+                startedAt: new Date('2026-03-29T00:02:00.000Z'),
+                endedAt: null,
+            },
+            {
+                id: 'trial-duplicate',
+                hubEntityId: 'spec-1',
+                entityVersion: 7,
+                teamId: 'team-1',
+                sessionId: 'session-1',
+                contextNarrative: null,
+                logRefs: '[]',
+                startedAt: new Date('2026-03-29T00:01:00.000Z'),
+                endedAt: null,
+            },
+        ] as never);
+        vi.mocked(db.trial.updateMany).mockResolvedValue({ count: 1 } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/trials',
+            payload: {
+                hubEntityId: 'spec-1',
+                entityVersion: 7,
+                teamId: 'team-1',
+                sessionId: 'session-1',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            trial: expect.objectContaining({
+                id: 'trial-primary',
+            }),
+        });
+        expect(db.trial.create).not.toHaveBeenCalled();
+        expect(db.trial.updateMany).toHaveBeenCalledWith({
+            where: {
+                id: { in: ['trial-duplicate'] },
+            },
+            data: {
+                endedAt: expect.any(Date),
+            },
+        });
+
+        await app.close();
+    });
+
+    it('closes a stale open trial before creating a new one for the same session', async () => {
+        vi.mocked(db.trial.findMany).mockResolvedValue([
+            {
+                id: 'trial-old',
+                hubEntityId: 'spec-1',
+                entityVersion: 6,
+                teamId: 'team-1',
+                sessionId: 'session-1',
+                contextNarrative: null,
+                logRefs: '[]',
+                startedAt: new Date('2026-03-29T00:00:00.000Z'),
+                endedAt: null,
+            },
+        ] as never);
+        vi.mocked(db.trial.updateMany).mockResolvedValue({ count: 1 } as never);
+        vi.mocked(db.trial.create).mockResolvedValue({
+            id: 'trial-new',
+            hubEntityId: 'spec-1',
+            entityVersion: 7,
+            teamId: 'team-1',
+            sessionId: 'session-1',
+            contextNarrative: null,
+            logRefs: '[]',
+            startedAt: new Date('2026-03-29T00:05:00.000Z'),
+            endedAt: null,
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/trials',
+            payload: {
+                hubEntityId: 'spec-1',
+                entityVersion: 7,
+                teamId: 'team-1',
+                sessionId: 'session-1',
+            },
+        });
+
+        expect(response.statusCode).toBe(201);
+        expect(db.trial.updateMany).toHaveBeenCalledWith({
+            where: {
+                id: { in: ['trial-old'] },
+            },
+            data: {
+                endedAt: expect.any(Date),
+            },
+        });
+        expect(db.trial.create).toHaveBeenCalledWith({
+            data: expect.objectContaining({
+                hubEntityId: 'spec-1',
+                entityVersion: 7,
+                sessionId: 'session-1',
+            }),
+        });
+
+        await app.close();
+    });
+
+    it('creates and lists verdicts', async () => {
+        vi.mocked(db.verdict.create).mockResolvedValue({
+            id: 'verdict-1',
+            trialId: 'trial-1',
+            readerRole: 'supervisor',
+            readerSessionId: 'reviewer-1',
+            content: 'overall 85',
+            score: 85,
+            action: 'keep',
+            dimensions: '{"delivery":85}',
+            createdAt: new Date('2026-03-29T00:06:00.000Z'),
+        } as never);
+        vi.mocked(db.verdict.findMany).mockResolvedValue([
+            {
+                id: 'verdict-1',
+                trialId: 'trial-1',
+                readerRole: 'supervisor',
+                readerSessionId: 'reviewer-1',
+                content: 'overall 85',
+                score: 85,
+                action: 'keep',
+                dimensions: '{"delivery":85}',
+                createdAt: new Date('2026-03-29T00:06:00.000Z'),
+            },
+        ] as never);
+
+        const app = buildApp();
+
+        const createResponse = await app.inject({
+            method: 'POST',
+            url: '/v1/verdicts',
+            payload: {
+                trialId: 'trial-1',
+                readerRole: 'supervisor',
+                readerSessionId: 'reviewer-1',
+                content: 'overall 85',
+                score: 85,
+                action: 'keep',
+                dimensions: '{"delivery":85}',
+            },
+        });
+        expect(createResponse.statusCode).toBe(201);
+        expect(db.verdict.create).toHaveBeenCalledWith({
+            data: {
+                trialId: 'trial-1',
+                readerRole: 'supervisor',
+                readerSessionId: 'reviewer-1',
+                content: 'overall 85',
+                score: 85,
+                action: 'keep',
+                dimensions: '{"delivery":85}',
+            },
+        });
+
+        const listResponse = await app.inject({
+            method: 'GET',
+            url: '/v1/verdicts?trialId=trial-1&readerRole=supervisor&limit=5',
+        });
+        expect(listResponse.statusCode).toBe(200);
+        expect(db.verdict.findMany).toHaveBeenCalledWith({
+            where: {
+                trialId: 'trial-1',
+                readerRole: 'supervisor',
+            },
+            orderBy: { createdAt: 'desc' },
+            take: 5,
+        });
 
         await app.close();
     });

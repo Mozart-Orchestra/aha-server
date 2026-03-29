@@ -44,7 +44,7 @@ export function versionRoutes(app: Fastify) {
 
         // Fallbacke
         reply.send({ updateUrl: null });
-        } catch (error: any) {
+        } catch (_error: unknown) {
             return reply.code(500).send({ error: 'Version check failed' });
         }
     });

@@ -518,6 +518,55 @@ describe('teamManagementRoutes', () => {
         await app.close();
     });
 
+    it('deduplicates team members by sessionTag when the sessionId rotates', async () => {
+        const board = {
+            team: {
+                name: 'Stable Member IDs',
+                members: [
+                    {
+                        memberId: 'member-1',
+                        sessionId: 'session-old',
+                        sessionTag: 'team:team-1:member:member-1',
+                        roleId: 'builder',
+                        displayName: 'Builder 1',
+                        joinedAt: 1,
+                    },
+                ],
+            },
+            tasks: [],
+        };
+
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(buildTeamArtifact(board) as never);
+        vi.mocked(db.artifact.update).mockResolvedValue({ id: 'team-1' } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/teams/team-1/members',
+            payload: {
+                sessionId: 'session-new',
+                sessionTag: 'team:team-1:member:member-1',
+                roleId: 'builder',
+                displayName: 'Builder 1',
+                runtimeType: 'codex',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        const updateCall = vi.mocked(db.artifact.update).mock.calls[0]?.[0];
+        const rawBody = updateCall?.data?.body as Buffer;
+        const parsed = JSON.parse(rawBody.toString());
+        const boardBody = JSON.parse(parsed.body);
+        expect(boardBody.team.members).toHaveLength(1);
+        expect(boardBody.team.members[0]).toEqual(expect.objectContaining({
+            sessionId: 'session-new',
+            sessionTag: 'team:team-1:member:member-1',
+            runtimeType: 'codex',
+        }));
+
+        await app.close();
+    });
+
     it('lists members from the stored board', async () => {
         const board = {
             team: {

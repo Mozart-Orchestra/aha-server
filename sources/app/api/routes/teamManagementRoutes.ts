@@ -734,6 +734,9 @@ async function addTeamMember(
         if (memberId && m.memberId) {
             return m.memberId === memberId;
         }
+        if (sessionTag && m.sessionTag) {
+            return m.sessionTag === sessionTag;
+        }
         return m.sessionId === sessionId;
     });
     if (existing) {

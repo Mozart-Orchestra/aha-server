@@ -484,3 +484,57 @@ model MarketReview {
     @@unique([listingId, userId])
     @@index([listingId])
 }
+
+//
+// Evolution: Trial + Verdict
+// Trial links runtime execution to a specific genome version.
+// Verdict is a multi-perspective review of a Trial (大众点评 model).
+// These reference genome-hub's entityId + version as the source of truth.
+//
+
+model Trial {
+    id               String    @id @default(cuid())
+    /// genome-hub entity ID (not local Genome.id)
+    hubEntityId      String
+    /// genome version that was running
+    entityVersion    Int
+    /// team this trial belongs to
+    teamId           String?
+    /// aha session ID of the running agent
+    sessionId        String?
+    /// narrative description of running conditions (context C)
+    contextNarrative String?
+    /// JSON array of log references: [{ kind, path, sessionId? }]
+    logRefs          String?
+    startedAt        DateTime  @default(now())
+    endedAt          DateTime?
+
+    verdicts         Verdict[]
+
+    @@index([hubEntityId])
+    @@index([hubEntityId, entityVersion])
+    @@index([teamId])
+    @@index([sessionId])
+}
+
+model Verdict {
+    id              String   @id @default(cuid())
+    trialId         String
+    trial           Trial    @relation(fields: [trialId], references: [id], onDelete: Cascade)
+    /// who reviewed: supervisor | observer | user | agent-self | orchestrator
+    readerRole      String
+    /// aha session ID of the reviewer (null for user verdicts)
+    readerSessionId String?
+    /// review narrative (the actual review text)
+    content         String
+    /// optional score anchor (0-100)
+    score           Int?
+    /// optional action anchor: keep | keep_with_guardrails | mutate | discard
+    action          String?
+    /// optional JSON: { delivery, integrity, efficiency, collaboration, reliability }
+    dimensions      String?
+    createdAt       DateTime @default(now())
+
+    @@index([trialId])
+    @@index([readerRole])
+}
