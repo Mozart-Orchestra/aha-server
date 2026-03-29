@@ -174,6 +174,162 @@ function readSupervisorStateSnapshot(teamId: string): {
     }
 }
 
+type TrialWriteInput = {
+    hubEntityId: string;
+    entityVersion: number;
+    teamId?: string;
+    sessionId?: string;
+    contextNarrative?: string;
+    logRefs?: string;
+};
+
+type TrialRecordLike = {
+    id: string;
+    hubEntityId: string;
+    entityVersion: number;
+    teamId: string | null;
+    sessionId: string | null;
+    contextNarrative: string | null;
+    logRefs: string | null;
+    startedAt: Date | string;
+    endedAt: Date | string | null;
+};
+
+type TrialDbClient = {
+    $executeRaw?: (...args: unknown[]) => Promise<unknown>;
+    trial: {
+        findMany: typeof db.trial.findMany;
+        create: typeof db.trial.create;
+        updateMany: typeof db.trial.updateMany;
+        update: typeof db.trial.update;
+    };
+};
+
+function sortTrialsForSession<T extends TrialRecordLike>(trials: T[]): T[] {
+    return [...trials].sort((left, right) => {
+        const leftOpenRank = left.endedAt == null ? 0 : 1;
+        const rightOpenRank = right.endedAt == null ? 0 : 1;
+        if (leftOpenRank !== rightOpenRank) {
+            return leftOpenRank - rightOpenRank;
+        }
+
+        const startedDiff = new Date(right.startedAt).getTime() - new Date(left.startedAt).getTime();
+        if (startedDiff !== 0) {
+            return startedDiff;
+        }
+
+        return right.id.localeCompare(left.id);
+    });
+}
+
+function isSameOpenSessionTrial(trial: TrialRecordLike, body: TrialWriteInput): boolean {
+    return (
+        trial.hubEntityId === body.hubEntityId
+        && trial.entityVersion === body.entityVersion
+        && trial.teamId === (body.teamId ?? null)
+    );
+}
+
+async function withSessionTrialLock<T>(
+    sessionId: string | undefined,
+    operation: (tx: TrialDbClient) => Promise<T>,
+): Promise<T> {
+    if (!sessionId) {
+        return operation(db as TrialDbClient);
+    }
+
+    return db.$transaction(async (tx) => {
+        const trialTx = tx as unknown as TrialDbClient;
+        if (typeof trialTx.$executeRaw === 'function') {
+            await trialTx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${sessionId}))`;
+        }
+        return operation(trialTx);
+    });
+}
+
+async function ensureSingleOpenSessionTrial(
+    tx: TrialDbClient,
+    body: TrialWriteInput,
+): Promise<{ trial: TrialRecordLike; created: boolean }> {
+    if (!body.sessionId) {
+        const trial = await tx.trial.create({
+            data: {
+                hubEntityId: body.hubEntityId,
+                entityVersion: body.entityVersion,
+                teamId: body.teamId ?? null,
+                sessionId: null,
+                contextNarrative: body.contextNarrative ?? null,
+                logRefs: body.logRefs ?? null,
+            },
+        });
+        return { trial, created: true };
+    }
+
+    const openTrials = sortTrialsForSession(await tx.trial.findMany({
+        where: {
+            sessionId: body.sessionId,
+            endedAt: null,
+        },
+        orderBy: [
+            { startedAt: 'desc' },
+            { id: 'desc' },
+        ],
+    }) as TrialRecordLike[]);
+
+    if (openTrials.length === 0) {
+        const trial = await tx.trial.create({
+            data: {
+                hubEntityId: body.hubEntityId,
+                entityVersion: body.entityVersion,
+                teamId: body.teamId ?? null,
+                sessionId: body.sessionId,
+                contextNarrative: body.contextNarrative ?? null,
+                logRefs: body.logRefs ?? null,
+            },
+        });
+        return { trial, created: true };
+    }
+
+    const primaryTrial = openTrials[0];
+    const duplicateIds = openTrials.slice(1).map((trial) => trial.id);
+    if (duplicateIds.length > 0) {
+        await tx.trial.updateMany({
+            where: { id: { in: duplicateIds } },
+            data: {
+                endedAt: new Date(),
+            },
+        });
+    }
+
+    if (isSameOpenSessionTrial(primaryTrial, body)) {
+        return { trial: primaryTrial, created: false };
+    }
+
+    await tx.trial.updateMany({
+        where: {
+            id: {
+                in: [primaryTrial.id],
+            },
+        },
+        data: {
+            endedAt: new Date(),
+        },
+    });
+
+    const trial = await tx.trial.create({
+        data: {
+            hubEntityId: body.hubEntityId,
+            entityVersion: body.entityVersion,
+            teamId: body.teamId ?? null,
+            sessionId: body.sessionId,
+            contextNarrative: body.contextNarrative ?? null,
+            logRefs: body.logRefs ?? null,
+        },
+    });
+
+    return { trial, created: true };
+}
+
 /**
  * Evolution Routes
  *
@@ -871,6 +1027,62 @@ export function evolutionRoutes(app: Fastify) {
     });
 
     // =========================================================================
+    // POST /v1/genomes/:namespace/:name/diff
+    // Proxy supervisor genome diff submit calls to genome-hub so clients
+    // do not need direct access (HUB_PUBLISH_KEY) to the marketplace service.
+    // Used by the evolve_genome MCP tool as fallback when direct hub access
+    // returns 401/403.  Must be registered before /v1/genomes/:id/publish.
+    // =========================================================================
+    app.post('/v1/genomes/:namespace/:name/diff', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                namespace: z.string(),
+                name: z.string(),
+            }),
+            body: z.object({
+                description: z.string(),
+                changes: z.array(z.object({
+                    type: z.string(),
+                    path: z.string(),
+                    op: z.string(),
+                    content: z.string(),
+                })),
+                strategy: z.string().optional(),
+                authorRole: z.string().optional(),
+                authorSession: z.string().optional(),
+            }),
+        },
+    }, async (request, reply) => {
+        const { namespace, name } = request.params as { namespace: string; name: string };
+        const payload = request.body as Record<string, unknown>;
+
+        try {
+            const hubUrl = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
+            const hubPublishKey = process.env.HUB_PUBLISH_KEY;
+            const { default: axios } = await import('axios');
+
+            const upstream = await axios.post(
+                `${hubUrl}/genomes/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/diff`,
+                payload,
+                {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10_000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(upstream.data);
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `genome diff proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy genome diff' });
+        }
+    });
+
+    // =========================================================================
     // POST /v1/genomes/:namespace/:name/promote
     // Proxy supervisor genome evolution promote calls to genome-hub so clients
     // do not need direct access (HUB_PUBLISH_KEY) to the marketplace service.
@@ -1059,6 +1271,196 @@ export function evolutionRoutes(app: Fastify) {
             log({ module: 'evolution', level: 'error' }, `genome publish error: ${error}`);
             return reply.code(500).send({ error: error.message });
         }
+    });
+
+    // ── Trial endpoints ────────────────────────────────────────────────
+
+    app.post('/v1/trials', {
+        preHandler: app.authenticate,
+        schema: {
+            body: z.object({
+                hubEntityId: z.string().min(1),
+                entityVersion: z.number().int().min(1),
+                teamId: z.string().optional(),
+                sessionId: z.string().optional(),
+                contextNarrative: z.string().optional(),
+                logRefs: z.string().optional(),
+            }),
+        },
+    }, async (request, reply) => {
+        const body = request.body as {
+            hubEntityId: string;
+            entityVersion: number;
+            teamId?: string;
+            sessionId?: string;
+            contextNarrative?: string;
+            logRefs?: string;
+        };
+
+        const { trial, created } = await withSessionTrialLock(body.sessionId, (tx) =>
+            ensureSingleOpenSessionTrial(tx, body),
+        );
+
+        return reply.code(created ? 201 : 200).send({ trial });
+    });
+
+    app.get('/v1/trials', {
+        preHandler: app.authenticate,
+        schema: {
+            querystring: z.object({
+                hubEntityId: z.string().optional(),
+                entityVersion: z.coerce.number().int().optional(),
+                teamId: z.string().optional(),
+                sessionId: z.string().optional(),
+                limit: z.coerce.number().int().default(50),
+            }),
+        },
+    }, async (request, reply) => {
+        const q = request.query as {
+            hubEntityId?: string;
+            entityVersion?: number;
+            teamId?: string;
+            sessionId?: string;
+            limit: number;
+        };
+
+        const where: Record<string, unknown> = {};
+        if (q.hubEntityId) where.hubEntityId = q.hubEntityId;
+        if (q.entityVersion) where.entityVersion = q.entityVersion;
+        if (q.teamId) where.teamId = q.teamId;
+        if (q.sessionId) where.sessionId = q.sessionId;
+
+        const trials = q.sessionId
+            ? sortTrialsForSession(await db.trial.findMany({
+                where,
+                orderBy: [
+                    { startedAt: 'desc' },
+                    { id: 'desc' },
+                ],
+            }) as TrialRecordLike[]).slice(0, q.limit)
+            : await db.trial.findMany({
+                where,
+                orderBy: [
+                    { startedAt: 'desc' },
+                    { id: 'desc' },
+                ],
+                take: q.limit,
+            });
+
+        return { trials };
+    });
+
+    app.patch('/v1/trials/:id', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ id: z.string() }),
+            body: z.object({
+                endedAt: z.string().datetime().optional(),
+                logRefs: z.string().optional(),
+                contextNarrative: z.string().optional(),
+            }),
+        },
+    }, async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const body = request.body as {
+            endedAt?: string;
+            logRefs?: string;
+            contextNarrative?: string;
+        };
+
+        const data: Record<string, unknown> = {};
+        if (body.endedAt) data.endedAt = new Date(body.endedAt);
+        if (body.logRefs !== undefined) data.logRefs = body.logRefs;
+        if (body.contextNarrative !== undefined) data.contextNarrative = body.contextNarrative;
+
+        try {
+            const trial = await db.trial.update({ where: { id }, data });
+            if (data.endedAt instanceof Date && trial.sessionId) {
+                await db.trial.updateMany({
+                    where: {
+                        sessionId: trial.sessionId,
+                        endedAt: null,
+                        id: { not: trial.id },
+                    },
+                    data: {
+                        endedAt: data.endedAt,
+                    },
+                });
+            }
+            return { trial };
+        } catch {
+            return reply.code(404).send({ error: 'Trial not found' });
+        }
+    });
+
+    // ── Verdict endpoints ──────────────────────────────────────────────
+
+    app.post('/v1/verdicts', {
+        preHandler: app.authenticate,
+        schema: {
+            body: z.object({
+                trialId: z.string().min(1),
+                readerRole: z.string().min(1),
+                readerSessionId: z.string().optional(),
+                content: z.string().min(1),
+                score: z.number().int().min(0).max(100).optional(),
+                action: z.enum(['keep', 'keep_with_guardrails', 'mutate', 'discard']).optional(),
+                dimensions: z.string().optional(),
+            }),
+        },
+    }, async (request, reply) => {
+        const body = request.body as {
+            trialId: string;
+            readerRole: string;
+            readerSessionId?: string;
+            content: string;
+            score?: number;
+            action?: string;
+            dimensions?: string;
+        };
+
+        const verdict = await db.verdict.create({
+            data: {
+                trialId: body.trialId,
+                readerRole: body.readerRole,
+                readerSessionId: body.readerSessionId ?? null,
+                content: body.content,
+                score: body.score ?? null,
+                action: body.action ?? null,
+                dimensions: body.dimensions ?? null,
+            },
+        });
+
+        return reply.code(201).send({ verdict });
+    });
+
+    app.get('/v1/verdicts', {
+        preHandler: app.authenticate,
+        schema: {
+            querystring: z.object({
+                trialId: z.string().optional(),
+                readerRole: z.string().optional(),
+                limit: z.coerce.number().int().default(50),
+            }),
+        },
+    }, async (request, reply) => {
+        const q = request.query as {
+            trialId?: string;
+            readerRole?: string;
+            limit: number;
+        };
+
+        const where: Record<string, unknown> = {};
+        if (q.trialId) where.trialId = q.trialId;
+        if (q.readerRole) where.readerRole = q.readerRole;
+
+        const verdicts = await db.verdict.findMany({
+            where,
+            orderBy: { createdAt: 'desc' },
+            take: q.limit,
+        });
+
+        return { verdicts };
     });
 }
 
