@@ -567,6 +567,47 @@ describe('teamManagementRoutes', () => {
         await app.close();
     });
 
+    it('persists parentSessionId on add-member so replace chains remain observable', async () => {
+        const board = {
+            team: {
+                name: 'Replacement Chain',
+                members: [],
+            },
+            tasks: [],
+        };
+
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(buildTeamArtifact(board) as never);
+        vi.mocked(db.artifact.update).mockResolvedValue({ id: 'team-1' } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/teams/team-1/members',
+            payload: {
+                sessionId: 'session-new',
+                roleId: 'builder',
+                displayName: 'Replacement Builder',
+                parentSessionId: 'session-old',
+                runtimeType: 'codex',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        const updateCall = vi.mocked(db.artifact.update).mock.calls[0]?.[0];
+        const rawBody = updateCall?.data?.body as Buffer;
+        const parsed = JSON.parse(rawBody.toString());
+        const boardBody = JSON.parse(parsed.body);
+        expect(boardBody.team.members).toEqual([
+            expect.objectContaining({
+                sessionId: 'session-new',
+                parentSessionId: 'session-old',
+                runtimeType: 'codex',
+            }),
+        ]);
+
+        await app.close();
+    });
+
     it('lists members from the stored board', async () => {
         const board = {
             team: {

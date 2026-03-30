@@ -22,6 +22,7 @@
 12. [Key-Value Storage](#key-value-storage)
 13. [Team Messages](#team-messages)
 14. [Development](#development)
+15. [Team Tasks & Genomes](#team-tasks--genomes)
 
 ---
 
@@ -718,6 +719,46 @@ socket.on('message:new', (data) => {
 - `artifact:add`: Artifact added
 - `message:new`: New message received
 - `machine:heartbeat`: Machine heartbeat
+
+---
+
+## Team Tasks & Genomes
+
+### PUT /v1/teams/:teamId/tasks/:taskId
+
+Update a task.
+
+**Request Body Notes:**
+- `comment` may be either:
+  - a structured `TaskComment` object, or
+  - a shorthand string
+- When `comment` is a shorthand string, `commentType` may be supplied to classify it (`note`, `handoff`, `decision`, etc.)
+- For reassignment flows such as `replace_agent`, the server normalizes shorthand comments into the structured task comment shape expected by the task subsystem
+
+**Example:**
+```json
+{
+  "assigneeId": "session-replacement",
+  "comment": "Migrated during replace_agent handoff",
+  "commentType": "handoff"
+}
+```
+
+### Genome Projection Version Contract
+
+For genome read APIs such as:
+- `GET /v1/genomes/:id`
+- `GET /v1/genomes`
+- `GET /v1/genomes/:namespace/:name/latest`
+- `GET /v1/genomes/:namespace/:name/:version`
+
+the returned `genome.spec` JSON is projected so that `spec.version` matches the canonical top-level `genome.version`.
+
+For genome-hub proxy/publish APIs such as:
+- `POST /v1/genomes/hub-create`
+- `POST /v1/genomes/:id/publish`
+
+the server forwards a version-synced `spec` payload to keep marketplace/runtime identity aligned.
 
 ---
 

@@ -36,11 +36,25 @@ const BlockerSchema = z.object({
     description: z.string().min(1).max(1000)
 });
 
+const TaskCommentTypeSchema = z.enum([
+    'note',
+    'status-change',
+    'review-feedback',
+    'handoff',
+    'blocker',
+    'decision',
+    'human-override',
+    'plan',
+    'plan-review',
+    'execution-check',
+    'rework-request',
+]);
+
 const TaskCommentSchema = z.object({
     sessionId: z.string(),
     role: z.string().optional(),
     displayName: z.string().optional(),
-    type: z.enum(['note', 'status-change', 'review-feedback', 'handoff', 'blocker', 'decision', 'human-override', 'plan', 'plan-review', 'execution-check', 'rework-request']).optional(),
+    type: TaskCommentTypeSchema.optional(),
     content: z.string().min(1).max(4000),
     fromStatus: z.string().optional(),
     toStatus: z.string().optional(),
@@ -65,10 +79,51 @@ const ClearHumanStatusLockSchema = TaskActorSchema.extend({
     comment: z.string().max(4000).optional(),
 });
 
+const TaskUpdateCommentSchema = z.union([
+    z.string().min(1).max(4000),
+    TaskCommentSchema,
+]);
+
 const TaskUpdateSchema = TaskSchema.partial().extend({
-    comment: TaskCommentSchema.optional(),
+    comment: TaskUpdateCommentSchema.optional(),
+    commentType: TaskCommentTypeSchema.optional(),
     actor: TaskActorSchema.optional(),
 });
+
+type TaskCommentPayload = z.infer<typeof TaskCommentSchema>;
+type TaskUpdateCommentPayload = z.infer<typeof TaskUpdateCommentSchema>;
+
+function normalizeTaskUpdateComment(
+    comment: TaskUpdateCommentPayload | undefined,
+    defaults?: {
+        sessionId?: string;
+        role?: string;
+        displayName?: string;
+        type?: TaskCommentPayload['type'];
+    },
+): TaskCommentPayload | undefined {
+    if (!comment) {
+        return undefined;
+    }
+
+    if (typeof comment === 'string') {
+        return {
+            sessionId: defaults?.sessionId || 'system',
+            ...(defaults?.role ? { role: defaults.role } : {}),
+            ...(defaults?.displayName ? { displayName: defaults.displayName } : {}),
+            ...(defaults?.type ? { type: defaults.type } : {}),
+            content: comment,
+        };
+    }
+
+    return {
+        ...comment,
+        sessionId: comment.sessionId || defaults?.sessionId || 'system',
+        ...(comment.role === undefined && defaults?.role ? { role: defaults.role } : {}),
+        ...(comment.displayName === undefined && defaults?.displayName ? { displayName: defaults.displayName } : {}),
+        ...(comment.type === undefined && defaults?.type ? { type: defaults.type } : {}),
+    };
+}
 
 export function taskRoutes(app: Fastify) {
     log({ module: 'api' }, 'Registering taskRoutes...');
@@ -219,7 +274,22 @@ export function taskRoutes(app: Fastify) {
     }, async (request, reply) => {
         const userId = request.userId;
         const { teamId, taskId } = request.params as { teamId: string; taskId: string };
-        const updates = request.body as z.infer<typeof TaskUpdateSchema>;
+        const body = request.body as z.infer<typeof TaskUpdateSchema>;
+        const { comment, commentType, actor, ...taskUpdates } = body;
+        const updates = {
+            ...taskUpdates,
+            ...(actor ? { actor } : {}),
+            ...(comment !== undefined
+                ? {
+                    comment: normalizeTaskUpdateComment(comment, {
+                        sessionId: actor?.sessionId || taskUpdates.assigneeId || 'system',
+                        role: actor?.role,
+                        displayName: actor?.displayName,
+                        type: commentType,
+                    }),
+                }
+                : {}),
+        };
 
         try {
             const task = await taskOrchestrator.updateTask(userId, teamId, taskId, updates);

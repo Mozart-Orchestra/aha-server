@@ -184,6 +184,33 @@ describe('taskRoutes', () => {
         await app.close();
     });
 
+    it('accepts shorthand string comments on update and normalizes them into TaskComment payloads', async () => {
+        mocked.updateTask.mockResolvedValue(buildTask('task-1'));
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'PUT',
+            url: '/v1/teams/team-1/tasks/task-1',
+            payload: {
+                assigneeId: 'session-replacement',
+                comment: 'Migrated during replace_agent handoff',
+                commentType: 'handoff',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(mocked.updateTask).toHaveBeenCalledWith('user-1', 'team-1', 'task-1', expect.objectContaining({
+            assigneeId: 'session-replacement',
+            comment: {
+                sessionId: 'session-replacement',
+                type: 'handoff',
+                content: 'Migrated during replace_agent handoff',
+            },
+        }));
+
+        await app.close();
+    });
+
     it('sets and clears human status lock while observing session activity', async () => {
         mocked.setHumanStatusLock.mockResolvedValue(buildTask('task-lock'));
         mocked.clearHumanStatusLock.mockResolvedValue(buildTask('task-lock'));

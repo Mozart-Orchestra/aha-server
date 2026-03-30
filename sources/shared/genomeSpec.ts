@@ -68,16 +68,54 @@ export interface GenomeSpec {
 
 /**
  * Parse a stored spec JSON string into a typed GenomeSpec object.
- * Returns an empty object on malformed input (same defensive behaviour as aha-cli).
+ * Throws when the payload is malformed or not a JSON object.
  */
 export function parseGenomeSpec(specString: string): GenomeSpec {
     try {
         const parsed = JSON.parse(specString);
         if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-            return {};
+            throw new Error('Genome spec must be a JSON object');
         }
         return parsed as GenomeSpec;
-    } catch {
-        return {};
+    } catch (error) {
+        if (error instanceof Error && error.message === 'Genome spec must be a JSON object') {
+            throw error;
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`Failed to parse genome spec: ${message}`);
+    }
+}
+
+/**
+ * Sync the embedded `spec.version` field with the canonical Genome.version.
+ * Throws when the payload is malformed or not a JSON object.
+ */
+export function syncGenomeSpecVersion(specString: string, version?: number | null): string {
+    if (!Number.isInteger(version) || (version ?? 0) < 1) {
+        throw new Error(`Genome spec version sync requires a positive integer version, received: ${String(version)}`);
+    }
+
+    try {
+        const parsed = JSON.parse(specString);
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new Error('Genome spec version sync requires a JSON object payload');
+        }
+
+        if ((parsed as GenomeSpec).version === version) {
+            return specString;
+        }
+
+        return JSON.stringify({
+            ...parsed,
+            version,
+        });
+    } catch (error) {
+        if (error instanceof Error && error.message === 'Genome spec version sync requires a JSON object payload') {
+            throw error;
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`Genome spec version sync failed: ${message}`);
     }
 }

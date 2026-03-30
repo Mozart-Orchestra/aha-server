@@ -2,7 +2,7 @@ import { Fastify } from "../types";
 import { z } from "zod";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parseGenomeSpec } from "@/shared/genomeSpec";
+import { parseGenomeSpec, syncGenomeSpecVersion } from "@/shared/genomeSpec";
 import { eventRouter } from "@/app/events/eventRouter";
 import { activityCache } from "@/app/presence/sessionCache";
 import { allocateUserSeq } from "@/storage/seq";
@@ -95,11 +95,57 @@ function resolveGenomeHubPublishKey(): string | undefined {
     return process.env.GENOME_HUB_PUBLISH_KEY || process.env.HUB_PUBLISH_KEY;
 }
 
-function withGenomeFeedbackData<T extends { scorecard?: string | null }>(genome: T): T & { feedbackData: string | null } {
+function withGenomeProjection<T extends {
+    spec?: string | null;
+    version?: number | null;
+    scorecard?: string | null;
+    feedbackData?: string | null;
+}>(genome: T): T & { feedbackData?: string | null } {
+    const projectedSpec = typeof genome.spec === 'string'
+        ? syncGenomeSpecVersion(genome.spec, genome.version)
+        : genome.spec;
+    const hasFeedbackData = 'feedbackData' in genome || 'scorecard' in genome;
+
     return {
         ...genome,
-        feedbackData: genome.scorecard ?? null,
+        ...(projectedSpec !== undefined ? { spec: projectedSpec } : {}),
+        ...(hasFeedbackData ? { feedbackData: genome.feedbackData ?? genome.scorecard ?? null } : {}),
     };
+}
+
+function normalizeGenomeApiPayload<T>(payload: T): T {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        return payload;
+    }
+
+    const record = payload as Record<string, unknown>;
+    const normalized: Record<string, unknown> = { ...record };
+
+    if (record.genome && typeof record.genome === 'object' && !Array.isArray(record.genome)) {
+        normalized.genome = withGenomeProjection(record.genome as {
+            spec?: string | null;
+            version?: number | null;
+            scorecard?: string | null;
+            feedbackData?: string | null;
+        });
+    }
+
+    if (Array.isArray(record.genomes)) {
+        normalized.genomes = record.genomes.map((genome) => {
+            if (!genome || typeof genome !== 'object' || Array.isArray(genome)) {
+                return genome;
+            }
+
+            return withGenomeProjection(genome as {
+                spec?: string | null;
+                version?: number | null;
+                scorecard?: string | null;
+                feedbackData?: string | null;
+            });
+        });
+    }
+
+    return normalized as T;
 }
 
 function parseStoredGenomeScorecard(scorecard: string | null | undefined): Record<string, unknown> | null {
@@ -590,7 +636,7 @@ export function evolutionRoutes(app: Fastify) {
             if (!genome) {
                 return reply.code(404).send({ error: 'Genome not found' });
             }
-            return reply.send({ genome: withGenomeFeedbackData(genome) });
+            return reply.send({ genome: withGenomeProjection(genome) });
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome get error: ${error}`);
             return reply.code(500).send({ error: error.message });
@@ -641,7 +687,7 @@ export function evolutionRoutes(app: Fastify) {
                 db.genome.count({ where }),
             ]);
 
-            return reply.send({ genomes: genomes.map(withGenomeFeedbackData), total });
+            return reply.send({ genomes: genomes.map(withGenomeProjection), total });
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genomes list error: ${error}`);
             return reply.code(500).send({ error: error.message });
@@ -680,23 +726,23 @@ export function evolutionRoutes(app: Fastify) {
             if (id) {
                 const existing = await db.genome.findUnique({
                     where: { id },
-                    select: { id: true, accountId: true },
+                    select: { id: true, accountId: true, version: true },
                 });
 
                 if (existing && existing.accountId !== userId) {
                     return reply.code(403).send({ error: 'Genome not found' });
                 }
-            }
 
-            const genome = id
-                ? await db.genome.upsert({
+                const projectedSpec = syncGenomeSpecVersion(spec, existing?.version ?? 1);
+
+                const genome = await db.genome.upsert({
                     where: { id },
                     create: {
                         id,
                         accountId: userId,
                         name,
                         description: description ?? null,
-                        spec,
+                        spec: projectedSpec,
                         parentSessionId: parentSessionId ?? null,
                         teamId: teamId ?? null,
                         namespace: namespace ?? null,
@@ -711,7 +757,7 @@ export function evolutionRoutes(app: Fastify) {
                     update: {
                         name,
                         description: description ?? null,
-                        spec,
+                        spec: projectedSpec,
                         parentSessionId: parentSessionId ?? null,
                         teamId: teamId ?? null,
                         namespace: namespace ?? null,
@@ -724,27 +770,31 @@ export function evolutionRoutes(app: Fastify) {
                         variantOf: variantOf ?? null,
                         mutationNote: mutationNote ?? null,
                     },
-                })
-                : await db.genome.create({
-                    data: {
-                        accountId: userId,
-                        name,
-                        description: description ?? null,
-                        spec,
-                        parentSessionId: parentSessionId ?? null,
-                        teamId: teamId ?? null,
-                        namespace: namespace ?? null,
-                        tags: tags ?? null,
-                        category: category ?? null,
-                        isPublic,
-                        status,
-                        origin: origin ?? null,
-                        variantOf: variantOf ?? null,
-                        mutationNote: mutationNote ?? null,
-                    },
                 });
 
-            return reply.code(201).send({ genome: withGenomeFeedbackData(genome) });
+                return reply.code(201).send({ genome: withGenomeProjection(genome) });
+            }
+
+            const genome = await db.genome.create({
+                data: {
+                    accountId: userId,
+                    name,
+                    description: description ?? null,
+                    spec: syncGenomeSpecVersion(spec, 1),
+                    parentSessionId: parentSessionId ?? null,
+                    teamId: teamId ?? null,
+                    namespace: namespace ?? null,
+                    tags: tags ?? null,
+                    category: category ?? null,
+                    isPublic,
+                    status,
+                    origin: origin ?? null,
+                    variantOf: variantOf ?? null,
+                    mutationNote: mutationNote ?? null,
+                },
+            });
+
+            return reply.code(201).send({ genome: withGenomeProjection(genome) });
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome create error: ${error}`);
             return reply.code(500).send({ error: error.message });
@@ -798,7 +848,7 @@ export function evolutionRoutes(app: Fastify) {
                     },
                 });
 
-                return reply.send({ genome: withGenomeFeedbackData(genome), createdNewVersion: false });
+                return reply.send({ genome: withGenomeProjection(genome), createdNewVersion: false });
             }
 
             const nextNamespace = updates.namespace !== undefined ? updates.namespace : current.namespace;
@@ -818,16 +868,17 @@ export function evolutionRoutes(app: Fastify) {
                 select: { version: true },
             });
 
+            const nextVersion = (latestVersion?.version ?? 0) + 1;
             const genome = await db.genome.create({
                 data: {
                     accountId: current.accountId,
                     name: nextName,
                     description: updates.description !== undefined ? updates.description : current.description,
-                    spec: nextSpec,
+                    spec: syncGenomeSpecVersion(nextSpec, nextVersion),
                     parentSessionId: current.parentSessionId,
                     teamId: current.teamId,
                     namespace: nextNamespace,
-                    version: (latestVersion?.version ?? 0) + 1,
+                    version: nextVersion,
                     tags: updates.tags !== undefined ? updates.tags : current.tags,
                     category: updates.category !== undefined ? updates.category : current.category,
                     isPublic: false,
@@ -839,7 +890,7 @@ export function evolutionRoutes(app: Fastify) {
                 },
             });
 
-            return reply.send({ genome: withGenomeFeedbackData(genome), createdNewVersion: true });
+            return reply.send({ genome: withGenomeProjection(genome), createdNewVersion: true });
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome patch error: ${error}`);
             return reply.code(500).send({ error: error.message });
@@ -911,7 +962,7 @@ export function evolutionRoutes(app: Fastify) {
                 orderBy: { version: 'desc' },
             });
             if (!genome) return reply.code(404).send({ error: 'Genome not found' });
-            return reply.send({ genome: withGenomeFeedbackData(genome) });
+            return reply.send({ genome: withGenomeProjection(genome) });
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome latest error: ${error}`);
             return reply.code(500).send({ error: error.message });
@@ -976,7 +1027,7 @@ export function evolutionRoutes(app: Fastify) {
             if (!genome) return reply.code(404).send({ error: 'Genome not found' });
             // versioned genome is immutable — safe to cache forever
             reply.header('Cache-Control', 'public, immutable, max-age=31536000');
-            return reply.send({ genome: withGenomeFeedbackData(genome) });
+            return reply.send({ genome: withGenomeProjection(genome) });
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome version error: ${error}`);
             return reply.code(500).send({ error: error.message });
@@ -1019,7 +1070,7 @@ export function evolutionRoutes(app: Fastify) {
                 },
             );
 
-            return reply.code(upstream.status).send(upstream.data);
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome feedback proxy error: ${error}`);
             return reply.code(502).send({ error: error?.message ?? 'Failed to proxy genome feedback' });
@@ -1075,7 +1126,7 @@ export function evolutionRoutes(app: Fastify) {
                 },
             );
 
-            return reply.code(upstream.status).send(upstream.data);
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome diff proxy error: ${error}`);
             return reply.code(502).send({ error: error?.message ?? 'Failed to proxy genome diff' });
@@ -1118,7 +1169,7 @@ export function evolutionRoutes(app: Fastify) {
                 },
             );
 
-            return reply.code(upstream.status).send(upstream.data);
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome promote proxy error: ${error}`);
             return reply.code(502).send({ error: error?.message ?? 'Failed to proxy genome promotion' });
@@ -1148,13 +1199,27 @@ export function evolutionRoutes(app: Fastify) {
             }),
         },
     }, async (request, reply) => {
-        const payload = request.body;
+        const payload = request.body as {
+            namespace: string;
+            name: string;
+            version?: number;
+            description?: string;
+            spec: string;
+            isPublic?: boolean;
+            category?: string;
+            tags?: string;
+        };
         try {
             const hubUrl = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
             const hubPublishKey = resolveGenomeHubPublishKey();
             const { default: axios } = await import('axios');
 
-            const upstream = await axios.post(`${hubUrl}/genomes`, payload, {
+            const projectedPayload = {
+                ...payload,
+                spec: syncGenomeSpecVersion(payload.spec, payload.version),
+            };
+
+            const upstream = await axios.post(`${hubUrl}/genomes`, projectedPayload, {
                 headers: {
                     'Content-Type': 'application/json',
                     ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
@@ -1163,7 +1228,7 @@ export function evolutionRoutes(app: Fastify) {
                 validateStatus: () => true,
             });
 
-            return reply.code(upstream.status).send(upstream.data);
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome hub-create proxy error: ${error}`);
             return reply.code(502).send({ error: error?.message ?? 'Failed to proxy genome creation' });
@@ -1198,14 +1263,15 @@ export function evolutionRoutes(app: Fastify) {
             const hubUrl = marketplaceUrl ?? process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
 
             // 发布到 Marketplace Server
-            const spec = parseGenomeSpec(genome.spec);
+            const projectedSpec = syncGenomeSpecVersion(genome.spec, genome.version);
+            const spec = parseGenomeSpec(projectedSpec);
             const publishNamespace = genome.namespace ?? spec.namespace ?? '@public';
             const publishBody = {
                 namespace: publishNamespace,
                 name: genome.name,
                 version: genome.version,
                 description: genome.description ?? undefined,
-                spec: genome.spec,
+                spec: projectedSpec,
                 tags: genome.tags ?? undefined,
                 category: genome.category ?? spec.category,
                 isPublic: true,
@@ -1264,7 +1330,7 @@ export function evolutionRoutes(app: Fastify) {
             log({ module: 'evolution' }, `Genome ${id} published to marketplace: ${hubUrl}`);
             return reply.code(201).send({
                 published: res.data,
-                genome: withGenomeFeedbackData(localGenome),
+                genome: withGenomeProjection(localGenome),
                 ...(feedbackSync ? { feedbackSync } : {}),
             });
         } catch (error: any) {

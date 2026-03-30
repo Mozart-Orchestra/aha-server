@@ -199,6 +199,8 @@ describe('evolutionRoutes', () => {
         vi.mocked(db.genome.create).mockResolvedValue({
             id: 'genome-1',
             namespace: '@public',
+            version: 1,
+            spec: '{"role":"builder","version":1}',
             tags: '["builder","typescript"]',
             category: 'development',
         } as never);
@@ -220,6 +222,7 @@ describe('evolutionRoutes', () => {
         expect(db.genome.create).toHaveBeenCalledWith(expect.objectContaining({
             data: expect.objectContaining({
                 namespace: '@public',
+                spec: '{"role":"builder","version":1}',
                 tags: '["builder","typescript"]',
                 category: 'development',
             }),
@@ -241,11 +244,11 @@ describe('evolutionRoutes', () => {
                 accountId: 'user-1',
                 name: 'builder',
                 description: 'Builder genome',
-                spec: '{"role":"builder"}',
+                spec: '{"role":"builder","version":2}',
                 parentSessionId: 'session-1',
                 teamId: 'team-1',
                 namespace: '@public',
-                version: 1,
+                version: 4,
                 tags: '["builder"]',
                 category: 'development',
                 status: 'verified',
@@ -271,9 +274,39 @@ describe('evolutionRoutes', () => {
                     id: 'genome-1',
                     scorecard,
                     feedbackData: scorecard,
+                    version: 4,
                 }),
             ],
             total: 1,
+        });
+        expect(JSON.parse(response.json().genomes[0].spec)).toMatchObject({
+            role: 'builder',
+            version: 4,
+        });
+
+        await app.close();
+    });
+
+    it('hard-fails genome projection when stored spec is malformed', async () => {
+        vi.mocked(db.genome.findFirst).mockResolvedValue({
+            id: 'genome-bad',
+            accountId: 'user-1',
+            name: 'builder',
+            namespace: '@public',
+            version: 4,
+            spec: '{bad-json',
+            deletedAt: null,
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/genomes/genome-bad',
+        });
+
+        expect(response.statusCode).toBe(500);
+        expect(response.json()).toEqual({
+            error: expect.stringContaining('Genome spec version sync failed'),
         });
 
         await app.close();
@@ -393,6 +426,7 @@ describe('evolutionRoutes', () => {
             id: 'genome-3',
             version: 3,
             isPublic: false,
+            spec: '{"role":"builder","mode":"v2"}',
         } as never);
 
         const app = buildApp();
@@ -410,8 +444,14 @@ describe('evolutionRoutes', () => {
             genome: expect.objectContaining({ id: 'genome-3', version: 3, isPublic: false }),
             createdNewVersion: true,
         });
+        expect(JSON.parse(response.json().genome.spec)).toMatchObject({
+            role: 'builder',
+            mode: 'v2',
+            version: 3,
+        });
         expect(db.genome.create).toHaveBeenCalledWith(expect.objectContaining({
             data: expect.objectContaining({
+                spec: '{"role":"builder","mode":"v2","version":3}',
                 version: 3,
                 isPublic: false,
                 hubGenomeId: null,
@@ -588,7 +628,7 @@ describe('evolutionRoutes', () => {
             namespace: '@public',
             version: 2,
             description: 'Builder genome',
-            spec: '{"role":"builder"}',
+            spec: '{"role":"builder","version":1}',
             tags: '["builder"]',
             category: 'development',
             scorecard,
@@ -608,6 +648,8 @@ describe('evolutionRoutes', () => {
             id: 'genome-1',
             isPublic: true,
             hubGenomeId: 'hub-genome-1',
+            version: 2,
+            spec: '{"role":"builder","version":1}',
             scorecard,
         } as never);
 
@@ -624,6 +666,7 @@ describe('evolutionRoutes', () => {
             expect.objectContaining({
                 namespace: '@public',
                 version: 2,
+                spec: '{"role":"builder","version":2}',
                 tags: '["builder"]',
             }),
             expect.any(Object),
@@ -650,6 +693,10 @@ describe('evolutionRoutes', () => {
                 synced: true,
             },
         }));
+        expect(JSON.parse(response.json().genome.spec)).toMatchObject({
+            role: 'builder',
+            version: 2,
+        });
 
         await app.close();
     });
