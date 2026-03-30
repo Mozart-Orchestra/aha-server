@@ -67,7 +67,7 @@ roles:
       Translates the product goal into backlog slices and explicitly sets acceptance criteria.
 
     metadata:
-      model: claude-opus-4-5
+      model: claude-opus-4-6
       temperature: 0.3
       thinkingBudget: 32000
 
@@ -178,7 +178,7 @@ roles:
       and assigns initial tasks. Does NO implementation work itself.
 
     metadata:
-      model: claude-opus-4-5
+      model: claude-opus-4-6
       temperature: 0.3
       thinkingBudget: 32000
 
@@ -279,7 +279,7 @@ roles:
       Makes Go/No-Go decisions on features and accepts work results.
 
     metadata:
-      model: claude-opus-4-5
+      model: claude-opus-4-6
       temperature: 0.3
       thinkingBudget: 32000
 
@@ -376,7 +376,7 @@ roles:
       and ensures usability through user research and testing.
 
     metadata:
-      model: claude-sonnet-4-5
+      model: claude-sonnet-4-6
       temperature: 0.4
       thinkingBudget: 32000
 
@@ -463,7 +463,7 @@ roles:
       scalability, security, and performance.
 
     metadata:
-      model: claude-opus-4-5
+      model: claude-opus-4-6
       temperature: 0.3
       thinkingBudget: 32000
 
@@ -551,7 +551,7 @@ roles:
       Focuses on server-side code (aha-server, API routes).
 
     metadata:
-      model: claude-sonnet-4-5
+      model: claude-sonnet-4-6
       temperature: 0.3
       thinkingBudget: 32000
 
@@ -627,7 +627,7 @@ roles:
       Focuses on client-side code (kanban app, React Native).
 
     metadata:
-      model: claude-sonnet-4-5
+      model: claude-sonnet-4-6
       temperature: 0.3
       thinkingBudget: 32000
 
@@ -704,7 +704,7 @@ roles:
       Read-only access to files and documentation.
 
     metadata:
-      model: claude-sonnet-4-5
+      model: claude-sonnet-4-6
       temperature: 0.1
       thinkingBudget: 32000
 
@@ -784,7 +784,7 @@ roles:
       Only edits documentation files, not implementation code.
 
     metadata:
-      model: claude-sonnet-4-5
+      model: claude-sonnet-4-6
       temperature: 0.3
       thinkingBudget: 16000
 
@@ -925,7 +925,7 @@ roles:
       Read-only access, does not edit files.
 
     metadata:
-      model: claude-sonnet-4-5
+      model: claude-sonnet-4-6
       temperature: 0.2
       thinkingBudget: 16000
 
