@@ -1082,6 +1082,43 @@ export function evolutionRoutes(app: Fastify) {
     // Proxy supervisor aggregate feedback writes to genome-hub so clients do not
     // need direct access to the marketplace service.
     // =========================================================================
+    app.patch('/v1/genomes/id/:id/feedback', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                id: z.string(),
+            }),
+            body: GenomeFeedbackPayloadSchema,
+        },
+    }, async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const payload = request.body as z.infer<typeof GenomeFeedbackPayloadSchema>;
+
+        try {
+            const hubUrl = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
+            const hubPublishKey = resolveGenomeHubPublishKey();
+            const { default: axios } = await import('axios');
+
+            const upstream = await axios.patch(
+                `${hubUrl}/genomes/id/${encodeURIComponent(id)}/feedback`,
+                payload,
+                {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `genome feedback by id proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy genome feedback by id' });
+        }
+    });
+
     app.patch('/v1/genomes/:namespace/:name/feedback', {
         preHandler: app.authenticate,
         schema: {

@@ -552,6 +552,62 @@ describe('evolutionRoutes', () => {
         await app.close();
     });
 
+    it('proxies specimen-bound genome feedback updates to genome-hub by immutable id', async () => {
+        vi.mocked(axios.patch).mockResolvedValue({
+            status: 200,
+            data: {
+                genome: {
+                    id: 'hub-genome-1',
+                    feedbackData: '{"avgScore":93}',
+                },
+            },
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'PATCH',
+            url: '/v1/genomes/id/hub-genome-1/feedback',
+            payload: {
+                evaluationCount: 2,
+                avgScore: 93,
+                sessionScore: {
+                    taskCompletion: 94,
+                    codeQuality: 92,
+                    collaboration: 93,
+                    overall: 93,
+                },
+                dimensions: {
+                    delivery: 94,
+                    integrity: 92,
+                    efficiency: 91,
+                    collaboration: 93,
+                    reliability: 94,
+                },
+                distribution: {
+                    excellent: 2,
+                    good: 0,
+                    fair: 0,
+                    poor: 0,
+                },
+                latestAction: 'keep',
+                suggestions: ['Binds feedback to the exact scored genome row.'],
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(axios.patch).toHaveBeenCalledWith(
+            expect.stringContaining('/genomes/id/hub-genome-1/feedback'),
+            expect.objectContaining({
+                evaluationCount: 2,
+                avgScore: 93,
+                latestAction: 'keep',
+            }),
+            expect.any(Object),
+        );
+
+        await app.close();
+    });
+
     it('proxies heterogeneous genome diffs to genome-hub using the shared publish key fallback', async () => {
         const previousHubPublishKey = process.env.HUB_PUBLISH_KEY;
         const previousGenomeHubPublishKey = process.env.GENOME_HUB_PUBLISH_KEY;
