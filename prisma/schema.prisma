@@ -30,6 +30,8 @@ model Account {
     settingsVersion Int         @default(0)
     githubUserId    String?     @unique
     githubUser      GithubUser? @relation(fields: [githubUserId], references: [id])
+    supabaseUserId  String?     @unique
+    email           String?
 
     // Profile
     firstName String?

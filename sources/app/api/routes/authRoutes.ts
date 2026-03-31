@@ -4,6 +4,7 @@ import * as privacyKit from "privacy-kit";
 import { db } from "@/storage/db";
 import { auth } from "@/app/auth/auth";
 import { log } from "@/utils/log";
+import { supabaseVerifyToken } from "@/app/auth/supabaseVerify";
 
 export function authRoutes(app: Fastify) {
     const secretAuthSchema = {
@@ -362,6 +363,140 @@ export function authRoutes(app: Fastify) {
         }
 
         return reply.send({ success: true });
+    });
+
+    /**
+     * Supabase Google OAuth authentication.
+     * Receives a Supabase access token, verifies it, and creates/links an Account.
+     * Client proves possession of secret via challenge-response.
+     * Server never sees the secret.
+     */
+    app.post('/v1/auth/supabase', {
+        schema: {
+            body: z.object({
+                accessToken: z.string(),
+                publicKey: z.string(),
+                challenge: z.string(),
+                signature: z.string(),
+            }),
+            response: {
+                200: z.object({
+                    success: z.literal(true),
+                    token: z.string(),
+                    userId: z.string(),
+                }),
+                401: z.object({
+                    error: z.string(),
+                }),
+                409: z.object({
+                    error: z.string(),
+                    code: z.enum(['RESTORE_REQUIRED', 'ACCOUNT_LINK_CONFLICT']),
+                }),
+            }
+        }
+    }, async (request, reply) => {
+        log({ module: 'supabase-auth' }, `[SUPABASE AUTH] Received Supabase auth request`);
+
+        const verified = await supabaseVerifyToken(request.body.accessToken);
+        if (!verified) {
+            log({ module: 'supabase-auth' }, `[SUPABASE AUTH] ❌ Token verification failed`);
+            return reply.code(401).send({ error: 'Invalid Supabase token' });
+        }
+
+        log({ module: 'supabase-auth' }, `[SUPABASE AUTH] ✅ Verified user: ${verified.supabaseUserId}, email: ${verified.email}`);
+
+        const tweetnacl = (await import("tweetnacl")).default;
+        const publicKey = privacyKit.decodeBase64(request.body.publicKey);
+        const challenge = privacyKit.decodeBase64(request.body.challenge);
+        const signature = privacyKit.decodeBase64(request.body.signature);
+
+        const isValid = tweetnacl.sign.detached.verify(challenge, signature, publicKey);
+        if (!isValid) {
+            log({ module: 'supabase-auth' }, `[SUPABASE AUTH] ❌ Invalid secret proof`);
+            return reply.code(401).send({ error: 'Invalid signature' });
+        }
+
+        const publicKeyHex = privacyKit.encodeHex(publicKey);
+        const firstName = verified.name?.split(' ')[0] ?? null;
+        const lastName = verified.name?.split(' ').slice(1).join(' ') ?? null;
+
+        let account = await db.account.findFirst({
+            where: { supabaseUserId: verified.supabaseUserId }
+        });
+
+        if (account && account.publicKey !== publicKeyHex) {
+            // New device with new secret — update publicKey to let them in.
+            // Old devices with old secret can still restore via restore key.
+            account = await db.account.update({
+                where: { id: account.id },
+                data: {
+                    publicKey: publicKeyHex,
+                    email: verified.email,
+                    firstName,
+                    lastName,
+                    updatedAt: new Date(),
+                }
+            });
+            log({ module: 'supabase-auth' }, `[SUPABASE AUTH] Updated publicKey for existing account: ${account.id}`);
+        }
+
+        if (!account) {
+            const existingByPublicKey = await db.account.findUnique({
+                where: { publicKey: publicKeyHex }
+            });
+
+            if (existingByPublicKey?.supabaseUserId && existingByPublicKey.supabaseUserId !== verified.supabaseUserId) {
+                log({ module: 'supabase-auth' }, `[SUPABASE AUTH] ⚠️ Public key already linked to another Supabase account`);
+                return reply.code(409).send({
+                    error: 'This restore key is already linked to another sign-in account',
+                    code: 'ACCOUNT_LINK_CONFLICT',
+                });
+            }
+
+            if (existingByPublicKey) {
+                account = await db.account.update({
+                    where: { id: existingByPublicKey.id },
+                    data: {
+                        supabaseUserId: verified.supabaseUserId,
+                        email: verified.email,
+                        firstName,
+                        lastName,
+                        updatedAt: new Date(),
+                    }
+                });
+                log({ module: 'supabase-auth' }, `[SUPABASE AUTH] Linked existing key-based account: ${account.id}`);
+            } else {
+                account = await db.account.create({
+                    data: {
+                        publicKey: publicKeyHex,
+                        supabaseUserId: verified.supabaseUserId,
+                        email: verified.email,
+                        firstName,
+                        lastName,
+                    }
+                });
+                log({ module: 'supabase-auth' }, `[SUPABASE AUTH] Created new account: ${account.id}`);
+            }
+        } else {
+            account = await db.account.update({
+                where: { id: account.id },
+                data: {
+                    email: verified.email,
+                    firstName,
+                    lastName,
+                    updatedAt: new Date(),
+                }
+            });
+            log({ module: 'supabase-auth' }, `[SUPABASE AUTH] Found existing account: ${account.id}`);
+        }
+
+        const token = await auth.createToken(account.id);
+
+        return reply.send({
+            success: true,
+            token,
+            userId: account.id,
+        });
     });
 
 }
