@@ -208,7 +208,22 @@ describe('teamManagementRoutes', () => {
             description: 'Ship the backlog',
             team: {
                 name: 'Launch Squad',
-                members: [],
+                members: [
+                    {
+                        memberId: 'builder-claude',
+                        sessionId: 'team:team-corps:member:builder-claude',
+                        sessionTag: 'team:team-corps:member:builder-claude',
+                        roleId: 'builder',
+                        displayName: 'Builder Claude',
+                    },
+                    {
+                        memberId: 'builder-codex',
+                        sessionId: 'team:team-corps:member:builder-codex',
+                        sessionTag: 'team:team-corps:member:builder-codex',
+                        roleId: 'builder',
+                        displayName: 'Builder Codex',
+                    },
+                ],
                 bootContext: {
                     initialObjective: 'Ship the backlog',
                 },
@@ -272,7 +287,7 @@ describe('teamManagementRoutes', () => {
             team: expect.objectContaining({
                 id: 'team-corps',
                 name: 'Launch Squad',
-                memberCount: 0,
+                memberCount: 2,
             }),
             plannedMembers: [
                 expect.objectContaining({
@@ -304,6 +319,9 @@ describe('teamManagementRoutes', () => {
                 seats?: Array<{ runtimeType: string; machineId: string; workspacePath: string }>;
                 plannedMembers?: Array<{ runtimeType: string; machineId: string }>;
             };
+            team?: {
+                members?: Array<{ memberId: string; sessionId: string; machineId: string; workspacePath: string }>;
+            };
         };
 
         expect(board.corps?.seats).toEqual([
@@ -319,6 +337,20 @@ describe('teamManagementRoutes', () => {
             }),
         ]);
         expect(board.corps?.plannedMembers).toHaveLength(2);
+        expect(board.team?.members).toEqual([
+            expect.objectContaining({
+                memberId: 'builder-claude',
+                sessionId: 'team:team-corps:member:builder-claude',
+                machineId: 'machine-1',
+                workspacePath: '/repo/claude',
+            }),
+            expect.objectContaining({
+                memberId: 'builder-codex',
+                sessionId: 'team:team-corps:member:builder-codex',
+                machineId: 'machine-2',
+                workspacePath: '/repo/codex',
+            }),
+        ]);
 
         await app.close();
     });

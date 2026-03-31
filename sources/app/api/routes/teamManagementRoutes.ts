@@ -339,6 +339,24 @@ function buildManualCorpsBoard(params: {
     const board = buildDefaultTeamBoard(params.name, params.description);
     const now = Date.now();
     const trimmedTarget = params.target?.trim();
+    const plannedTeamMembers = params.plannedMembers.map((member) => ({
+        memberId: member.memberId,
+        sessionId: member.sessionTag,
+        sessionTag: member.sessionTag,
+        candidateId: member.candidateId,
+        roleId: member.roleId,
+        displayName: member.displayName,
+        joinedAt: now,
+        runtimeType: member.runtimeType,
+        machineId: member.machineId,
+        workspacePath: member.workspacePath,
+        ...(member.customPrompt ? { customPrompt: member.customPrompt } : {}),
+        lifecycle: {
+            plannedAt: now,
+        },
+    }));
+
+    board.team.members = plannedTeamMembers;
 
     if (trimmedTarget) {
         board.team.bootContext = {
