@@ -12,6 +12,9 @@ vi.mock('@/storage/db', () => ({
             update: vi.fn(),
             delete: vi.fn(),
         },
+        machine: {
+            findMany: vi.fn(),
+        },
         session: {
             findFirst: vi.fn(),
             findMany: vi.fn(),
@@ -85,6 +88,7 @@ describe('teamManagementRoutes', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         vi.mocked(db.$transaction).mockImplementation(async (callback: any) => callback(db as any));
+        vi.mocked(db.machine.findMany).mockResolvedValue([] as never);
     });
 
     it('creates a canonical team artifact with the provided id and initial board', async () => {
@@ -189,6 +193,163 @@ describe('teamManagementRoutes', () => {
                 body: expect.any(Buffer),
             }),
         }));
+
+        await app.close();
+    });
+
+    it('creates a manual corps plan with duplicate role configs across runtimes and machines', async () => {
+        vi.mocked(db.machine.findMany).mockResolvedValue([
+            { id: 'machine-1' },
+            { id: 'machine-2' },
+        ] as never);
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(null as never);
+        vi.mocked(db.artifact.create).mockResolvedValue(buildTeamArtifact({
+            name: 'Launch Squad',
+            description: 'Ship the backlog',
+            team: {
+                name: 'Launch Squad',
+                members: [],
+                bootContext: {
+                    initialObjective: 'Ship the backlog',
+                },
+            },
+            tasks: [
+                {
+                    id: 'team-goal',
+                    title: 'Team Goal: Ship the backlog',
+                    status: 'todo',
+                },
+            ],
+            corps: {
+                mode: 'manual',
+                seats: [],
+                plannedMembers: [],
+            },
+        }, { id: 'team-corps' }) as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/corps',
+            payload: {
+                id: 'team-corps',
+                name: 'Launch Squad',
+                target: 'Ship the backlog',
+                roles: [
+                    {
+                        id: 'builder-claude',
+                        genomeId: 'genome-builder',
+                        roleId: 'builder',
+                        displayName: 'Builder Claude',
+                        runtimeType: 'claude',
+                        machineId: 'machine-1',
+                        workspacePath: '/repo/claude',
+                        quantity: 1,
+                    },
+                    {
+                        id: 'builder-codex',
+                        genomeId: 'genome-builder',
+                        roleId: 'builder',
+                        displayName: 'Builder Codex',
+                        runtimeType: 'codex',
+                        machineId: 'machine-2',
+                        workspacePath: '/repo/codex',
+                        quantity: 1,
+                    },
+                ],
+            },
+        });
+
+        expect(response.statusCode).toBe(201);
+        expect(response.json()).toEqual({
+            success: true,
+            corps: {
+                id: 'team-corps',
+                name: 'Launch Squad',
+                seatCount: 2,
+                plannedMemberCount: 2,
+            },
+            team: expect.objectContaining({
+                id: 'team-corps',
+                name: 'Launch Squad',
+                memberCount: 0,
+            }),
+            plannedMembers: [
+                expect.objectContaining({
+                    memberId: 'builder-claude',
+                    sessionTag: 'team:team-corps:member:builder-claude',
+                    roleId: 'builder',
+                    runtimeType: 'claude',
+                    machineId: 'machine-1',
+                    workspacePath: '/repo/claude',
+                    candidateId: 'spec:genome-builder',
+                }),
+                expect.objectContaining({
+                    memberId: 'builder-codex',
+                    sessionTag: 'team:team-corps:member:builder-codex',
+                    roleId: 'builder',
+                    runtimeType: 'codex',
+                    machineId: 'machine-2',
+                    workspacePath: '/repo/codex',
+                    candidateId: 'spec:genome-builder',
+                }),
+            ],
+        });
+
+        const createCall = vi.mocked(db.artifact.create).mock.calls[0]?.[0];
+        const serialized = createCall?.data?.body as Buffer;
+        const parsed = JSON.parse(serialized.toString()) as { body: string };
+        const board = JSON.parse(parsed.body) as {
+            corps?: {
+                seats?: Array<{ runtimeType: string; machineId: string; workspacePath: string }>;
+                plannedMembers?: Array<{ runtimeType: string; machineId: string }>;
+            };
+        };
+
+        expect(board.corps?.seats).toEqual([
+            expect.objectContaining({
+                runtimeType: 'claude',
+                machineId: 'machine-1',
+                workspacePath: '/repo/claude',
+            }),
+            expect.objectContaining({
+                runtimeType: 'codex',
+                machineId: 'machine-2',
+                workspacePath: '/repo/codex',
+            }),
+        ]);
+        expect(board.corps?.plannedMembers).toHaveLength(2);
+
+        await app.close();
+    });
+
+    it('rejects corps creation when a referenced machine is not owned by the caller', async () => {
+        vi.mocked(db.machine.findMany).mockResolvedValue([{ id: 'machine-1' }] as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/corps',
+            payload: {
+                name: 'Launch Squad',
+                seats: [
+                    {
+                        genomeId: 'genome-builder',
+                        roleId: 'builder',
+                        runtimeType: 'claude',
+                        machineId: 'machine-2',
+                        workspacePath: '/repo',
+                        quantity: 1,
+                    },
+                ],
+            },
+        });
+
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toEqual({
+            error: 'Unknown machineId(s): machine-2',
+        });
+        expect(vi.mocked(db.artifact.create)).not.toHaveBeenCalled();
 
         await app.close();
     });
@@ -732,6 +893,48 @@ describe('teamManagementRoutes', () => {
                 { sessionId: 'session-2', success: false, error: 'Session not found or not owned by user' },
             ],
         });
+
+        await app.close();
+    });
+
+    it('removes archived sessions from stored team rosters during batch archive', async () => {
+        vi.mocked(db.session.findMany).mockResolvedValue([{ id: 'session-1' }] as never);
+        vi.mocked(db.session.updateMany).mockResolvedValue({ count: 1 } as never);
+        vi.mocked(db.artifact.findMany).mockResolvedValue([
+            buildTeamArtifact({
+                name: 'Ops Team',
+                team: {
+                    name: 'Ops Team',
+                    members: [
+                        { sessionId: 'session-1', roleId: 'builder' },
+                        { sessionId: 'session-2', roleId: 'reviewer' },
+                    ],
+                },
+                tasks: [],
+            }),
+        ] as never);
+        vi.mocked(db.artifact.update).mockResolvedValue({ id: 'team-1' } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/sessions/batch/archive',
+            payload: { sessionIds: ['session-1'] },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(db.artifact.update).toHaveBeenCalledTimes(1);
+
+        const updateCall = vi.mocked(db.artifact.update).mock.calls[0]?.[0];
+        const serializedBoard = updateCall?.data?.body as Buffer;
+        const decoded = JSON.parse(serializedBoard.toString()) as { body: string };
+        const nextBoard = JSON.parse(decoded.body) as {
+            team?: { members?: Array<{ sessionId: string; roleId: string }> };
+        };
+
+        expect(nextBoard.team?.members).toEqual([
+            { sessionId: 'session-2', roleId: 'reviewer' },
+        ]);
 
         await app.close();
     });

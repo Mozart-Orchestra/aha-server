@@ -27,6 +27,359 @@ import { activityCache } from "@/app/presence/sessionCache";
  * - Batch session operations
  */
 
+const DEFAULT_TEAM_COLUMNS = [
+    { id: 'todo', title: 'To Do' },
+    { id: 'in-progress', title: 'In Progress' },
+    { id: 'review', title: 'Review' },
+    { id: 'done', title: 'Done' },
+];
+
+const CorpsSeatSchema = z.object({
+    id: z.string().optional(),
+    genomeId: z.string().min(1),
+    genomeName: z.string().nullish(),
+    genomeNamespace: z.string().nullish(),
+    genomeVersion: z.number().int().positive().nullish(),
+    genomeDisplayName: z.string().nullish(),
+    roleId: z.string().min(1),
+    displayName: z.string().optional(),
+    runtimeType: z.enum(['claude', 'codex']),
+    machineId: z.string().optional(),
+    workspacePath: z.string().optional(),
+    quantity: z.number().int().min(1).max(24).default(1),
+    customPrompt: z.string().optional(),
+});
+
+const CorpsCreateSchema = z.object({
+    id: z.string().optional(),
+    name: z.string().min(1).max(200),
+    description: z.string().max(500).optional(),
+    target: z.string().max(2000).optional(),
+    machineId: z.string().optional(),
+    workspacePath: z.string().optional(),
+    seats: z.array(CorpsSeatSchema).min(1).max(128).optional(),
+    roles: z.array(CorpsSeatSchema).min(1).max(128).optional(),
+}).superRefine((value, ctx) => {
+    const hasSeats = Array.isArray(value.seats) && value.seats.length > 0;
+    const hasRoles = Array.isArray(value.roles) && value.roles.length > 0;
+
+    if (!hasSeats && !hasRoles) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'At least one corps seat config is required',
+            path: ['seats'],
+        });
+    }
+
+    if (hasSeats && hasRoles) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'Provide either seats or roles, not both',
+            path: ['roles'],
+        });
+    }
+});
+
+interface CorpsSeatConfig {
+    id?: string;
+    genomeId: string;
+    genomeName?: string | null;
+    genomeNamespace?: string | null;
+    genomeVersion?: number | null;
+    genomeDisplayName?: string | null;
+    roleId: string;
+    displayName?: string;
+    runtimeType: 'claude' | 'codex';
+    machineId: string;
+    workspacePath: string;
+    quantity: number;
+    customPrompt?: string;
+}
+
+interface PlannedCorpsMember {
+    memberId: string;
+    sessionTag: string;
+    roleId: string;
+    displayName: string;
+    genomeId: string;
+    candidateId: string;
+    runtimeType: 'claude' | 'codex';
+    machineId: string;
+    workspacePath: string;
+    customPrompt?: string;
+}
+
+interface CreateOrUpdateTeamArtifactResult {
+    artifact: {
+        id: string;
+        body: Uint8Array | null;
+        createdAt: Date;
+        updatedAt: Date;
+    };
+    teamId: string;
+    reusedExistingArtifact: boolean;
+}
+
+function buildDefaultTeamBoard(name: string, description?: string): Record<string, any> {
+    return {
+        name,
+        description: description || '',
+        columns: DEFAULT_TEAM_COLUMNS.map((column) => ({ ...column })),
+        tasks: [],
+        agreements: [],
+        roles: [],
+        team: {
+            name,
+            members: [],
+        },
+    };
+}
+
+function normalizeTeamBoard(board: Record<string, any>, name: string, description?: string): Record<string, any> {
+    board.name = name;
+    if (description !== undefined) {
+        board.description = description;
+    } else if (typeof board.description !== 'string') {
+        board.description = '';
+    }
+    if (!board.team || typeof board.team !== 'object') {
+        board.team = { members: [] };
+    }
+    board.team.name = name;
+    if (!Array.isArray(board.team.members)) {
+        board.team.members = [];
+    }
+    return board;
+}
+
+async function createOrUpdateTeamArtifact(
+    userId: string,
+    params: { id?: string; name: string; description?: string; board: Record<string, any> },
+): Promise<CreateOrUpdateTeamArtifactResult> {
+    const requestedTeamId = params.id?.trim() || undefined;
+    let teamId = requestedTeamId || randomKeyNaked(24);
+    const board = normalizeTeamBoard(
+        JSON.parse(JSON.stringify(params.board)),
+        params.name,
+        params.description,
+    );
+
+    const existingArtifact = requestedTeamId
+        ? await db.artifact.findUnique({
+            where: { id: teamId },
+            select: {
+                id: true,
+                accountId: true,
+                body: true,
+                createdAt: true,
+                updatedAt: true,
+            },
+        })
+        : null;
+
+    if (existingArtifact && existingArtifact.accountId !== userId) {
+        const fallbackTeamId = randomKeyNaked(24);
+        log(
+            { module: 'team-management', level: 'warn', requestedTeamId, fallbackTeamId, userId },
+            `Requested team id ${requestedTeamId} belongs to another account; creating fallback team ${fallbackTeamId}`,
+        );
+        teamId = fallbackTeamId;
+    }
+
+    const writeTeamArtifact = async (artifactId: string) => {
+        if (existingArtifact && existingArtifact.accountId === userId && artifactId === existingArtifact.id) {
+            return await db.artifact.update({
+                where: { id: artifactId },
+                data: {
+                    header: Buffer.from(JSON.stringify({ name: params.name, type: 'team' })),
+                    body: serializeTeamBoard(board),
+                    dataEncryptionKey: Buffer.from('team'),
+                    bodyVersion: { increment: 1 },
+                    updatedAt: new Date(),
+                },
+            });
+        }
+
+        return await db.artifact.create({
+            data: {
+                id: artifactId,
+                accountId: userId,
+                header: Buffer.from(JSON.stringify({ name: params.name, type: 'team' })),
+                body: serializeTeamBoard(board),
+                dataEncryptionKey: Buffer.from('team'),
+            },
+        });
+    };
+
+    let artifact;
+    try {
+        artifact = await writeTeamArtifact(teamId);
+    } catch (error: any) {
+        if (error?.code !== 'P2002') {
+            throw error;
+        }
+
+        const conflictedArtifact = await db.artifact.findUnique({
+            where: { id: teamId },
+            select: {
+                id: true,
+                accountId: true,
+                body: true,
+                createdAt: true,
+                updatedAt: true,
+            },
+        });
+
+        if (conflictedArtifact?.accountId === userId) {
+            artifact = await db.artifact.update({
+                where: { id: teamId },
+                data: {
+                    header: Buffer.from(JSON.stringify({ name: params.name, type: 'team' })),
+                    body: serializeTeamBoard(board),
+                    dataEncryptionKey: Buffer.from('team'),
+                    bodyVersion: { increment: 1 },
+                    updatedAt: new Date(),
+                },
+            });
+        } else {
+            const fallbackTeamId = randomKeyNaked(24);
+            log(
+                { module: 'team-management', level: 'warn', requestedTeamId, conflictedTeamId: teamId, fallbackTeamId, userId },
+                `Team create raced on ${teamId}; creating fallback team ${fallbackTeamId}`,
+            );
+            teamId = fallbackTeamId;
+            artifact = await writeTeamArtifact(teamId);
+        }
+    }
+
+    const reusedExistingArtifact = existingArtifact?.accountId === userId && existingArtifact.id === teamId;
+    return { artifact, teamId, reusedExistingArtifact };
+}
+
+function normalizeCorpsSeatConfigs(
+    body: z.infer<typeof CorpsCreateSchema>,
+): { seats: CorpsSeatConfig[]; errors: string[] } {
+    const rawSeats = body.seats ?? body.roles ?? [];
+    const fallbackMachineId = body.machineId?.trim();
+    const fallbackWorkspacePath = body.workspacePath?.trim();
+    const seats: CorpsSeatConfig[] = [];
+    const errors: string[] = [];
+
+    rawSeats.forEach((rawSeat, index) => {
+        const machineId = rawSeat.machineId?.trim() || fallbackMachineId || '';
+        const workspacePath = rawSeat.workspacePath?.trim() || fallbackWorkspacePath || '';
+        const displayName = rawSeat.displayName?.trim();
+        const customPrompt = rawSeat.customPrompt?.trim();
+
+        if (!machineId) {
+            errors.push(`Seat ${index + 1} is missing machineId`);
+        }
+        if (!workspacePath) {
+            errors.push(`Seat ${index + 1} is missing workspacePath`);
+        }
+
+        seats.push({
+            id: rawSeat.id?.trim() || undefined,
+            genomeId: rawSeat.genomeId.trim(),
+            genomeName: rawSeat.genomeName?.trim() || null,
+            genomeNamespace: rawSeat.genomeNamespace?.trim() || null,
+            genomeVersion: rawSeat.genomeVersion ?? null,
+            genomeDisplayName: rawSeat.genomeDisplayName?.trim() || null,
+            roleId: rawSeat.roleId.trim(),
+            displayName,
+            runtimeType: rawSeat.runtimeType,
+            machineId,
+            workspacePath,
+            quantity: rawSeat.quantity,
+            customPrompt,
+        });
+    });
+
+    return { seats, errors };
+}
+
+function buildPlannedCorpsMembers(teamId: string, seats: CorpsSeatConfig[]): PlannedCorpsMember[] {
+    const members: PlannedCorpsMember[] = [];
+
+    seats.forEach((seat, seatIndex) => {
+        const baseMemberId = seat.id || `seat-${seatIndex + 1}`;
+        const baseDisplayName = seat.displayName?.trim()
+            || seat.genomeDisplayName?.trim()
+            || seat.genomeName?.trim()
+            || seat.roleId;
+
+        for (let ordinal = 1; ordinal <= seat.quantity; ordinal += 1) {
+            const memberId = seat.quantity > 1 ? `${baseMemberId}-${ordinal}` : baseMemberId;
+            members.push({
+                memberId,
+                sessionTag: `team:${teamId}:member:${memberId}`,
+                roleId: seat.roleId,
+                displayName: seat.quantity > 1 ? `${baseDisplayName} ${ordinal}` : baseDisplayName,
+                genomeId: seat.genomeId,
+                candidateId: `spec:${seat.genomeId}`,
+                runtimeType: seat.runtimeType,
+                machineId: seat.machineId,
+                workspacePath: seat.workspacePath,
+                ...(seat.customPrompt ? { customPrompt: seat.customPrompt } : {}),
+            });
+        }
+    });
+
+    return members;
+}
+
+function buildManualCorpsBoard(params: {
+    teamId: string;
+    name: string;
+    description?: string;
+    target?: string;
+    seats: CorpsSeatConfig[];
+    plannedMembers: PlannedCorpsMember[];
+}): Record<string, any> {
+    const board = buildDefaultTeamBoard(params.name, params.description);
+    const now = Date.now();
+    const trimmedTarget = params.target?.trim();
+
+    if (trimmedTarget) {
+        board.team.bootContext = {
+            initialObjective: trimmedTarget,
+        };
+        board.tasks.push({
+            id: 'team-goal',
+            title: `Team Goal: ${trimmedTarget}`,
+            description: 'This is the primary objective for this team.',
+            status: 'todo',
+            createdAt: now,
+            updatedAt: now,
+        });
+    }
+
+    board.corps = {
+        id: params.teamId,
+        mode: 'manual',
+        target: trimmedTarget || '',
+        createdAt: now,
+        seats: params.seats.map((seat) => ({
+            ...(seat.id ? { id: seat.id } : {}),
+            genomeId: seat.genomeId,
+            ...(seat.genomeName ? { genomeName: seat.genomeName } : {}),
+            ...(seat.genomeNamespace ? { genomeNamespace: seat.genomeNamespace } : {}),
+            ...(seat.genomeVersion ? { genomeVersion: seat.genomeVersion } : {}),
+            ...(seat.genomeDisplayName ? { genomeDisplayName: seat.genomeDisplayName } : {}),
+            roleId: seat.roleId,
+            displayName: seat.displayName || seat.genomeDisplayName || seat.genomeName || seat.roleId,
+            runtimeType: seat.runtimeType,
+            machineId: seat.machineId,
+            workspacePath: seat.workspacePath,
+            quantity: seat.quantity,
+            ...(seat.customPrompt ? { customPrompt: seat.customPrompt } : {}),
+        })),
+        plannedMembers: params.plannedMembers.map((member) => ({ ...member })),
+    };
+
+    return board;
+}
+
 export function teamManagementRoutes(app: Fastify) {
     log({ module: 'api' }, 'Registering teamManagementRoutes...');
 
@@ -51,132 +404,15 @@ export function teamManagementRoutes(app: Fastify) {
         };
 
         try {
-            const requestedTeamId = id?.trim() || undefined;
-            let teamId = requestedTeamId || randomKeyNaked(24);
-
             const board: Record<string, any> = incomingBoard
                 ? JSON.parse(JSON.stringify(incomingBoard))
-                : {
-                    name,
-                    description: description || '',
-                    columns: [
-                        { id: 'todo', title: 'To Do' },
-                        { id: 'in-progress', title: 'In Progress' },
-                        { id: 'review', title: 'Review' },
-                        { id: 'done', title: 'Done' },
-                    ],
-                    tasks: [],
-                    agreements: [],
-                    roles: [],
-                    team: {
-                        name,
-                        members: [],
-                    },
-                };
-
-            board.name = name;
-            if (description !== undefined) {
-                board.description = description;
-            } else if (typeof board.description !== 'string') {
-                board.description = '';
-            }
-            if (!board.team || typeof board.team !== 'object') {
-                board.team = { members: [] };
-            }
-            board.team.name = name;
-            if (!Array.isArray(board.team.members)) {
-                board.team.members = [];
-            }
-
-            const existingArtifact = requestedTeamId
-                ? await db.artifact.findUnique({
-                    where: { id: teamId },
-                    select: {
-                        id: true,
-                        accountId: true,
-                        body: true,
-                        createdAt: true,
-                        updatedAt: true,
-                    },
-                })
-                : null;
-
-            if (existingArtifact && existingArtifact.accountId !== userId) {
-                const fallbackTeamId = randomKeyNaked(24);
-                log(
-                    { module: 'team-management', level: 'warn', requestedTeamId, fallbackTeamId, userId },
-                    `Requested team id ${requestedTeamId} belongs to another account; creating fallback team ${fallbackTeamId}`,
-                );
-                teamId = fallbackTeamId;
-            }
-
-            const writeTeamArtifact = async (artifactId: string) => {
-                if (existingArtifact && existingArtifact.accountId === userId && artifactId === existingArtifact.id) {
-                    return await db.artifact.update({
-                        where: { id: artifactId },
-                        data: {
-                            header: Buffer.from(JSON.stringify({ name, type: 'team' })),
-                            body: serializeTeamBoard(board),
-                            dataEncryptionKey: Buffer.from('team'),
-                            bodyVersion: { increment: 1 },
-                            updatedAt: new Date(),
-                        },
-                    });
-                }
-
-                return await db.artifact.create({
-                    data: {
-                        id: artifactId,
-                        accountId: userId,
-                        header: Buffer.from(JSON.stringify({ name, type: 'team' })),
-                        body: serializeTeamBoard(board),
-                        dataEncryptionKey: Buffer.from('team'),
-                    },
-                });
-            };
-
-            let artifact;
-            try {
-                artifact = await writeTeamArtifact(teamId);
-            } catch (error: any) {
-                if (error?.code !== 'P2002') {
-                    throw error;
-                }
-
-                const conflictedArtifact = await db.artifact.findUnique({
-                    where: { id: teamId },
-                    select: {
-                        id: true,
-                        accountId: true,
-                        body: true,
-                        createdAt: true,
-                        updatedAt: true,
-                    },
-                });
-
-                if (conflictedArtifact?.accountId === userId) {
-                    artifact = await db.artifact.update({
-                        where: { id: teamId },
-                        data: {
-                            header: Buffer.from(JSON.stringify({ name, type: 'team' })),
-                            body: serializeTeamBoard(board),
-                            dataEncryptionKey: Buffer.from('team'),
-                            bodyVersion: { increment: 1 },
-                            updatedAt: new Date(),
-                        },
-                    });
-                } else {
-                    const fallbackTeamId = randomKeyNaked(24);
-                    log(
-                        { module: 'team-management', level: 'warn', requestedTeamId, conflictedTeamId: teamId, fallbackTeamId, userId },
-                        `Team create raced on ${teamId}; creating fallback team ${fallbackTeamId}`,
-                    );
-                    teamId = fallbackTeamId;
-                    artifact = await writeTeamArtifact(teamId);
-                }
-            }
-
-            const reusedExistingArtifact = existingArtifact?.accountId === userId && existingArtifact.id === teamId;
+                : buildDefaultTeamBoard(name, description);
+            const { artifact, reusedExistingArtifact, teamId } = await createOrUpdateTeamArtifact(userId, {
+                id,
+                name,
+                description,
+                board,
+            });
 
             await invalidateTeamOverviewSnapshot(userId);
             log({ module: 'team-management' }, `Team created: ${teamId} by ${userId}`);
@@ -187,6 +423,139 @@ export function teamManagementRoutes(app: Fastify) {
         } catch (error: any) {
             log({ module: 'team-management' }, `Failed to create team: ${error}`);
             return reply.code(500).send({ error: 'Failed to create team' });
+        }
+    });
+
+    // POST /v1/corps - Create a manual corps/team plan with per-seat machine/runtime config
+    app.post('/v1/corps', {
+        preHandler: app.authenticate,
+        schema: {
+            body: CorpsCreateSchema,
+            response: {
+                200: z.object({
+                    success: z.literal(true),
+                    corps: z.object({
+                        id: z.string(),
+                        name: z.string(),
+                        seatCount: z.number(),
+                        plannedMemberCount: z.number(),
+                    }),
+                    team: z.object({
+                        id: z.string(),
+                        name: z.string(),
+                        memberCount: z.number(),
+                        taskCount: z.number(),
+                        createdAt: z.number(),
+                        updatedAt: z.number(),
+                    }),
+                    plannedMembers: z.array(z.object({
+                        memberId: z.string(),
+                        sessionTag: z.string(),
+                        roleId: z.string(),
+                        displayName: z.string(),
+                        genomeId: z.string(),
+                        candidateId: z.string(),
+                        runtimeType: z.enum(['claude', 'codex']),
+                        machineId: z.string(),
+                        workspacePath: z.string(),
+                        customPrompt: z.string().optional(),
+                    })),
+                }),
+                201: z.object({
+                    success: z.literal(true),
+                    corps: z.object({
+                        id: z.string(),
+                        name: z.string(),
+                        seatCount: z.number(),
+                        plannedMemberCount: z.number(),
+                    }),
+                    team: z.object({
+                        id: z.string(),
+                        name: z.string(),
+                        memberCount: z.number(),
+                        taskCount: z.number(),
+                        createdAt: z.number(),
+                        updatedAt: z.number(),
+                    }),
+                    plannedMembers: z.array(z.object({
+                        memberId: z.string(),
+                        sessionTag: z.string(),
+                        roleId: z.string(),
+                        displayName: z.string(),
+                        genomeId: z.string(),
+                        candidateId: z.string(),
+                        runtimeType: z.enum(['claude', 'codex']),
+                        machineId: z.string(),
+                        workspacePath: z.string(),
+                        customPrompt: z.string().optional(),
+                    })),
+                }),
+                400: z.object({
+                    error: z.string(),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const body = request.body as z.infer<typeof CorpsCreateSchema>;
+        const { seats, errors } = normalizeCorpsSeatConfigs(body);
+
+        if (errors.length > 0) {
+            return reply.code(400).send({ error: errors.join('; ') });
+        }
+
+        try {
+            const uniqueMachineIds = [...new Set(seats.map((seat) => seat.machineId))];
+            const ownedMachines = await db.machine.findMany({
+                where: {
+                    accountId: userId,
+                    id: { in: uniqueMachineIds },
+                },
+                select: { id: true },
+            });
+            const ownedMachineIds = new Set(ownedMachines.map((machine) => machine.id));
+            const missingMachineIds = uniqueMachineIds.filter((machineId) => !ownedMachineIds.has(machineId));
+
+            if (missingMachineIds.length > 0) {
+                return reply.code(400).send({
+                    error: `Unknown machineId(s): ${missingMachineIds.join(', ')}`,
+                });
+            }
+
+            const teamId = body.id?.trim() || randomKeyNaked(24);
+            const plannedMembers = buildPlannedCorpsMembers(teamId, seats);
+            const board = buildManualCorpsBoard({
+                teamId,
+                name: body.name,
+                description: body.description,
+                target: body.target,
+                seats,
+                plannedMembers,
+            });
+            const { artifact, reusedExistingArtifact } = await createOrUpdateTeamArtifact(userId, {
+                id: teamId,
+                name: body.name,
+                description: body.description,
+                board,
+            });
+
+            await invalidateTeamOverviewSnapshot(userId);
+            log({ module: 'team-management', teamId, seatCount: seats.length }, `Manual corps created: ${teamId}`);
+
+            return reply.code(reusedExistingArtifact ? 200 : 201).send({
+                success: true,
+                corps: {
+                    id: teamId,
+                    name: body.name,
+                    seatCount: seats.length,
+                    plannedMemberCount: plannedMembers.length,
+                },
+                team: summarizeTeamArtifact(artifact),
+                plannedMembers,
+            });
+        } catch (error: any) {
+            log({ module: 'team-management', level: 'error' }, `Failed to create corps: ${error}`);
+            return reply.code(500).send({ error: 'Failed to create corps' });
         }
     });
 
@@ -365,6 +734,8 @@ export function teamManagementRoutes(app: Fastify) {
                 parentSessionId: z.string().optional(),
                 executionPlane: z.string().optional(),
                 runtimeType: z.string().optional(),
+                machineId: z.string().optional(),
+                workspacePath: z.string().optional(),
                 authorities: z.array(z.string()).optional(),
                 teamOverlay: z.record(z.string(), z.unknown()).optional()
             })
@@ -372,7 +743,7 @@ export function teamManagementRoutes(app: Fastify) {
     }, async (request, reply) => {
         const userId = request.userId;
         const { teamId } = request.params as { teamId: string };
-        const { memberId, sessionId, sessionTag, candidateId, roleId, displayName, specId, customPrompt, parentSessionId, executionPlane, runtimeType, authorities, teamOverlay } = request.body as {
+        const { memberId, sessionId, sessionTag, candidateId, roleId, displayName, specId, customPrompt, parentSessionId, executionPlane, runtimeType, machineId, workspacePath, authorities, teamOverlay } = request.body as {
             memberId?: string;
             sessionId: string;
             sessionTag?: string;
@@ -384,12 +755,14 @@ export function teamManagementRoutes(app: Fastify) {
             parentSessionId?: string;
             executionPlane?: string;
             runtimeType?: string;
+            machineId?: string;
+            workspacePath?: string;
             authorities?: string[];
             teamOverlay?: Record<string, unknown>;
         };
 
         try {
-            const result = await addTeamMember(userId, teamId, memberId, sessionId, sessionTag, candidateId, roleId, displayName, specId, customPrompt, parentSessionId, executionPlane, runtimeType, authorities, teamOverlay);
+            const result = await addTeamMember(userId, teamId, memberId, sessionId, sessionTag, candidateId, roleId, displayName, specId, customPrompt, parentSessionId, executionPlane, runtimeType, machineId, workspacePath, authorities, teamOverlay);
             return reply.send(result);
         } catch (error: any) {
             if (error.message === 'Team not found') {
@@ -711,6 +1084,8 @@ async function addTeamMember(
     parentSessionId?: string,
     executionPlane?: string,
     runtimeType?: string,
+    machineId?: string,
+    workspacePath?: string,
     authorities?: string[],
     teamOverlay?: Record<string, unknown>
 ): Promise<{ success: boolean; member: any }> {
@@ -753,6 +1128,8 @@ async function addTeamMember(
             (parentSessionId !== undefined && existing.parentSessionId !== parentSessionId) ||
             (executionPlane !== undefined && existing.executionPlane !== executionPlane) ||
             (runtimeType !== undefined && existing.runtimeType !== runtimeType) ||
+            (machineId !== undefined && existing.machineId !== machineId) ||
+            (workspacePath !== undefined && existing.workspacePath !== workspacePath) ||
             (authorities !== undefined && JSON.stringify(existing.authorities ?? []) !== JSON.stringify(authorities)) ||
             (teamOverlay !== undefined && JSON.stringify(existing.teamOverlay ?? null) !== JSON.stringify(teamOverlay));
 
@@ -771,6 +1148,8 @@ async function addTeamMember(
         if (parentSessionId !== undefined) existing.parentSessionId = parentSessionId;
         if (executionPlane !== undefined) existing.executionPlane = executionPlane;
         if (runtimeType !== undefined) existing.runtimeType = runtimeType;
+        if (machineId !== undefined) existing.machineId = machineId;
+        if (workspacePath !== undefined) existing.workspacePath = workspacePath;
         if (authorities !== undefined) existing.authorities = authorities;
         if (teamOverlay !== undefined) existing.teamOverlay = teamOverlay;
     } else {
@@ -788,6 +1167,8 @@ async function addTeamMember(
             ...(parentSessionId !== undefined && { parentSessionId }),
             ...(executionPlane !== undefined && { executionPlane }),
             ...(runtimeType !== undefined && { runtimeType }),
+            ...(machineId !== undefined && { machineId }),
+            ...(workspacePath !== undefined && { workspacePath }),
             ...(authorities !== undefined && { authorities }),
             ...(teamOverlay !== undefined && { teamOverlay })
         });
@@ -1043,6 +1424,33 @@ async function batchArchiveSessions(
             }
         });
         archivableIds.forEach((sessionId) => activityCache.invalidateSession(sessionId));
+
+        // Remove archived sessions from all team member rosters so the kanban
+        // frontend stops displaying them as offline members indefinitely.
+        const archivableSet = new Set(archivableIds);
+        const teamArtifacts = await listAccessibleTeamArtifacts(userId);
+        for (const artifact of teamArtifacts) {
+            const board = extractTeamBoard(artifact);
+            const members = extractTeamMembers(board);
+            const filteredMembers = members.filter(m => !archivableSet.has(m.sessionId));
+            if (filteredMembers.length !== members.length) {
+                if (!board.team) {
+                    board.team = {};
+                }
+                board.team.members = filteredMembers;
+                await db.artifact.update({
+                    where: { id: artifact.id },
+                    data: {
+                        body: serializeTeamBoard(board),
+                        bodyVersion: { increment: 1 },
+                        updatedAt: new Date(),
+                    },
+                });
+                const removedIds = archivableIds.filter(sid => members.some(m => m.sessionId === sid));
+                await broadcastTeamUpdate(userId, artifact.id, 'member-removed', { sessionIds: removedIds });
+                await invalidateTeamOverviewSnapshot(userId);
+            }
+        }
     }
 
     for (const sessionId of archivableIds) {
