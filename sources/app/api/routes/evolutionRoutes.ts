@@ -84,6 +84,37 @@ const GenomePromotePayloadSchema = z.object({
     minAvgScore: z.number().min(0).max(100).default(80),
 });
 
+const EntityDiffProxyPayloadSchema = z.object({
+    description: z.string().min(1),
+    verdictRefs: z.array(z.string()).optional(),
+    changes: z.array(z.any()),
+    strategy: z.enum(['conservative', 'moderate', 'radical']).optional(),
+    authorRole: z.string().optional(),
+    authorSession: z.string().optional(),
+});
+
+const EntityLogRefSchema = z.object({
+    kind: z.enum(['claude', 'codex', 'team', 'daemon', 'git', 'browser', 'other']),
+    path: z.string().min(1),
+    sessionId: z.string().optional(),
+});
+
+const EntityTrialCreateSchema = z.object({
+    teamId: z.string().optional(),
+    contextNarrative: z.string().optional(),
+    logRefs: z.array(EntityLogRefSchema).optional(),
+});
+
+const EntityVerdictCreateSchema = z.object({
+    readerRole: z.string().min(1),
+    readerSessionId: z.string().optional(),
+    content: z.string().min(1),
+    score: z.number().int().min(0).max(100).optional(),
+    action: z.enum(['keep', 'keep_with_guardrails', 'mutate', 'discard']).optional(),
+    dimensions: z.record(z.number()).optional(),
+    contextNarrative: z.string().optional(),
+});
+
 function buildGenomeVisibilityWhere(userId: string) {
     return {
         deletedAt: null,
@@ -146,6 +177,18 @@ function normalizeGenomeApiPayload<T>(payload: T): T {
     }
 
     return normalized as T;
+}
+
+async function loadGenomeHubTransport() {
+    const hubUrl = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
+    const hubPublishKey = resolveGenomeHubPublishKey();
+    const { default: axios } = await import('axios');
+
+    return {
+        hubUrl,
+        hubPublishKey,
+        axios,
+    };
 }
 
 function parseStoredGenomeScorecard(scorecard: string | null | undefined): Record<string, unknown> | null {
@@ -1093,13 +1136,28 @@ export function evolutionRoutes(app: Fastify) {
             }),
             body: z.object({
                 description: z.string(),
-                changes: z.array(z.object({
-                    type: z.string(),
-                    path: z.string(),
-                    op: z.string(),
-                    content: z.string(),
-                })),
+                changes: z.array(z.discriminatedUnion('type', [
+                    z.object({
+                        type: z.literal('kv'),
+                        path: z.string(),
+                        to: z.unknown(),
+                        from: z.unknown().optional(),
+                    }),
+                    z.object({
+                        type: z.literal('string'),
+                        path: z.string(),
+                        op: z.enum(['append', 'replace', 'remove']),
+                        content: z.string(),
+                        from: z.string().optional(),
+                    }),
+                    z.object({
+                        type: z.literal('narrative'),
+                        content: z.string(),
+                        path: z.string().optional(),
+                    }),
+                ])),
                 strategy: z.string().optional(),
+                verdictRefs: z.array(z.string()).optional(),
                 authorRole: z.string().optional(),
                 authorSession: z.string().optional(),
             }),
@@ -1110,7 +1168,7 @@ export function evolutionRoutes(app: Fastify) {
 
         try {
             const hubUrl = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
-            const hubPublishKey = process.env.HUB_PUBLISH_KEY;
+            const hubPublishKey = resolveGenomeHubPublishKey();
             const { default: axios } = await import('axios');
 
             const upstream = await axios.post(
@@ -1527,6 +1585,437 @@ export function evolutionRoutes(app: Fastify) {
         });
 
         return { verdicts };
+    });
+
+    // =========================================================================
+    // GET /v1/genomes/:namespace/:name/ledger
+    // Proxy genome diff ledger queries to genome-hub so clients and kanban can
+    // access the canonical evolution truth (seed + replay chain → replayedSpec).
+    // =========================================================================
+    app.get('/v1/genomes/:namespace/:name/ledger', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                namespace: z.string(),
+                name: z.string(),
+            }),
+            querystring: z.object({
+                version: z.coerce.number().int().optional(),
+            }),
+        },
+    }, async (request, reply) => {
+        const { namespace, name } = request.params as { namespace: string; name: string };
+        const query = request.query as { version?: number };
+
+        try {
+            const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
+
+            const params = query.version !== undefined ? { version: String(query.version) } : {};
+            const upstream = await axios.get(
+                `${hubUrl}/genomes/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/ledger`,
+                {
+                    params,
+                    headers: {
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10_000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `genome ledger proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy genome ledger' });
+        }
+    });
+
+    // =========================================================================
+    // GET /v1/genomes/:namespace/:name/seed
+    // Proxy genome seed spec queries to genome-hub (authoring truth / v1 spec).
+    // =========================================================================
+    app.get('/v1/genomes/:namespace/:name/seed', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                namespace: z.string(),
+                name: z.string(),
+            }),
+        },
+    }, async (request, reply) => {
+        const { namespace, name } = request.params as { namespace: string; name: string };
+
+        try {
+            const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
+
+            const upstream = await axios.get(
+                `${hubUrl}/genomes/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/seed`,
+                {
+                    headers: {
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10_000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `genome seed proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy genome seed' });
+        }
+    });
+
+    // =========================================================================
+    // Entity proxy routes — /v1/entities/:namespace/:name/*
+    // Proxy genome-hub entity/diff routes so clients do not need direct access
+    // (HUB_PUBLISH_KEY) to the genome-hub service.
+    // =========================================================================
+
+    app.get('/v1/entities/id/:id', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ id: z.string() }),
+        },
+    }, async (request, reply) => {
+        const { id } = request.params as { id: string };
+
+        try {
+            const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
+
+            const upstream = await axios.get(
+                `${hubUrl}/entities/id/${encodeURIComponent(id)}`,
+                {
+                    headers: {
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10_000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `entity by id proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy entity lookup' });
+        }
+    });
+
+    app.get('/v1/entities/:namespace/:name', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ namespace: z.string(), name: z.string() }),
+        },
+    }, async (request, reply) => {
+        const { namespace, name } = request.params as { namespace: string; name: string };
+
+        try {
+            const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
+
+            const upstream = await axios.get(
+                `${hubUrl}/entities/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`,
+                {
+                    headers: {
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10_000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `entity proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy entity' });
+        }
+    });
+
+    app.get('/v1/entities/:namespace/:name/diffs', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ namespace: z.string(), name: z.string() }),
+        },
+    }, async (request, reply) => {
+        const { namespace, name } = request.params as { namespace: string; name: string };
+
+        try {
+            const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
+
+            const upstream = await axios.get(
+                `${hubUrl}/entities/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/diffs`,
+                {
+                    headers: {
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10_000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `entity diffs proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy entity diffs' });
+        }
+    });
+
+    app.post('/v1/entities/:namespace/:name/diffs', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ namespace: z.string(), name: z.string() }),
+            body: EntityDiffProxyPayloadSchema,
+        },
+    }, async (request, reply) => {
+        const { namespace, name } = request.params as { namespace: string; name: string };
+        const payload = request.body as Record<string, unknown>;
+
+        try {
+            const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
+
+            const upstream = await axios.post(
+                `${hubUrl}/entities/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/diffs`,
+                payload,
+                {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10_000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `entity diffs post proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy entity diff submit' });
+        }
+    });
+
+    app.post('/v1/entities/:namespace/:name/trials', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ namespace: z.string(), name: z.string() }),
+            body: EntityTrialCreateSchema,
+        },
+    }, async (request, reply) => {
+        const { namespace, name } = request.params as { namespace: string; name: string };
+        const payload = request.body as Record<string, unknown>;
+
+        try {
+            const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
+
+            const upstream = await axios.post(
+                `${hubUrl}/entities/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/trials`,
+                payload,
+                {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10_000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `entity trials post proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy entity trial create' });
+        }
+    });
+
+    app.get('/v1/entities/:namespace/:name/:version', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                namespace: z.string(),
+                name: z.string(),
+                version: z.coerce.number().int(),
+            }),
+        },
+    }, async (request, reply) => {
+        const { namespace, name, version } = request.params as {
+            namespace: string;
+            name: string;
+            version: number;
+        };
+
+        try {
+            const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
+
+            const upstream = await axios.get(
+                `${hubUrl}/entities/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/${encodeURIComponent(String(version))}`,
+                {
+                    headers: {
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10_000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `entity version proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy entity version' });
+        }
+    });
+
+    app.get('/v1/entities/id/:id/trials', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ id: z.string() }),
+        },
+    }, async (request, reply) => {
+        const { id } = request.params as { id: string };
+
+        try {
+            const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
+
+            const upstream = await axios.get(
+                `${hubUrl}/entities/id/${encodeURIComponent(id)}/trials`,
+                {
+                    headers: {
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10_000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `entity trials get proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy entity trials' });
+        }
+    });
+
+    app.post('/v1/trials/:trialId/log-refs', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ trialId: z.string() }),
+            body: z.object({
+                logRefs: z.array(EntityLogRefSchema).min(1),
+            }),
+        },
+    }, async (request, reply) => {
+        const { trialId } = request.params as { trialId: string };
+        const payload = request.body as Record<string, unknown>;
+
+        try {
+            const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
+
+            const upstream = await axios.post(
+                `${hubUrl}/trials/${encodeURIComponent(trialId)}/log-refs`,
+                payload,
+                {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10_000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `trial log refs proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy trial log refs' });
+        }
+    });
+
+    app.post('/v1/trials/:trialId/verdicts', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ trialId: z.string() }),
+            body: EntityVerdictCreateSchema,
+        },
+    }, async (request, reply) => {
+        const { trialId } = request.params as { trialId: string };
+        const payload = request.body as Record<string, unknown>;
+
+        try {
+            const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
+
+            const upstream = await axios.post(
+                `${hubUrl}/trials/${encodeURIComponent(trialId)}/verdicts`,
+                payload,
+                {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10_000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `trial verdicts post proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy trial verdict create' });
+        }
+    });
+
+    app.get('/v1/trials/:trialId/verdicts', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ trialId: z.string() }),
+        },
+    }, async (request, reply) => {
+        const { trialId } = request.params as { trialId: string };
+
+        try {
+            const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
+
+            const upstream = await axios.get(
+                `${hubUrl}/trials/${encodeURIComponent(trialId)}/verdicts`,
+                {
+                    headers: {
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10_000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `trial verdicts get proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy trial verdicts' });
+        }
+    });
+
+    app.post('/v1/entities/id/:id/feedback/materialize', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ id: z.string() }),
+        },
+    }, async (request, reply) => {
+        const { id } = request.params as { id: string };
+
+        try {
+            const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
+
+            const upstream = await axios.post(
+                `${hubUrl}/entities/id/${encodeURIComponent(id)}/feedback/materialize`,
+                undefined,
+                {
+                    headers: {
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10_000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `entity feedback materialize proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy entity feedback materialization' });
+        }
     });
 }
 

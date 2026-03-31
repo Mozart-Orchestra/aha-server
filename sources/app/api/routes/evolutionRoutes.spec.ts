@@ -43,6 +43,7 @@ vi.mock('@/storage/db', () => ({
 
 vi.mock('axios', () => ({
     default: {
+        get: vi.fn(),
         post: vi.fn(),
         patch: vi.fn(),
     },
@@ -549,6 +550,778 @@ describe('evolutionRoutes', () => {
         });
 
         await app.close();
+    });
+
+    it('proxies heterogeneous genome diffs to genome-hub using the shared publish key fallback', async () => {
+        const previousHubPublishKey = process.env.HUB_PUBLISH_KEY;
+        const previousGenomeHubPublishKey = process.env.GENOME_HUB_PUBLISH_KEY;
+        delete process.env.GENOME_HUB_PUBLISH_KEY;
+        process.env.HUB_PUBLISH_KEY = 'shared-hub-key';
+
+        vi.mocked(axios.post).mockResolvedValue({
+            status: 201,
+            data: {
+                genome: {
+                    id: 'hub-genome-3',
+                    version: 3,
+                },
+                diff: {
+                    id: 'diff-1',
+                },
+            },
+        } as never);
+
+        try {
+            const app = buildApp();
+            const response = await app.inject({
+                method: 'POST',
+                url: '/v1/genomes/%40official/implementer/diff',
+                payload: {
+                    description: 'Refine task routing',
+                    changes: [
+                        { type: 'kv', path: 'behavior.onIdle', from: 'wait', to: 'ask' },
+                        {
+                            type: 'string',
+                            path: 'protocol',
+                            op: 'replace',
+                            from: 'Use todo list',
+                            content: 'Use Kanban board first',
+                        },
+                        {
+                            type: 'narrative',
+                            content: 'Supervisor observed better task hygiene.',
+                        },
+                    ],
+                    verdictRefs: ['verdict-1'],
+                    authorRole: 'supervisor',
+                },
+            });
+
+            expect(response.statusCode).toBe(201);
+            expect(axios.post).toHaveBeenCalledWith(
+                expect.stringContaining('/genomes/%40official/implementer/diff'),
+                expect.objectContaining({
+                    description: 'Refine task routing',
+                    verdictRefs: ['verdict-1'],
+                    changes: expect.arrayContaining([
+                        expect.objectContaining({
+                            type: 'kv',
+                            path: 'behavior.onIdle',
+                            from: 'wait',
+                            to: 'ask',
+                        }),
+                        expect.objectContaining({
+                            type: 'string',
+                            path: 'protocol',
+                            op: 'replace',
+                            from: 'Use todo list',
+                            content: 'Use Kanban board first',
+                        }),
+                        expect.objectContaining({
+                            type: 'narrative',
+                            content: 'Supervisor observed better task hygiene.',
+                        }),
+                    ]),
+                }),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(response.json()).toEqual({
+                genome: {
+                    id: 'hub-genome-3',
+                    version: 3,
+                },
+                diff: {
+                    id: 'diff-1',
+                },
+            });
+
+            await app.close();
+        } finally {
+            if (previousHubPublishKey === undefined) {
+                delete process.env.HUB_PUBLISH_KEY;
+            } else {
+                process.env.HUB_PUBLISH_KEY = previousHubPublishKey;
+            }
+            if (previousGenomeHubPublishKey === undefined) {
+                delete process.env.GENOME_HUB_PUBLISH_KEY;
+            } else {
+                process.env.GENOME_HUB_PUBLISH_KEY = previousGenomeHubPublishKey;
+            }
+        }
+    });
+
+    it('proxies genome ledger queries to genome-hub with optional version filters', async () => {
+        const previousHubPublishKey = process.env.HUB_PUBLISH_KEY;
+        const previousGenomeHubPublishKey = process.env.GENOME_HUB_PUBLISH_KEY;
+        delete process.env.GENOME_HUB_PUBLISH_KEY;
+        process.env.HUB_PUBLISH_KEY = 'shared-hub-key';
+
+        vi.mocked(axios.get).mockResolvedValue({
+            status: 200,
+            data: {
+                ledger: [
+                    {
+                        id: 'ledger-1',
+                        version: 2,
+                        seqNo: 1,
+                        diffType: 'kv',
+                    },
+                ],
+                replayedSpec: '{"version":2}',
+            },
+        } as never);
+
+        try {
+            const app = buildApp();
+            const response = await app.inject({
+                method: 'GET',
+                url: '/v1/genomes/%40official/implementer/ledger?version=2',
+            });
+
+            expect(response.statusCode).toBe(200);
+            expect(axios.get).toHaveBeenCalledWith(
+                expect.stringContaining('/genomes/%40official/implementer/ledger'),
+                expect.objectContaining({
+                    params: { version: '2' },
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(response.json()).toEqual({
+                ledger: [
+                    {
+                        id: 'ledger-1',
+                        version: 2,
+                        seqNo: 1,
+                        diffType: 'kv',
+                    },
+                ],
+                replayedSpec: '{"version":2}',
+            });
+
+            await app.close();
+        } finally {
+            if (previousHubPublishKey === undefined) {
+                delete process.env.HUB_PUBLISH_KEY;
+            } else {
+                process.env.HUB_PUBLISH_KEY = previousHubPublishKey;
+            }
+            if (previousGenomeHubPublishKey === undefined) {
+                delete process.env.GENOME_HUB_PUBLISH_KEY;
+            } else {
+                process.env.GENOME_HUB_PUBLISH_KEY = previousGenomeHubPublishKey;
+            }
+        }
+    });
+
+    it('proxies genome seed queries to genome-hub', async () => {
+        const previousHubPublishKey = process.env.HUB_PUBLISH_KEY;
+        const previousGenomeHubPublishKey = process.env.GENOME_HUB_PUBLISH_KEY;
+        delete process.env.GENOME_HUB_PUBLISH_KEY;
+        process.env.HUB_PUBLISH_KEY = 'shared-hub-key';
+
+        vi.mocked(axios.get).mockResolvedValue({
+            status: 200,
+            data: {
+                seed: '{"displayName":"Implementer","version":1}',
+            },
+        } as never);
+
+        try {
+            const app = buildApp();
+            const response = await app.inject({
+                method: 'GET',
+                url: '/v1/genomes/%40official/implementer/seed',
+            });
+
+            expect(response.statusCode).toBe(200);
+            expect(axios.get).toHaveBeenCalledWith(
+                expect.stringContaining('/genomes/%40official/implementer/seed'),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(response.json()).toEqual({
+                seed: '{"displayName":"Implementer","version":1}',
+            });
+
+            await app.close();
+        } finally {
+            if (previousHubPublishKey === undefined) {
+                delete process.env.HUB_PUBLISH_KEY;
+            } else {
+                process.env.HUB_PUBLISH_KEY = previousHubPublishKey;
+            }
+            if (previousGenomeHubPublishKey === undefined) {
+                delete process.env.GENOME_HUB_PUBLISH_KEY;
+            } else {
+                process.env.GENOME_HUB_PUBLISH_KEY = previousGenomeHubPublishKey;
+            }
+        }
+    });
+
+    it('proxies entity latest and diff routes to genome-hub', async () => {
+        const previousHubPublishKey = process.env.HUB_PUBLISH_KEY;
+        const previousGenomeHubPublishKey = process.env.GENOME_HUB_PUBLISH_KEY;
+        delete process.env.GENOME_HUB_PUBLISH_KEY;
+        process.env.HUB_PUBLISH_KEY = 'shared-hub-key';
+
+        vi.mocked(axios.get)
+            .mockResolvedValueOnce({
+                status: 200,
+                data: {
+                    entity: {
+                        id: 'entity-1',
+                        version: 7,
+                        name: 'implementer',
+                    },
+                },
+            } as never)
+            .mockResolvedValueOnce({
+                status: 200,
+                data: {
+                    diffs: [
+                        { id: 'entity-diff-1', version: 7 },
+                    ],
+                },
+            } as never);
+        vi.mocked(axios.post).mockResolvedValueOnce({
+            status: 201,
+            data: {
+                diff: {
+                    id: 'entity-diff-2',
+                    version: 8,
+                },
+            },
+        } as never);
+
+        try {
+            const app = buildApp();
+            const entityResponse = await app.inject({
+                method: 'GET',
+                url: '/v1/entities/%40official/implementer',
+            });
+            const diffsResponse = await app.inject({
+                method: 'GET',
+                url: '/v1/entities/%40official/implementer/diffs',
+            });
+            const createDiffResponse = await app.inject({
+                method: 'POST',
+                url: '/v1/entities/%40official/implementer/diffs',
+                payload: {
+                    description: 'Apply structured entity diff',
+                    changes: [{ type: 'narrative', content: 'Carry forward the diff ledger evidence.' }],
+                    strategy: 'conservative',
+                },
+            });
+
+            expect(entityResponse.statusCode).toBe(200);
+            expect(diffsResponse.statusCode).toBe(200);
+            expect(createDiffResponse.statusCode).toBe(201);
+            expect(axios.get).toHaveBeenNthCalledWith(
+                1,
+                expect.stringContaining('/entities/%40official/implementer'),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(axios.get).toHaveBeenNthCalledWith(
+                2,
+                expect.stringContaining('/entities/%40official/implementer/diffs'),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(axios.post).toHaveBeenCalledWith(
+                expect.stringContaining('/entities/%40official/implementer/diffs'),
+                expect.objectContaining({
+                    description: 'Apply structured entity diff',
+                }),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+
+            await app.close();
+        } finally {
+            if (previousHubPublishKey === undefined) {
+                delete process.env.HUB_PUBLISH_KEY;
+            } else {
+                process.env.HUB_PUBLISH_KEY = previousHubPublishKey;
+            }
+            if (previousGenomeHubPublishKey === undefined) {
+                delete process.env.GENOME_HUB_PUBLISH_KEY;
+            } else {
+                process.env.GENOME_HUB_PUBLISH_KEY = previousGenomeHubPublishKey;
+            }
+        }
+    });
+
+    it('proxies entity trial, verdict, and materialization routes to genome-hub', async () => {
+        const previousHubPublishKey = process.env.HUB_PUBLISH_KEY;
+        const previousGenomeHubPublishKey = process.env.GENOME_HUB_PUBLISH_KEY;
+        delete process.env.GENOME_HUB_PUBLISH_KEY;
+        process.env.HUB_PUBLISH_KEY = 'shared-hub-key';
+
+        vi.mocked(axios.post)
+            .mockResolvedValueOnce({
+                status: 201,
+                data: { trial: { id: 'trial-1', entityVersion: 7 } },
+            } as never)
+            .mockResolvedValueOnce({
+                status: 200,
+                data: { trial: { id: 'trial-1', logRefs: '[{"kind":"team","path":"logs/team.log"}]' } },
+            } as never)
+            .mockResolvedValueOnce({
+                status: 201,
+                data: { verdict: { id: 'verdict-1', trialId: 'trial-1' } },
+            } as never)
+            .mockResolvedValueOnce({
+                status: 200,
+                data: { entityId: 'entity-1', feedback: { avgScore: 95 } },
+            } as never);
+        vi.mocked(axios.get)
+            .mockResolvedValueOnce({
+                status: 200,
+                data: { trials: [{ id: 'trial-1' }] },
+            } as never)
+            .mockResolvedValueOnce({
+                status: 200,
+                data: { verdicts: [{ id: 'verdict-1' }] },
+            } as never);
+
+        try {
+            const app = buildApp();
+            const createTrialResponse = await app.inject({
+                method: 'POST',
+                url: '/v1/entities/%40official/implementer/trials',
+                payload: {
+                    teamId: 'team-1',
+                    contextNarrative: 'Validate the updated implementer on the next task.',
+                },
+            });
+            const listTrialsResponse = await app.inject({
+                method: 'GET',
+                url: '/v1/entities/id/entity-1/trials',
+            });
+            const appendLogRefsResponse = await app.inject({
+                method: 'POST',
+                url: '/v1/trials/trial-1/log-refs',
+                payload: {
+                    logRefs: [{ kind: 'team', path: 'logs/team.log' }],
+                },
+            });
+            const createVerdictResponse = await app.inject({
+                method: 'POST',
+                url: '/v1/trials/trial-1/verdicts',
+                payload: {
+                    readerRole: 'supervisor',
+                    content: 'The new entity is an improvement.',
+                    score: 95,
+                    action: 'keep',
+                },
+            });
+            const listVerdictsResponse = await app.inject({
+                method: 'GET',
+                url: '/v1/trials/trial-1/verdicts',
+            });
+            const materializeResponse = await app.inject({
+                method: 'POST',
+                url: '/v1/entities/id/entity-1/feedback/materialize',
+            });
+
+            expect(createTrialResponse.statusCode).toBe(201);
+            expect(listTrialsResponse.statusCode).toBe(200);
+            expect(appendLogRefsResponse.statusCode).toBe(200);
+            expect(createVerdictResponse.statusCode).toBe(201);
+            expect(listVerdictsResponse.statusCode).toBe(200);
+            expect(materializeResponse.statusCode).toBe(200);
+            expect(axios.post).toHaveBeenNthCalledWith(
+                1,
+                expect.stringContaining('/entities/%40official/implementer/trials'),
+                expect.objectContaining({
+                    teamId: 'team-1',
+                }),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(axios.get).toHaveBeenNthCalledWith(
+                1,
+                expect.stringContaining('/entities/id/entity-1/trials'),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(axios.post).toHaveBeenNthCalledWith(
+                2,
+                expect.stringContaining('/trials/trial-1/log-refs'),
+                expect.objectContaining({
+                    logRefs: [{ kind: 'team', path: 'logs/team.log' }],
+                }),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(axios.post).toHaveBeenNthCalledWith(
+                3,
+                expect.stringContaining('/trials/trial-1/verdicts'),
+                expect.objectContaining({
+                    readerRole: 'supervisor',
+                    action: 'keep',
+                }),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(axios.get).toHaveBeenNthCalledWith(
+                2,
+                expect.stringContaining('/trials/trial-1/verdicts'),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(axios.post).toHaveBeenNthCalledWith(
+                4,
+                expect.stringContaining('/entities/id/entity-1/feedback/materialize'),
+                undefined,
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+
+            await app.close();
+        } finally {
+            if (previousHubPublishKey === undefined) {
+                delete process.env.HUB_PUBLISH_KEY;
+            } else {
+                process.env.HUB_PUBLISH_KEY = previousHubPublishKey;
+            }
+            if (previousGenomeHubPublishKey === undefined) {
+                delete process.env.GENOME_HUB_PUBLISH_KEY;
+            } else {
+                process.env.GENOME_HUB_PUBLISH_KEY = previousGenomeHubPublishKey;
+            }
+        }
+    });
+
+    it('proxies entity lookup routes to genome-hub', async () => {
+        const previousHubPublishKey = process.env.HUB_PUBLISH_KEY;
+        const previousGenomeHubPublishKey = process.env.GENOME_HUB_PUBLISH_KEY;
+        delete process.env.GENOME_HUB_PUBLISH_KEY;
+        process.env.HUB_PUBLISH_KEY = 'shared-hub-key';
+
+        vi.mocked(axios.get)
+            .mockResolvedValueOnce({
+                status: 200,
+                data: {
+                    entity: {
+                        id: 'entity-1',
+                        namespace: '@official',
+                        name: 'implementer',
+                        version: 3,
+                    },
+                },
+            } as never)
+            .mockResolvedValueOnce({
+                status: 200,
+                data: {
+                    entity: {
+                        id: 'entity-1',
+                        namespace: '@official',
+                        name: 'implementer',
+                        version: 2,
+                    },
+                },
+            } as never);
+
+        try {
+            const app = buildApp();
+
+            const byIdResponse = await app.inject({
+                method: 'GET',
+                url: '/v1/entities/id/entity-1',
+            });
+            const byVersionResponse = await app.inject({
+                method: 'GET',
+                url: '/v1/entities/%40official/implementer/2',
+            });
+
+            expect(byIdResponse.statusCode).toBe(200);
+            expect(byVersionResponse.statusCode).toBe(200);
+            expect(axios.get).toHaveBeenNthCalledWith(
+                1,
+                expect.stringContaining('/entities/id/entity-1'),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(axios.get).toHaveBeenNthCalledWith(
+                2,
+                expect.stringContaining('/entities/%40official/implementer/2'),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+
+            await app.close();
+        } finally {
+            if (previousHubPublishKey === undefined) {
+                delete process.env.HUB_PUBLISH_KEY;
+            } else {
+                process.env.HUB_PUBLISH_KEY = previousHubPublishKey;
+            }
+            if (previousGenomeHubPublishKey === undefined) {
+                delete process.env.GENOME_HUB_PUBLISH_KEY;
+            } else {
+                process.env.GENOME_HUB_PUBLISH_KEY = previousGenomeHubPublishKey;
+            }
+        }
+    });
+
+    it('proxies entity diff, trial, verdict, and materialization routes to genome-hub', async () => {
+        const previousHubPublishKey = process.env.HUB_PUBLISH_KEY;
+        const previousGenomeHubPublishKey = process.env.GENOME_HUB_PUBLISH_KEY;
+        delete process.env.GENOME_HUB_PUBLISH_KEY;
+        process.env.HUB_PUBLISH_KEY = 'shared-hub-key';
+
+        vi.mocked(axios.post)
+            .mockResolvedValueOnce({
+                status: 201,
+                data: {
+                    diff: {
+                        id: 'entity-diff-1',
+                    },
+                },
+            } as never)
+            .mockResolvedValueOnce({
+                status: 201,
+                data: {
+                    trial: {
+                        id: 'trial-1',
+                    },
+                },
+            } as never)
+            .mockResolvedValueOnce({
+                status: 200,
+                data: {
+                    trial: {
+                        id: 'trial-1',
+                        logRefs: [{ kind: 'codex', path: '/tmp/log.jsonl' }],
+                    },
+                },
+            } as never)
+            .mockResolvedValueOnce({
+                status: 201,
+                data: {
+                    verdict: {
+                        id: 'verdict-1',
+                    },
+                },
+            } as never)
+            .mockResolvedValueOnce({
+                status: 200,
+                data: {
+                    entityId: 'entity-1',
+                    feedback: {
+                        avgScore: 91,
+                    },
+                },
+            } as never);
+        vi.mocked(axios.get)
+            .mockResolvedValueOnce({
+                status: 200,
+                data: {
+                    trials: [{ id: 'trial-1' }],
+                },
+            } as never)
+            .mockResolvedValueOnce({
+                status: 200,
+                data: {
+                    verdicts: [{ id: 'verdict-1' }],
+                },
+            } as never);
+
+        try {
+            const app = buildApp();
+
+            const diffResponse = await app.inject({
+                method: 'POST',
+                url: '/v1/entities/%40official/implementer/diffs',
+                payload: {
+                    description: 'Add stricter completion audit',
+                    changes: [{ type: 'kv', path: 'policy.audit', to: true }],
+                    strategy: 'moderate',
+                },
+            });
+            const trialCreateResponse = await app.inject({
+                method: 'POST',
+                url: '/v1/entities/%40official/implementer/trials',
+                payload: {
+                    teamId: 'team-1',
+                    contextNarrative: 'Run a focused repair loop',
+                    logRefs: [{ kind: 'codex', path: '/tmp/log.jsonl' }],
+                },
+            });
+            const entityTrialsResponse = await app.inject({
+                method: 'GET',
+                url: '/v1/entities/id/entity-1/trials',
+            });
+            const logRefsResponse = await app.inject({
+                method: 'POST',
+                url: '/v1/trials/trial-1/log-refs',
+                payload: {
+                    logRefs: [{ kind: 'codex', path: '/tmp/log.jsonl' }],
+                },
+            });
+            const verdictCreateResponse = await app.inject({
+                method: 'POST',
+                url: '/v1/trials/trial-1/verdicts',
+                payload: {
+                    readerRole: 'reviewer',
+                    content: 'Looks good',
+                    score: 91,
+                    action: 'keep',
+                },
+            });
+            const verdictListResponse = await app.inject({
+                method: 'GET',
+                url: '/v1/trials/trial-1/verdicts',
+            });
+            const materializeResponse = await app.inject({
+                method: 'POST',
+                url: '/v1/entities/id/entity-1/feedback/materialize',
+            });
+
+            expect(diffResponse.statusCode).toBe(201);
+            expect(trialCreateResponse.statusCode).toBe(201);
+            expect(entityTrialsResponse.statusCode).toBe(200);
+            expect(logRefsResponse.statusCode).toBe(200);
+            expect(verdictCreateResponse.statusCode).toBe(201);
+            expect(verdictListResponse.statusCode).toBe(200);
+            expect(materializeResponse.statusCode).toBe(200);
+
+            expect(axios.post).toHaveBeenNthCalledWith(
+                1,
+                expect.stringContaining('/entities/%40official/implementer/diffs'),
+                expect.objectContaining({
+                    description: 'Add stricter completion audit',
+                    strategy: 'moderate',
+                }),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(axios.post).toHaveBeenNthCalledWith(
+                2,
+                expect.stringContaining('/entities/%40official/implementer/trials'),
+                expect.objectContaining({
+                    teamId: 'team-1',
+                }),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(axios.get).toHaveBeenNthCalledWith(
+                1,
+                expect.stringContaining('/entities/id/entity-1/trials'),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(axios.post).toHaveBeenNthCalledWith(
+                3,
+                expect.stringContaining('/trials/trial-1/log-refs'),
+                expect.objectContaining({
+                    logRefs: [{ kind: 'codex', path: '/tmp/log.jsonl' }],
+                }),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(axios.post).toHaveBeenNthCalledWith(
+                4,
+                expect.stringContaining('/trials/trial-1/verdicts'),
+                expect.objectContaining({
+                    readerRole: 'reviewer',
+                    action: 'keep',
+                }),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(axios.get).toHaveBeenNthCalledWith(
+                2,
+                expect.stringContaining('/trials/trial-1/verdicts'),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(axios.post).toHaveBeenNthCalledWith(
+                5,
+                expect.stringContaining('/entities/id/entity-1/feedback/materialize'),
+                undefined,
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+
+            await app.close();
+        } finally {
+            if (previousHubPublishKey === undefined) {
+                delete process.env.HUB_PUBLISH_KEY;
+            } else {
+                process.env.HUB_PUBLISH_KEY = previousHubPublishKey;
+            }
+            if (previousGenomeHubPublishKey === undefined) {
+                delete process.env.GENOME_HUB_PUBLISH_KEY;
+            } else {
+                process.env.GENOME_HUB_PUBLISH_KEY = previousGenomeHubPublishKey;
+            }
+        }
     });
 
     it('proxies genome promotion updates to genome-hub using the shared publish key fallback', async () => {

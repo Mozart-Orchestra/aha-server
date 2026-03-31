@@ -1,12 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseGenomeSpec, syncGenomeSpecVersion } from './genomeSpec';
+import { parseAgentImage, parseGenomeSpec, syncGenomeSpecVersion } from './genomeSpec';
 
 describe('genomeSpec helpers', () => {
     it('parses a valid genome spec object', () => {
         expect(parseGenomeSpec('{"displayName":"Builder","version":2}')).toEqual({
             displayName: 'Builder',
             version: 2,
+        });
+    });
+
+    it('keeps parseAgentImage as a compatibility alias for the latest schema name', () => {
+        expect(parseAgentImage('{"displayName":"Builder","authorities":["agent.spawn"]}')).toEqual({
+            displayName: 'Builder',
+            authorities: ['agent.spawn'],
         });
     });
 

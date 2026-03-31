@@ -1,6 +1,8 @@
 FROM node:22-alpine AS prod-deps
 RUN apk add --no-cache ffmpeg python3 make g++
 WORKDIR /app
+ARG NODE_OPTIONS=--max-old-space-size=12288
+ENV NODE_OPTIONS=${NODE_OPTIONS}
 
 COPY package.json yarn.lock ./
 COPY prisma ./prisma
@@ -14,7 +16,7 @@ WORKDIR /app
 
 ENV NODE_ENV=production \
     PORT=3005 \
-    NODE_OPTIONS=--max-old-space-size=2048
+    NODE_OPTIONS=--max-old-space-size=12288
 
 COPY --from=prod-deps --chown=node:node /app/package.json ./package.json
 COPY --from=prod-deps --chown=node:node /app/yarn.lock ./yarn.lock
