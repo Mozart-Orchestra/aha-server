@@ -371,30 +371,34 @@ export function authRoutes(app: Fastify) {
      * Client proves possession of secret via challenge-response.
      * Server never sees the secret.
      */
-    app.post('/v1/auth/supabase', {
-        schema: {
-            body: z.object({
-                accessToken: z.string(),
-                publicKey: z.string(),
-                challenge: z.string(),
-                signature: z.string(),
+    const supabaseExchangeSchema = {
+        body: z.object({
+            accessToken: z.string(),
+            publicKey: z.string(),
+            challenge: z.string(),
+            signature: z.string(),
+        }),
+        response: {
+            200: z.object({
+                success: z.literal(true),
+                token: z.string(),
+                userId: z.string(),
             }),
-            response: {
-                200: z.object({
-                    success: z.literal(true),
-                    token: z.string(),
-                    userId: z.string(),
-                }),
-                401: z.object({
-                    error: z.string(),
-                }),
-                409: z.object({
-                    error: z.string(),
-                    code: z.enum(['RESTORE_REQUIRED', 'ACCOUNT_LINK_CONFLICT']),
-                }),
-            }
+            401: z.object({
+                error: z.string(),
+            }),
+            409: z.object({
+                error: z.string(),
+                code: z.enum(['RESTORE_REQUIRED', 'ACCOUNT_LINK_CONFLICT', 'secret-proof-mismatch']),
+            }),
         }
-    }, async (request, reply) => {
+    };
+
+    // Register both /v1/auth/supabase (legacy) and /v1/auth/supabase/exchange (v3)
+    for (const path of ['/v1/auth/supabase', '/v1/auth/supabase/exchange'] as const) {
+        app.post(path, {
+            schema: supabaseExchangeSchema
+        }, async (request, reply) => {
         log({ module: 'supabase-auth' }, `[SUPABASE AUTH] Received Supabase auth request`);
 
         const verified = await supabaseVerifyToken(request.body.accessToken);
@@ -425,19 +429,19 @@ export function authRoutes(app: Fastify) {
         });
 
         if (account && account.publicKey !== publicKeyHex) {
-            // New device with new secret — update publicKey to let them in.
-            // Old devices with old secret can still restore via restore key.
+            // Account exists with a different publicKey — do NOT overwrite.
+            // The original publicKey is the permanent account identity.
+            // Just issue a token for the existing account.
             account = await db.account.update({
                 where: { id: account.id },
                 data: {
-                    publicKey: publicKeyHex,
                     email: verified.email,
                     firstName,
                     lastName,
                     updatedAt: new Date(),
                 }
             });
-            log({ module: 'supabase-auth' }, `[SUPABASE AUTH] Updated publicKey for existing account: ${account.id}`);
+            log({ module: 'supabase-auth' }, `[SUPABASE AUTH] Account found via Google, publicKey mismatch — keeping original publicKey for: ${account.id}`);
         }
 
         if (!account) {
@@ -498,5 +502,6 @@ export function authRoutes(app: Fastify) {
             userId: account.id,
         });
     });
+    } // end for-loop over supabase paths
 
 }
