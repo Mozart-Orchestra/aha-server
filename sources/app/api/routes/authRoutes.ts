@@ -1,10 +1,17 @@
 import { z } from "zod";
 import { type Fastify } from "../types";
 import * as privacyKit from "privacy-kit";
+import { randomBytes } from "crypto";
 import { db } from "@/storage/db";
 import { auth } from "@/app/auth/auth";
 import { log } from "@/utils/log";
 import { supabaseVerifyToken } from "@/app/auth/supabaseVerify";
+import {
+    markAccountRecoveryUsed,
+    publicKeyHexFromContentSecretKey,
+    readAccountRecoverySecret,
+    upsertAccountRecoveryMaterial,
+} from "@/app/auth/accountRecoveryMaterial";
 
 export function authRoutes(app: Fastify) {
     const secretAuthSchema = {
@@ -67,6 +74,38 @@ export function authRoutes(app: Fastify) {
                 token: await auth.createToken(user.id)
             }
         };
+    }
+
+    async function persistRecoveryMaterialForAccount(accountId: string, accountPublicKey: string, contentSecretKeyBase64?: string | null): Promise<boolean> {
+        if (!contentSecretKeyBase64) {
+            const existing = await db.accountRecoveryMaterial.findUnique({
+                where: { accountId },
+                select: { accountId: true },
+            });
+            return !!existing;
+        }
+
+        const contentSecretKey = privacyKit.decodeBase64(contentSecretKeyBase64);
+        const derivedPublicKeyHex = publicKeyHexFromContentSecretKey(contentSecretKey);
+        if (derivedPublicKeyHex !== accountPublicKey) {
+            throw new Error('content-secret-mismatch');
+        }
+
+        await upsertAccountRecoveryMaterial(accountId, contentSecretKey);
+        return true;
+    }
+
+    async function encryptForBoxPublicKey(data: Uint8Array, recipientPublicKey: Uint8Array): Promise<Uint8Array> {
+        const tweetnacl = (await import("tweetnacl")).default;
+        const ephemeralKeyPair = tweetnacl.box.keyPair();
+        const nonce = randomBytes(tweetnacl.box.nonceLength);
+        const encrypted = tweetnacl.box(data, nonce, recipientPublicKey, ephemeralKeyPair.secretKey);
+
+        const result = new Uint8Array(ephemeralKeyPair.publicKey.length + nonce.length + encrypted.length);
+        result.set(ephemeralKeyPair.publicKey, 0);
+        result.set(nonce, ephemeralKeyPair.publicKey.length);
+        result.set(encrypted, ephemeralKeyPair.publicKey.length + nonce.length);
+        return result;
     }
 
     app.post('/v1/auth', {
@@ -248,6 +287,50 @@ export function authRoutes(app: Fastify) {
         return reply.send({ success: true });
     });
 
+    app.post('/v1/account/recovery-material', {
+        preHandler: app.authenticate,
+        schema: {
+            body: z.object({
+                contentSecretKey: z.string(),
+            }),
+            response: {
+                200: z.object({
+                    success: z.literal(true),
+                    publicKey: z.string(),
+                }),
+                409: z.object({
+                    error: z.string(),
+                    code: z.literal('secret-proof-mismatch'),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const account = await db.account.findUnique({
+            where: { id: request.userId },
+        });
+
+        if (!account) {
+            return reply.code(409).send({
+                error: 'Account not found',
+                code: 'secret-proof-mismatch',
+            });
+        }
+
+        try {
+            await persistRecoveryMaterialForAccount(account.id, account.publicKey, request.body.contentSecretKey);
+        } catch (error) {
+            return reply.code(409).send({
+                error: 'This device secret does not match the current account',
+                code: 'secret-proof-mismatch',
+            });
+        }
+
+        return reply.send({
+            success: true,
+            publicKey: account.publicKey,
+        });
+    });
+
     // Account auth request
     app.post('/v1/auth/account/request', {
         schema: {
@@ -377,12 +460,14 @@ export function authRoutes(app: Fastify) {
             publicKey: z.string(),
             challenge: z.string(),
             signature: z.string(),
+            contentSecretKey: z.string().optional(),
         }),
         response: {
             200: z.object({
                 success: z.literal(true),
                 token: z.string(),
                 userId: z.string(),
+                recoveryReady: z.boolean(),
             }),
             401: z.object({
                 error: z.string(),
@@ -429,19 +514,11 @@ export function authRoutes(app: Fastify) {
         });
 
         if (account && account.publicKey !== publicKeyHex) {
-            // Account exists with a different publicKey — do NOT overwrite.
-            // The original publicKey is the permanent account identity.
-            // Just issue a token for the existing account.
-            account = await db.account.update({
-                where: { id: account.id },
-                data: {
-                    email: verified.email,
-                    firstName,
-                    lastName,
-                    updatedAt: new Date(),
-                }
+            log({ module: 'supabase-auth' }, `[SUPABASE AUTH] Account found via Google, but secret proof does not match the canonical publicKey for: ${account.id}`);
+            return reply.code(409).send({
+                error: 'This sign-in account is already linked to a different device secret',
+                code: 'secret-proof-mismatch',
             });
-            log({ module: 'supabase-auth' }, `[SUPABASE AUTH] Account found via Google, publicKey mismatch — keeping original publicKey for: ${account.id}`);
         }
 
         if (!account) {
@@ -494,14 +571,104 @@ export function authRoutes(app: Fastify) {
             log({ module: 'supabase-auth' }, `[SUPABASE AUTH] Found existing account: ${account.id}`);
         }
 
+        let recoveryReady = false;
+        try {
+            recoveryReady = await persistRecoveryMaterialForAccount(account.id, account.publicKey, request.body.contentSecretKey);
+        } catch (error) {
+            return reply.code(409).send({
+                error: 'This device secret does not match the current account',
+                code: 'secret-proof-mismatch',
+            });
+        }
+
         const token = await auth.createToken(account.id);
 
         return reply.send({
             success: true,
             token,
             userId: account.id,
+            recoveryReady,
         });
     });
     } // end for-loop over supabase paths
+
+    app.post('/v1/auth/supabase/recover', {
+        schema: {
+            body: z.object({
+                accessToken: z.string(),
+                recoveryPublicKey: z.string(),
+            }),
+            response: {
+                200: z.object({
+                    success: z.literal(true),
+                    token: z.string(),
+                    userId: z.string(),
+                    encryptedContentSecretKey: z.string(),
+                }),
+                401: z.object({
+                    error: z.string(),
+                }),
+                404: z.object({
+                    error: z.string(),
+                    code: z.literal('ACCOUNT_NOT_FOUND'),
+                }),
+                409: z.object({
+                    error: z.string(),
+                    code: z.literal('RECOVERY_NOT_READY'),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const verified = await supabaseVerifyToken(request.body.accessToken);
+        if (!verified) {
+            log({ module: 'supabase-auth' }, `[SUPABASE RECOVER] ❌ Token verification failed`);
+            return reply.code(401).send({ error: 'Invalid Supabase token' });
+        }
+
+        const account = await db.account.findFirst({
+            where: { supabaseUserId: verified.supabaseUserId },
+        });
+
+        if (!account) {
+            return reply.code(404).send({
+                error: 'No existing account is linked to this sign-in identity',
+                code: 'ACCOUNT_NOT_FOUND',
+            });
+        }
+
+        const contentSecretKey = await readAccountRecoverySecret(account.id);
+        if (!contentSecretKey) {
+            return reply.code(409).send({
+                error: 'Automatic recovery is not ready for this account yet',
+                code: 'RECOVERY_NOT_READY',
+            });
+        }
+
+        const derivedPublicKeyHex = publicKeyHexFromContentSecretKey(contentSecretKey);
+        if (derivedPublicKeyHex !== account.publicKey) {
+            log({ module: 'supabase-auth', level: 'warn' }, `[SUPABASE RECOVER] Recovery material does not match account publicKey for: ${account.id}`);
+            return reply.code(409).send({
+                error: 'Automatic recovery is not ready for this account yet',
+                code: 'RECOVERY_NOT_READY',
+            });
+        }
+
+        const tweetnacl = (await import("tweetnacl")).default;
+        const recoveryPublicKey = privacyKit.decodeBase64(request.body.recoveryPublicKey);
+        if (recoveryPublicKey.length !== tweetnacl.box.publicKeyLength) {
+            return reply.code(401).send({ error: 'Invalid recovery public key' });
+        }
+
+        const token = await auth.createToken(account.id);
+        const encryptedContentSecretKey = await encryptForBoxPublicKey(contentSecretKey, recoveryPublicKey);
+        await markAccountRecoveryUsed(account.id);
+
+        return reply.send({
+            success: true,
+            token,
+            userId: account.id,
+            encryptedContentSecretKey: privacyKit.encodeBase64(encryptedContentSecretKey),
+        });
+    });
 
 }

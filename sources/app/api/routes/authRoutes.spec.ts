@@ -6,7 +6,14 @@ vi.mock('@/storage/db', () => ({
     db: {
         account: {
             upsert: vi.fn(),
+            findFirst: vi.fn(),
             findUnique: vi.fn(),
+            update: vi.fn(),
+            create: vi.fn(),
+        },
+        accountRecoveryMaterial: {
+            findUnique: vi.fn(),
+            upsert: vi.fn(),
             update: vi.fn(),
         },
         terminalAuthRequest: {
@@ -30,11 +37,26 @@ vi.mock('@/app/auth/auth', () => ({
     },
 }));
 
+vi.mock('@/app/auth/supabaseVerify', () => ({
+    supabaseVerifyToken: vi.fn(),
+}));
+
+vi.mock('@/app/auth/accountRecoveryMaterial', () => ({
+    markAccountRecoveryUsed: vi.fn(),
+    publicKeyHexFromContentSecretKey: vi.fn(() => 'hex-public-key'),
+    readAccountRecoverySecret: vi.fn(),
+    upsertAccountRecoveryMaterial: vi.fn(),
+}));
+
 vi.mock('privacy-kit', () => ({
     decodeBase64: vi.fn((value: string) => {
         switch (value) {
             case 'valid-public-key':
                 return new Uint8Array(32).fill(1);
+            case 'recovery-public-key':
+                return new Uint8Array(32).fill(7);
+            case 'content-secret':
+                return new Uint8Array(32).fill(9);
             case 'invalid-public-key':
                 return new Uint8Array(12).fill(2);
             case 'challenge':
@@ -46,25 +68,50 @@ vi.mock('privacy-kit', () => ({
         }
     }),
     encodeHex: vi.fn(() => 'hex-public-key'),
+    encodeBase64: vi.fn(() => 'encoded-recovery-secret'),
 }));
 
-vi.mock('tweetnacl', () => ({
-    default: {
-        sign: {
-            detached: {
-                verify: vi.fn(),
-            },
-        },
-        box: {
+vi.mock('tweetnacl', () => {
+    const box = Object.assign(
+        vi.fn((_data: Uint8Array) => new Uint8Array([8, 8, 8])),
+        {
             publicKeyLength: 32,
+            nonceLength: 24,
+            keyPair: vi.fn(() => ({
+                publicKey: new Uint8Array(32).fill(5),
+                secretKey: new Uint8Array(32).fill(6),
+            })),
         },
-    },
-}));
+    );
+
+    return {
+        default: {
+            sign: {
+                keyPair: {
+                    fromSeed: vi.fn(() => ({
+                        publicKey: new Uint8Array(32).fill(1),
+                        secretKey: new Uint8Array(64).fill(2),
+                    })),
+                },
+                detached: {
+                    verify: vi.fn(),
+                },
+            },
+            box,
+        },
+    };
+});
 
 import tweetnacl from 'tweetnacl';
 
 import { db } from '@/storage/db';
 import { auth } from '@/app/auth/auth';
+import {
+    markAccountRecoveryUsed,
+    readAccountRecoverySecret,
+    upsertAccountRecoveryMaterial,
+} from '@/app/auth/accountRecoveryMaterial';
+import { supabaseVerifyToken } from '@/app/auth/supabaseVerify';
 import { authRoutes } from './authRoutes';
 
 function buildApp(options?: {
@@ -86,6 +133,14 @@ describe('authRoutes', () => {
         vi.clearAllMocks();
         vi.mocked(auth.createToken).mockResolvedValue('token-123');
         vi.mocked(tweetnacl.sign.detached.verify).mockReturnValue(true as never);
+        vi.mocked(db.accountRecoveryMaterial.findUnique).mockResolvedValue(null as never);
+        vi.mocked(readAccountRecoverySecret).mockResolvedValue(null as never);
+        vi.mocked(supabaseVerifyToken).mockResolvedValue({
+            supabaseUserId: 'supabase-user-1',
+            email: 'user@example.com',
+            name: 'Test User',
+            avatarUrl: null,
+        } as never);
     });
 
     it('rejects /v1/auth when the signature is invalid', async () => {
@@ -224,6 +279,100 @@ describe('authRoutes', () => {
         expect(response.json()).toEqual({
             status: 'authorized',
             supportsV2: false,
+        });
+
+        await app.close();
+    });
+
+    it('rejects Supabase exchange when the Google account is linked to a different secret', async () => {
+        vi.mocked(db.account.findFirst).mockResolvedValue({
+            id: 'user-1',
+            publicKey: 'different-public-key',
+            supabaseUserId: 'supabase-user-1',
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/auth/supabase/exchange',
+            payload: {
+                accessToken: 'supabase-token',
+                publicKey: 'valid-public-key',
+                challenge: 'challenge',
+                signature: 'signature',
+            },
+        });
+
+        expect(response.statusCode).toBe(409);
+        expect(response.json()).toEqual({
+            error: 'This sign-in account is already linked to a different device secret',
+            code: 'secret-proof-mismatch',
+        });
+
+        await app.close();
+    });
+
+    it('bootstraps recovery material during successful Supabase exchange', async () => {
+        vi.mocked(db.account.findFirst).mockResolvedValue(null as never);
+        vi.mocked(db.account.findUnique).mockResolvedValue(null as never);
+        vi.mocked(db.account.create).mockResolvedValue({
+            id: 'user-1',
+            publicKey: 'hex-public-key',
+        } as never);
+        vi.mocked(upsertAccountRecoveryMaterial).mockResolvedValue({
+            accountId: 'user-1',
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/auth/supabase/exchange',
+            payload: {
+                accessToken: 'supabase-token',
+                publicKey: 'valid-public-key',
+                challenge: 'challenge',
+                signature: 'signature',
+                contentSecretKey: 'content-secret',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            success: true,
+            token: 'token-123',
+            userId: 'user-1',
+            recoveryReady: true,
+        });
+        expect(vi.mocked(upsertAccountRecoveryMaterial)).toHaveBeenCalled();
+
+        await app.close();
+    });
+
+    it('returns recovery material for Supabase recover when available', async () => {
+        vi.mocked(db.account.findFirst).mockResolvedValue({
+            id: 'user-1',
+            publicKey: 'hex-public-key',
+            supabaseUserId: 'supabase-user-1',
+        } as never);
+        vi.mocked(readAccountRecoverySecret).mockResolvedValue(new Uint8Array([1, 2, 3]) as never);
+        vi.mocked(markAccountRecoveryUsed).mockResolvedValue(undefined as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/auth/supabase/recover',
+            payload: {
+                accessToken: 'supabase-token',
+                recoveryPublicKey: 'recovery-public-key',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            success: true,
+            token: 'token-123',
+            userId: 'user-1',
+            encryptedContentSecretKey: 'encoded-recovery-secret',
         });
 
         await app.close();

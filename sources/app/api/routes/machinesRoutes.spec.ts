@@ -7,7 +7,7 @@ vi.mock('@/storage/db', () => ({
         machine: {
             findFirst: vi.fn(),
             findUnique: vi.fn(),
-            create: vi.fn(),
+            upsert: vi.fn(),
         },
     },
 }));
@@ -48,7 +48,7 @@ describe('machinesRoutes', () => {
         vi.clearAllMocks();
         vi.mocked(db.machine.findFirst).mockResolvedValue(null as never);
         vi.mocked(db.machine.findUnique).mockResolvedValue(null as never);
-        vi.mocked(db.machine.create).mockResolvedValue({
+        vi.mocked(db.machine.upsert).mockResolvedValue({
             id: 'machine-1',
             metadata: 'meta',
             metadataVersion: 1,
@@ -82,7 +82,7 @@ describe('machinesRoutes', () => {
         expect(response.json()).toEqual({
             error: 'Machine already belongs to another account. Clear the local machine ID or reconnect the original account.',
         });
-        expect(vi.mocked(db.machine.create)).not.toHaveBeenCalled();
+        expect(vi.mocked(db.machine.upsert)).not.toHaveBeenCalled();
 
         await app.close();
     });
