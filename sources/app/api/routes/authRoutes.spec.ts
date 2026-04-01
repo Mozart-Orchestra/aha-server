@@ -16,6 +16,11 @@ vi.mock('@/storage/db', () => ({
             upsert: vi.fn(),
             update: vi.fn(),
         },
+        accountJoinTicket: {
+            create: vi.fn(),
+            findUnique: vi.fn(),
+            update: vi.fn(),
+        },
         terminalAuthRequest: {
             upsert: vi.fn(),
             findUnique: vi.fn(),
@@ -134,6 +139,7 @@ describe('authRoutes', () => {
         vi.mocked(auth.createToken).mockResolvedValue('token-123');
         vi.mocked(tweetnacl.sign.detached.verify).mockReturnValue(true as never);
         vi.mocked(db.accountRecoveryMaterial.findUnique).mockResolvedValue(null as never);
+        vi.mocked(db.accountJoinTicket.findUnique).mockResolvedValue(null as never);
         vi.mocked(readAccountRecoverySecret).mockResolvedValue(null as never);
         vi.mocked(supabaseVerifyToken).mockResolvedValue({
             supabaseUserId: 'supabase-user-1',
@@ -373,6 +379,78 @@ describe('authRoutes', () => {
             token: 'token-123',
             userId: 'user-1',
             encryptedContentSecretKey: 'encoded-recovery-secret',
+        });
+
+        await app.close();
+    });
+
+    it('creates an account join ticket when recovery material is ready', async () => {
+        vi.mocked(db.account.findUnique).mockResolvedValue({
+            id: 'user-1',
+            publicKey: 'hex-public-key',
+        } as never);
+        vi.mocked(db.accountRecoveryMaterial.findUnique).mockResolvedValue({
+            publicKey: 'hex-public-key',
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/account/join-ticket',
+            headers: {
+                authorization: 'Bearer token-123',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toMatchObject({
+            success: true,
+            ticket: expect.stringMatching(/^aha_join_/),
+        });
+        expect(vi.mocked(db.accountJoinTicket.create)).toHaveBeenCalledWith({
+            data: expect.objectContaining({
+                accountId: 'user-1',
+                tokenHash: expect.any(String),
+                expiresAt: expect.any(Date),
+            }),
+        });
+
+        await app.close();
+    });
+
+    it('redeems an account join ticket into encrypted credentials', async () => {
+        vi.mocked(db.accountJoinTicket.findUnique).mockResolvedValue({
+            id: 'join-1',
+            accountId: 'user-1',
+            usedAt: null,
+            expiresAt: new Date(Date.now() + 60_000),
+        } as never);
+        vi.mocked(db.account.findUnique).mockResolvedValue({
+            id: 'user-1',
+            publicKey: 'hex-public-key',
+        } as never);
+        vi.mocked(readAccountRecoverySecret).mockResolvedValue(new Uint8Array([1, 2, 3]) as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/auth/account/join',
+            payload: {
+                ticket: 'aha_join_ExampleTicket123',
+                publicKey: 'valid-public-key',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            success: true,
+            token: 'token-123',
+            userId: 'user-1',
+            encryptedContentSecretKey: 'encoded-recovery-secret',
+        });
+        expect(vi.mocked(db.accountJoinTicket.update)).toHaveBeenCalledWith({
+            where: { id: 'join-1' },
+            data: { usedAt: expect.any(Date) },
         });
 
         await app.close();

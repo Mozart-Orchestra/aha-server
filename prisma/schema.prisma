@@ -57,6 +57,7 @@ model Account {
     TeamContextEntry    TeamContextEntry[]
     Genome              Genome[]
     AccountRecoveryMaterial AccountRecoveryMaterial?
+    AccountJoinTicket   AccountJoinTicket[]
 }
 
 model AccountRecoveryMaterial {
@@ -71,6 +72,20 @@ model AccountRecoveryMaterial {
     lastRecoveredAt DateTime?
 
     @@index([publicKey])
+}
+
+model AccountJoinTicket {
+    id        String   @id @default(cuid())
+    accountId String
+    account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+    tokenHash String   @unique
+    expiresAt DateTime
+    usedAt    DateTime?
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@index([accountId, createdAt(sort: Desc)])
+    @@index([expiresAt])
 }
 
 model TerminalAuthRequest {

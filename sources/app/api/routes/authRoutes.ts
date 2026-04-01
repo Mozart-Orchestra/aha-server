@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { type Fastify } from "../types";
 import * as privacyKit from "privacy-kit";
-import { randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import { db } from "@/storage/db";
 import { auth } from "@/app/auth/auth";
 import { log } from "@/utils/log";
@@ -12,8 +12,12 @@ import {
     readAccountRecoverySecret,
     upsertAccountRecoveryMaterial,
 } from "@/app/auth/accountRecoveryMaterial";
+import { randomKey } from "@/utils/randomKey";
 
 export function authRoutes(app: Fastify) {
+    const ACCOUNT_JOIN_TICKET_PREFIX = 'aha_join';
+    const ACCOUNT_JOIN_TICKET_TTL_MS = 15 * 60 * 1000;
+
     const secretAuthSchema = {
         body: z.object({
             publicKey: z.string(),
@@ -93,6 +97,10 @@ export function authRoutes(app: Fastify) {
 
         await upsertAccountRecoveryMaterial(accountId, contentSecretKey);
         return true;
+    }
+
+    function hashAccountJoinTicket(ticket: string): string {
+        return createHash('sha256').update(ticket).digest('hex');
     }
 
     async function encryptForBoxPublicKey(data: Uint8Array, recipientPublicKey: Uint8Array): Promise<Uint8Array> {
@@ -331,6 +339,63 @@ export function authRoutes(app: Fastify) {
         });
     });
 
+    app.post('/v1/account/join-ticket', {
+        preHandler: app.authenticate,
+        schema: {
+            response: {
+                200: z.object({
+                    success: z.literal(true),
+                    ticket: z.string(),
+                    expiresAt: z.string(),
+                }),
+                409: z.object({
+                    error: z.string(),
+                    code: z.literal('RECOVERY_NOT_READY'),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const account = await db.account.findUnique({
+            where: { id: request.userId },
+        });
+
+        if (!account) {
+            return reply.code(409).send({
+                error: 'Automatic recovery is not ready for this account yet',
+                code: 'RECOVERY_NOT_READY',
+            });
+        }
+
+        const recovery = await db.accountRecoveryMaterial.findUnique({
+            where: { accountId: account.id },
+            select: { publicKey: true },
+        });
+
+        if (!recovery || recovery.publicKey !== account.publicKey) {
+            return reply.code(409).send({
+                error: 'Automatic recovery is not ready for this account yet',
+                code: 'RECOVERY_NOT_READY',
+            });
+        }
+
+        const ticket = randomKey(ACCOUNT_JOIN_TICKET_PREFIX, 32);
+        const expiresAt = new Date(Date.now() + ACCOUNT_JOIN_TICKET_TTL_MS);
+
+        await db.accountJoinTicket.create({
+            data: {
+                accountId: account.id,
+                tokenHash: hashAccountJoinTicket(ticket),
+                expiresAt,
+            },
+        });
+
+        return reply.send({
+            success: true,
+            ticket,
+            expiresAt: expiresAt.toISOString(),
+        });
+    });
+
     // Account auth request
     app.post('/v1/auth/account/request', {
         schema: {
@@ -446,6 +511,94 @@ export function authRoutes(app: Fastify) {
         }
 
         return reply.send({ success: true });
+    });
+
+    app.post('/v1/auth/account/join', {
+        schema: {
+            body: z.object({
+                ticket: z.string(),
+                publicKey: z.string(),
+            }),
+            response: {
+                200: z.object({
+                    success: z.literal(true),
+                    token: z.string(),
+                    userId: z.string(),
+                    encryptedContentSecretKey: z.string(),
+                }),
+                401: z.object({
+                    error: z.string(),
+                }),
+                404: z.object({
+                    error: z.string(),
+                    code: z.literal('JOIN_TICKET_INVALID'),
+                }),
+                409: z.object({
+                    error: z.string(),
+                    code: z.literal('RECOVERY_NOT_READY'),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const tweetnacl = (await import("tweetnacl")).default;
+        const publicKey = privacyKit.decodeBase64(request.body.publicKey);
+
+        if (publicKey.length !== tweetnacl.box.publicKeyLength) {
+            return reply.code(401).send({ error: 'Invalid public key' });
+        }
+
+        const joinTicket = await db.accountJoinTicket.findUnique({
+            where: { tokenHash: hashAccountJoinTicket(request.body.ticket) },
+        });
+
+        if (!joinTicket || joinTicket.usedAt || joinTicket.expiresAt.getTime() <= Date.now()) {
+            return reply.code(404).send({
+                error: 'Join ticket is invalid or expired',
+                code: 'JOIN_TICKET_INVALID',
+            });
+        }
+
+        const account = await db.account.findUnique({
+            where: { id: joinTicket.accountId },
+        });
+
+        if (!account) {
+            return reply.code(404).send({
+                error: 'Join ticket is invalid or expired',
+                code: 'JOIN_TICKET_INVALID',
+            });
+        }
+
+        const contentSecretKey = await readAccountRecoverySecret(account.id);
+        if (!contentSecretKey) {
+            return reply.code(409).send({
+                error: 'Automatic recovery is not ready for this account yet',
+                code: 'RECOVERY_NOT_READY',
+            });
+        }
+
+        const derivedPublicKeyHex = publicKeyHexFromContentSecretKey(contentSecretKey);
+        if (derivedPublicKeyHex !== account.publicKey) {
+            return reply.code(409).send({
+                error: 'Automatic recovery is not ready for this account yet',
+                code: 'RECOVERY_NOT_READY',
+            });
+        }
+
+        const token = await auth.createToken(account.id);
+        const encryptedContentSecretKey = await encryptForBoxPublicKey(contentSecretKey, publicKey);
+
+        await db.accountJoinTicket.update({
+            where: { id: joinTicket.id },
+            data: { usedAt: new Date() },
+        });
+
+        return reply.send({
+            success: true,
+            token,
+            userId: account.id,
+            encryptedContentSecretKey: privacyKit.encodeBase64(encryptedContentSecretKey),
+        });
     });
 
     /**
