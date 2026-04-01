@@ -64,6 +64,8 @@ vi.mock('privacy-kit', () => ({
                 return new Uint8Array(32).fill(9);
             case 'invalid-public-key':
                 return new Uint8Array(12).fill(2);
+            case 'malformed-public-key':
+                throw new Error('invalid base64');
             case 'challenge':
                 return new Uint8Array([1, 2, 3]);
             case 'signature':
@@ -452,6 +454,24 @@ describe('authRoutes', () => {
             where: { id: 'join-1' },
             data: { usedAt: expect.any(Date) },
         });
+
+        await app.close();
+    });
+
+    it('rejects malformed join public keys with 401 instead of 500', async () => {
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/auth/account/join',
+            payload: {
+                ticket: 'aha_join_ExampleTicket123',
+                publicKey: 'malformed-public-key',
+            },
+        });
+
+        expect(response.statusCode).toBe(401);
+        expect(response.json()).toEqual({ error: 'Invalid public key' });
+        expect(vi.mocked(db.accountJoinTicket.findUnique)).not.toHaveBeenCalled();
 
         await app.close();
     });

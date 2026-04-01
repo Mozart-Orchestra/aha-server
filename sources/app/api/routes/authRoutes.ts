@@ -541,7 +541,12 @@ export function authRoutes(app: Fastify) {
         },
     }, async (request, reply) => {
         const tweetnacl = (await import("tweetnacl")).default;
-        const publicKey = privacyKit.decodeBase64(request.body.publicKey);
+        let publicKey: Uint8Array;
+        try {
+            publicKey = privacyKit.decodeBase64(request.body.publicKey);
+        } catch {
+            return reply.code(401).send({ error: 'Invalid public key' });
+        }
 
         if (publicKey.length !== tweetnacl.box.publicKeyLength) {
             return reply.code(401).send({ error: 'Invalid public key' });
