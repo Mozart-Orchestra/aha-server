@@ -106,6 +106,7 @@ model Session {
     dataEncryptionKey Bytes?
     seq               Int              @default(0)
     active            Boolean          @default(true)
+    deletedAt         DateTime?
     lastActiveAt      DateTime         @default(now())
     createdAt         DateTime         @default(now())
     updatedAt         DateTime         @updatedAt

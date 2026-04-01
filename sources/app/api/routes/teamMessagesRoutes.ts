@@ -82,7 +82,8 @@ async function canUserAccessTeam(userId: string, teamId: string): Promise<boolea
         const session = await db.session.findFirst({
             where: {
                 accountId: userId,
-                id: { in: memberSessionIds }
+                id: { in: memberSessionIds },
+                deletedAt: null
             },
             select: { id: true }
         });
@@ -203,6 +204,9 @@ export function teamMessagesRoutes(app: Fastify) {
                 404: z.object({
                     error: z.literal('Team not found')
                 }),
+                410: z.object({
+                    error: z.string()
+                }),
                 500: z.object({
                     error: z.literal('Failed to send message')
                 })
@@ -239,12 +243,17 @@ export function teamMessagesRoutes(app: Fastify) {
                     },
                     select: {
                         id: true,
-                        metadata: true
+                        metadata: true,
+                        deletedAt: true
                     }
                 });
 
                 if (!session) {
                     return reply.code(403).send({ error: `Invalid fromSessionId: ${fromSessionId}` });
+                }
+
+                if (session.deletedAt) {
+                    return reply.code(410).send({ error: `Session has been deleted: ${fromSessionId}` });
                 }
 
                 // Parse metadata to get authoritative role and display name
