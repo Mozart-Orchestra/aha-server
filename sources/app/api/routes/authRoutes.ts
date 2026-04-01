@@ -116,6 +116,22 @@ export function authRoutes(app: Fastify) {
         return result;
     }
 
+    async function decodeValidBoxPublicKey(publicKeyBase64: string): Promise<Uint8Array | null> {
+        const tweetnacl = (await import("tweetnacl")).default;
+        let publicKey: Uint8Array;
+        try {
+            publicKey = privacyKit.decodeBase64(publicKeyBase64);
+        } catch {
+            return null;
+        }
+
+        if (publicKey.length !== tweetnacl.box.publicKeyLength) {
+            return null;
+        }
+
+        return publicKey;
+    }
+
     app.post('/v1/auth', {
         schema: secretAuthSchema
     }, async (request, reply) => {
@@ -606,6 +622,129 @@ export function authRoutes(app: Fastify) {
         });
     });
 
+    app.post('/v1/auth/supabase/complete', {
+        schema: {
+            body: z.object({
+                accessToken: z.string(),
+                recoveryPublicKey: z.string(),
+                newContentSecretKey: z.string(),
+            }),
+            response: {
+                200: z.object({
+                    state: z.enum(['existing_recovered', 'new_account_created', 'migration_required']),
+                    token: z.string().nullable(),
+                    userId: z.string().nullable(),
+                    encryptedContentSecretKey: z.string().nullable().optional(),
+                    reason: z.string().optional(),
+                }),
+                401: z.object({
+                    error: z.string(),
+                }),
+                409: z.object({
+                    error: z.string(),
+                    code: z.literal('ACCOUNT_LINK_CONFLICT'),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const verified = await supabaseVerifyToken(request.body.accessToken);
+        if (!verified) {
+            log({ module: 'supabase-auth' }, `[SUPABASE COMPLETE] ❌ Token verification failed`);
+            return reply.code(401).send({ error: 'Invalid Supabase token' });
+        }
+
+        const recoveryPublicKey = await decodeValidBoxPublicKey(request.body.recoveryPublicKey);
+        if (!recoveryPublicKey) {
+            return reply.code(401).send({ error: 'Invalid recovery public key' });
+        }
+
+        const firstName = verified.name?.split(' ')[0] ?? null;
+        const lastName = verified.name?.split(' ').slice(1).join(' ') ?? null;
+
+        const account = await db.account.findFirst({
+            where: { supabaseUserId: verified.supabaseUserId },
+        });
+
+        if (account) {
+            const contentSecretKey = await readAccountRecoverySecret(account.id);
+            if (!contentSecretKey) {
+                return reply.send({
+                    state: 'migration_required',
+                    token: null,
+                    userId: null,
+                    encryptedContentSecretKey: null,
+                    reason: 'recovery_not_ready',
+                });
+            }
+
+            const derivedPublicKeyHex = publicKeyHexFromContentSecretKey(contentSecretKey);
+            if (derivedPublicKeyHex !== account.publicKey) {
+                log({ module: 'supabase-auth', level: 'warn' }, `[SUPABASE COMPLETE] Recovery material does not match account publicKey for: ${account.id}`);
+                return reply.send({
+                    state: 'migration_required',
+                    token: null,
+                    userId: null,
+                    encryptedContentSecretKey: null,
+                    reason: 'recovery_not_ready',
+                });
+            }
+
+            await db.account.update({
+                where: { id: account.id },
+                data: {
+                    email: verified.email,
+                    firstName,
+                    lastName,
+                    updatedAt: new Date(),
+                },
+            });
+
+            const token = await auth.createToken(account.id);
+            const encryptedContentSecretKey = await encryptForBoxPublicKey(contentSecretKey, recoveryPublicKey);
+            await markAccountRecoveryUsed(account.id);
+
+            return reply.send({
+                state: 'existing_recovered',
+                token,
+                userId: account.id,
+                encryptedContentSecretKey: privacyKit.encodeBase64(encryptedContentSecretKey),
+            });
+        }
+
+        const contentSecretKey = privacyKit.decodeBase64(request.body.newContentSecretKey);
+        const publicKeyHex = publicKeyHexFromContentSecretKey(contentSecretKey);
+        const existingByPublicKey = await db.account.findUnique({
+            where: { publicKey: publicKeyHex },
+        });
+
+        if (existingByPublicKey) {
+            return reply.code(409).send({
+                error: 'This restore key is already linked to another sign-in account',
+                code: 'ACCOUNT_LINK_CONFLICT',
+            });
+        }
+
+        const newAccount = await db.account.create({
+            data: {
+                publicKey: publicKeyHex,
+                supabaseUserId: verified.supabaseUserId,
+                email: verified.email,
+                firstName,
+                lastName,
+            },
+        });
+
+        await upsertAccountRecoveryMaterial(newAccount.id, contentSecretKey);
+        const token = await auth.createToken(newAccount.id);
+
+        return reply.send({
+            state: 'new_account_created',
+            token,
+            userId: newAccount.id,
+            encryptedContentSecretKey: null,
+        });
+    });
+
     /**
      * Supabase Google OAuth authentication.
      * Receives a Supabase access token, verifies it, and creates/links an Account.
@@ -684,38 +823,24 @@ export function authRoutes(app: Fastify) {
                 where: { publicKey: publicKeyHex }
             });
 
-            if (existingByPublicKey?.supabaseUserId && existingByPublicKey.supabaseUserId !== verified.supabaseUserId) {
-                log({ module: 'supabase-auth' }, `[SUPABASE AUTH] ⚠️ Public key already linked to another Supabase account`);
+            if (existingByPublicKey) {
+                log({ module: 'supabase-auth' }, `[SUPABASE AUTH] ⚠️ Refusing to reverse-link Google account through legacy publicKey path`);
                 return reply.code(409).send({
                     error: 'This restore key is already linked to another sign-in account',
                     code: 'ACCOUNT_LINK_CONFLICT',
                 });
             }
 
-            if (existingByPublicKey) {
-                account = await db.account.update({
-                    where: { id: existingByPublicKey.id },
-                    data: {
-                        supabaseUserId: verified.supabaseUserId,
-                        email: verified.email,
-                        firstName,
-                        lastName,
-                        updatedAt: new Date(),
-                    }
-                });
-                log({ module: 'supabase-auth' }, `[SUPABASE AUTH] Linked existing key-based account: ${account.id}`);
-            } else {
-                account = await db.account.create({
-                    data: {
-                        publicKey: publicKeyHex,
-                        supabaseUserId: verified.supabaseUserId,
-                        email: verified.email,
-                        firstName,
-                        lastName,
-                    }
-                });
-                log({ module: 'supabase-auth' }, `[SUPABASE AUTH] Created new account: ${account.id}`);
-            }
+            account = await db.account.create({
+                data: {
+                    publicKey: publicKeyHex,
+                    supabaseUserId: verified.supabaseUserId,
+                    email: verified.email,
+                    firstName,
+                    lastName,
+                }
+            });
+            log({ module: 'supabase-auth' }, `[SUPABASE AUTH] Created new account: ${account.id}`);
         } else {
             account = await db.account.update({
                 where: { id: account.id },

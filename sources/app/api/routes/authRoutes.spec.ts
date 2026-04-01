@@ -320,6 +320,37 @@ describe('authRoutes', () => {
         await app.close();
     });
 
+    it('rejects legacy Supabase exchange when the public key already belongs to another account', async () => {
+        vi.mocked(db.account.findFirst).mockResolvedValue(null as never);
+        vi.mocked(db.account.findUnique).mockResolvedValue({
+            id: 'user-legacy',
+            publicKey: 'hex-public-key',
+            supabaseUserId: null,
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/auth/supabase/exchange',
+            payload: {
+                accessToken: 'supabase-token',
+                publicKey: 'valid-public-key',
+                challenge: 'challenge',
+                signature: 'signature',
+                contentSecretKey: 'content-secret',
+            },
+        });
+
+        expect(response.statusCode).toBe(409);
+        expect(response.json()).toEqual({
+            error: 'This restore key is already linked to another sign-in account',
+            code: 'ACCOUNT_LINK_CONFLICT',
+        });
+        expect(vi.mocked(db.account.update)).not.toHaveBeenCalled();
+
+        await app.close();
+    });
+
     it('bootstraps recovery material during successful Supabase exchange', async () => {
         vi.mocked(db.account.findFirst).mockResolvedValue(null as never);
         vi.mocked(db.account.findUnique).mockResolvedValue(null as never);
@@ -352,6 +383,111 @@ describe('authRoutes', () => {
             recoveryReady: true,
         });
         expect(vi.mocked(upsertAccountRecoveryMaterial)).toHaveBeenCalled();
+
+        await app.close();
+    });
+
+    it('completes Supabase login by recovering an existing account via supabaseUserId', async () => {
+        vi.mocked(db.account.findFirst).mockResolvedValue({
+            id: 'user-1',
+            publicKey: 'hex-public-key',
+            supabaseUserId: 'supabase-user-1',
+        } as never);
+        vi.mocked(readAccountRecoverySecret).mockResolvedValue(new Uint8Array([1, 2, 3]) as never);
+        vi.mocked(markAccountRecoveryUsed).mockResolvedValue(undefined as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/auth/supabase/complete',
+            payload: {
+                accessToken: 'supabase-token',
+                recoveryPublicKey: 'recovery-public-key',
+                newContentSecretKey: 'content-secret',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            state: 'existing_recovered',
+            token: 'token-123',
+            userId: 'user-1',
+            encryptedContentSecretKey: 'encoded-recovery-secret',
+        });
+        expect(vi.mocked(db.account.update)).toHaveBeenCalledWith({
+            where: { id: 'user-1' },
+            data: expect.objectContaining({
+                email: 'user@example.com',
+                firstName: 'Test',
+                lastName: 'User',
+                updatedAt: expect.any(Date),
+            }),
+        });
+
+        await app.close();
+    });
+
+    it('creates a new Supabase account via /v1/auth/supabase/complete when none exists', async () => {
+        vi.mocked(db.account.findFirst).mockResolvedValue(null as never);
+        vi.mocked(db.account.findUnique).mockResolvedValue(null as never);
+        vi.mocked(db.account.create).mockResolvedValue({
+            id: 'user-1',
+            publicKey: 'hex-public-key',
+        } as never);
+        vi.mocked(upsertAccountRecoveryMaterial).mockResolvedValue({
+            accountId: 'user-1',
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/auth/supabase/complete',
+            payload: {
+                accessToken: 'supabase-token',
+                recoveryPublicKey: 'recovery-public-key',
+                newContentSecretKey: 'content-secret',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            state: 'new_account_created',
+            token: 'token-123',
+            userId: 'user-1',
+            encryptedContentSecretKey: null,
+        });
+        expect(vi.mocked(upsertAccountRecoveryMaterial)).toHaveBeenCalledWith('user-1', expect.any(Uint8Array));
+
+        await app.close();
+    });
+
+    it('returns migration_required from /v1/auth/supabase/complete when recovery material is not ready', async () => {
+        vi.mocked(db.account.findFirst).mockResolvedValue({
+            id: 'user-1',
+            publicKey: 'hex-public-key',
+            supabaseUserId: 'supabase-user-1',
+        } as never);
+        vi.mocked(readAccountRecoverySecret).mockResolvedValue(null as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/auth/supabase/complete',
+            payload: {
+                accessToken: 'supabase-token',
+                recoveryPublicKey: 'recovery-public-key',
+                newContentSecretKey: 'content-secret',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            state: 'migration_required',
+            token: null,
+            userId: null,
+            encryptedContentSecretKey: null,
+            reason: 'recovery_not_ready',
+        });
 
         await app.close();
     });
