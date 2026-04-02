@@ -816,40 +816,34 @@ export function authRoutes(app: Fastify) {
         }
 
         if (account) {
-            const contentSecretKey = await readAccountRecoverySecret(account.id);
-            if (!contentSecretKey) {
-                return reply.send({
-                    state: 'migration_required',
-                    token: null,
-                    userId: null,
-                    encryptedContentSecretKey: null,
-                    canonicalPublicKey: account.publicKey,
-                    reason: 'recovery_not_ready',
+            let contentSecretKey = await readAccountRecoverySecret(account.id);
+
+            // No recovery material yet — adopt the newContentSecretKey the client sent.
+            // This handles: (a) legacy accounts that predate recovery material,
+            // (b) any account where recovery material was never bootstrapped.
+            // The account publicKey is also updated to match the new key.
+            if (!contentSecretKey || !publicKeysMatch(publicKeyHexFromContentSecretKey(contentSecretKey), account.publicKey)) {
+                const adoptedKey = privacyKit.decodeBase64(request.body.newContentSecretKey);
+                const adoptedPublicKeyHex = publicKeyHexFromContentSecretKey(adoptedKey);
+                await upsertAccountRecoveryMaterial(account.id, adoptedKey);
+                account = await db.account.update({
+                    where: { id: account.id },
+                    data: {
+                        publicKey: adoptedPublicKeyHex,
+                        email: verified.email,
+                        firstName,
+                        lastName,
+                        updatedAt: new Date(),
+                    },
+                });
+                contentSecretKey = adoptedKey;
+                log({ module: 'supabase-auth' }, `[SUPABASE COMPLETE] Adopted new content key for account ${account.id}`);
+            } else {
+                await db.account.update({
+                    where: { id: account.id },
+                    data: { email: verified.email, firstName, lastName, updatedAt: new Date() },
                 });
             }
-
-            const derivedPublicKeyHex = publicKeyHexFromContentSecretKey(contentSecretKey);
-            if (!publicKeysMatch(derivedPublicKeyHex, account.publicKey)) {
-                log({ module: 'supabase-auth', level: 'warn' }, `[SUPABASE COMPLETE] Recovery material does not match account publicKey for: ${account.id}`);
-                return reply.send({
-                    state: 'migration_required',
-                    token: null,
-                    userId: null,
-                    encryptedContentSecretKey: null,
-                    canonicalPublicKey: account.publicKey,
-                    reason: 'recovery_not_ready',
-                });
-            }
-
-            await db.account.update({
-                where: { id: account.id },
-                data: {
-                    email: verified.email,
-                    firstName,
-                    lastName,
-                    updatedAt: new Date(),
-                },
-            });
 
             const token = await auth.createToken(account.id);
             const encryptedContentSecretKey = await encryptForBoxPublicKey(contentSecretKey, recoveryPublicKey);
