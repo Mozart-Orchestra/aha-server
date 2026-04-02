@@ -18,6 +18,14 @@ export async function upsertAccountRecoveryMaterial(accountId: string, contentSe
     const wrappedSecret = encryptBytes(buildRecoveryPath(accountId), contentSecretKey) as Uint8Array;
     const publicKey = publicKeyHexFromContentSecretKey(contentSecretKey);
 
+    await db.account.update({
+        where: { id: accountId },
+        data: {
+            encryptedContentSecretKey: wrappedSecret,
+            contentKeyVersion: 1,
+        },
+    });
+
     return db.accountRecoveryMaterial.upsert({
         where: { accountId },
         create: {
@@ -34,6 +42,19 @@ export async function upsertAccountRecoveryMaterial(accountId: string, contentSe
 }
 
 export async function readAccountRecoverySecret(accountId: string): Promise<Uint8Array | null> {
+    const account = await db.account.findUnique({
+        where: { id: accountId },
+        select: { encryptedContentSecretKey: true },
+    });
+
+    if (account?.encryptedContentSecretKey) {
+        try {
+            return decryptBytes(buildRecoveryPath(accountId), account.encryptedContentSecretKey as Uint8Array);
+        } catch {
+            // Fall back to legacy storage below.
+        }
+    }
+
     const row = await db.accountRecoveryMaterial.findUnique({
         where: { accountId },
     });

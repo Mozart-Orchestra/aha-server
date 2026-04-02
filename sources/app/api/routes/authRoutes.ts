@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { type Fastify } from "../types";
 import * as privacyKit from "privacy-kit";
-import { createHash, randomBytes } from "crypto";
+import { randomBytes, randomInt } from "crypto";
 import { db } from "@/storage/db";
 import { auth } from "@/app/auth/auth";
 import { log } from "@/utils/log";
@@ -12,11 +12,11 @@ import {
     readAccountRecoverySecret,
     upsertAccountRecoveryMaterial,
 } from "@/app/auth/accountRecoveryMaterial";
-import { randomKey } from "@/utils/randomKey";
 
 export function authRoutes(app: Fastify) {
-    const ACCOUNT_JOIN_TICKET_PREFIX = 'aha_join';
-    const ACCOUNT_JOIN_TICKET_TTL_MS = 15 * 60 * 1000;
+    const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
+    const JOIN_CODE_LENGTH = 6;
+    const JOIN_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
     const secretAuthSchema = {
         body: z.object({
@@ -91,7 +91,7 @@ export function authRoutes(app: Fastify) {
 
         const contentSecretKey = privacyKit.decodeBase64(contentSecretKeyBase64);
         const derivedPublicKeyHex = publicKeyHexFromContentSecretKey(contentSecretKey);
-        if (derivedPublicKeyHex !== accountPublicKey) {
+        if (!publicKeysMatch(derivedPublicKeyHex, accountPublicKey)) {
             throw new Error('content-secret-mismatch');
         }
 
@@ -99,8 +99,55 @@ export function authRoutes(app: Fastify) {
         return true;
     }
 
-    function hashAccountJoinTicket(ticket: string): string {
-        return createHash('sha256').update(ticket).digest('hex');
+    function normalizePublicKeyHex(publicKey: string | null | undefined): string | null {
+        const normalized = publicKey?.trim().toLowerCase() ?? '';
+        return normalized || null;
+    }
+
+    function publicKeysMatch(left: string | null | undefined, right: string | null | undefined): boolean {
+        const normalizedLeft = normalizePublicKeyHex(left);
+        const normalizedRight = normalizePublicKeyHex(right);
+        return !!normalizedLeft && normalizedLeft === normalizedRight;
+    }
+
+    function generateJoinCodeValue(): string {
+        return Array.from({ length: JOIN_CODE_LENGTH }, () => {
+            const index = randomInt(0, JOIN_CODE_ALPHABET.length);
+            return JOIN_CODE_ALPHABET[index];
+        }).join('');
+    }
+
+    async function createJoinCode(accountId: string): Promise<{ code: string; expiresAt: Date }> {
+        await db.joinCode.deleteMany({
+            where: {
+                accountId,
+                usedAt: null,
+            },
+        });
+
+        const expiresAt = new Date(Date.now() + JOIN_CODE_TTL_MS);
+
+        for (let attempt = 0; attempt < 5; attempt++) {
+            const code = generateJoinCodeValue();
+
+            try {
+                await db.joinCode.create({
+                    data: {
+                        accountId,
+                        code,
+                        expiresAt,
+                    },
+                });
+
+                return { code, expiresAt };
+            } catch (error: any) {
+                if (error?.code !== 'P2002') {
+                    throw error;
+                }
+            }
+        }
+
+        throw new Error('join-code-generation-failed');
     }
 
     async function encryptForBoxPublicKey(data: Uint8Array, recipientPublicKey: Uint8Array): Promise<Uint8Array> {
@@ -355,62 +402,55 @@ export function authRoutes(app: Fastify) {
         });
     });
 
-    app.post('/v1/account/join-ticket', {
-        preHandler: app.authenticate,
-        schema: {
-            response: {
-                200: z.object({
-                    success: z.literal(true),
-                    ticket: z.string(),
-                    expiresAt: z.string(),
-                }),
-                409: z.object({
-                    error: z.string(),
-                    code: z.literal('RECOVERY_NOT_READY'),
-                }),
+    // Legacy path kept for older clients — internally creates a JoinCode and aliases code as ticket.
+    for (const path of ['/v1/account/join-ticket', '/v1/auth/joincode/create'] as const) {
+        app.post(path, {
+            preHandler: app.authenticate,
+            schema: {
+                response: {
+                    200: z.object({
+                        success: z.literal(true),
+                        ticket: z.string(),
+                        code: z.string(),
+                        expiresAt: z.string(),
+                    }),
+                    409: z.object({
+                        error: z.string(),
+                        code: z.literal('RECOVERY_NOT_READY'),
+                    }),
+                },
             },
-        },
-    }, async (request, reply) => {
-        const account = await db.account.findUnique({
-            where: { id: request.userId },
-        });
-
-        if (!account) {
-            return reply.code(409).send({
-                error: 'Automatic recovery is not ready for this account yet',
-                code: 'RECOVERY_NOT_READY',
+        }, async (request, reply) => {
+            const account = await db.account.findUnique({
+                where: { id: request.userId },
             });
-        }
 
-        const recovery = await db.accountRecoveryMaterial.findUnique({
-            where: { accountId: account.id },
-            select: { publicKey: true },
-        });
+            if (!account) {
+                return reply.code(409).send({
+                    error: 'Automatic recovery is not ready for this account yet',
+                    code: 'RECOVERY_NOT_READY',
+                });
+            }
 
-        if (!recovery || recovery.publicKey !== account.publicKey) {
-            return reply.code(409).send({
-                error: 'Automatic recovery is not ready for this account yet',
-                code: 'RECOVERY_NOT_READY',
+            const contentSecretKey = await readAccountRecoverySecret(account.id);
+            if (!contentSecretKey || !publicKeysMatch(publicKeyHexFromContentSecretKey(contentSecretKey), account.publicKey)) {
+                return reply.code(409).send({
+                    error: 'Automatic recovery is not ready for this account yet',
+                    code: 'RECOVERY_NOT_READY',
+                });
+            }
+
+            const { code, expiresAt } = await createJoinCode(account.id);
+
+            return reply.send({
+                success: true,
+                ticket: code,
+                code,
+                expiresAt: expiresAt.toISOString(),
             });
-        }
-
-        const ticket = randomKey(ACCOUNT_JOIN_TICKET_PREFIX, 32);
-        const expiresAt = new Date(Date.now() + ACCOUNT_JOIN_TICKET_TTL_MS);
-
-        await db.accountJoinTicket.create({
-            data: {
-                accountId: account.id,
-                tokenHash: hashAccountJoinTicket(ticket),
-                expiresAt,
-            },
         });
+    }
 
-        return reply.send({
-            success: true,
-            ticket,
-            expiresAt: expiresAt.toISOString(),
-        });
-    });
 
     // Account auth request
     app.post('/v1/auth/account/request', {
@@ -568,38 +608,30 @@ export function authRoutes(app: Fastify) {
             return reply.code(401).send({ error: 'Invalid public key' });
         }
 
-        const joinTicket = await db.accountJoinTicket.findUnique({
-            where: { tokenHash: hashAccountJoinTicket(request.body.ticket) },
+        const joinCode = await db.joinCode.findUnique({
+            where: { code: request.body.ticket.trim().toUpperCase() },
         });
 
-        if (!joinTicket || joinTicket.usedAt || joinTicket.expiresAt.getTime() <= Date.now()) {
+        if (!joinCode || joinCode.usedAt || joinCode.expiresAt.getTime() <= Date.now()) {
             return reply.code(404).send({
-                error: 'Join ticket is invalid or expired',
+                error: 'Join code is invalid or expired',
                 code: 'JOIN_TICKET_INVALID',
             });
         }
 
         const account = await db.account.findUnique({
-            where: { id: joinTicket.accountId },
+            where: { id: joinCode.accountId },
         });
 
         if (!account) {
             return reply.code(404).send({
-                error: 'Join ticket is invalid or expired',
+                error: 'Join code is invalid or expired',
                 code: 'JOIN_TICKET_INVALID',
             });
         }
 
         const contentSecretKey = await readAccountRecoverySecret(account.id);
-        if (!contentSecretKey) {
-            return reply.code(409).send({
-                error: 'Automatic recovery is not ready for this account yet',
-                code: 'RECOVERY_NOT_READY',
-            });
-        }
-
-        const derivedPublicKeyHex = publicKeyHexFromContentSecretKey(contentSecretKey);
-        if (derivedPublicKeyHex !== account.publicKey) {
+        if (!contentSecretKey || !publicKeysMatch(publicKeyHexFromContentSecretKey(contentSecretKey), account.publicKey)) {
             return reply.code(409).send({
                 error: 'Automatic recovery is not ready for this account yet',
                 code: 'RECOVERY_NOT_READY',
@@ -609,8 +641,8 @@ export function authRoutes(app: Fastify) {
         const token = await auth.createToken(account.id);
         const encryptedContentSecretKey = await encryptForBoxPublicKey(contentSecretKey, publicKey);
 
-        await db.accountJoinTicket.update({
-            where: { id: joinTicket.id },
+        await db.joinCode.update({
+            where: { id: joinCode.id },
             data: { usedAt: new Date() },
         });
 
@@ -622,12 +654,87 @@ export function authRoutes(app: Fastify) {
         });
     });
 
+    app.post('/v1/auth/joincode/redeem', {
+        schema: {
+            body: z.object({
+                code: z.string(),
+                machinePublicKey: z.string(),
+            }),
+            response: {
+                200: z.object({
+                    jwt: z.string(),
+                    encryptedContentSecretKey: z.string(),
+                }),
+                401: z.object({
+                    error: z.string(),
+                }),
+                404: z.object({
+                    error: z.string(),
+                    code: z.literal('JOIN_CODE_INVALID'),
+                }),
+                409: z.object({
+                    error: z.string(),
+                    code: z.literal('RECOVERY_NOT_READY'),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const machinePublicKey = await decodeValidBoxPublicKey(request.body.machinePublicKey);
+        if (!machinePublicKey) {
+            return reply.code(401).send({ error: 'Invalid machine public key' });
+        }
+
+        const joinCode = await db.joinCode.findUnique({
+            where: { code: request.body.code.trim().toUpperCase() },
+            include: { account: true },
+        });
+
+        if (!joinCode || joinCode.usedAt || joinCode.expiresAt.getTime() <= Date.now()) {
+            return reply.code(404).send({
+                error: 'Join code is invalid or expired',
+                code: 'JOIN_CODE_INVALID',
+            });
+        }
+
+        const contentSecretKey = await readAccountRecoverySecret(joinCode.account.id);
+        if (!contentSecretKey) {
+            return reply.code(409).send({
+                error: 'Automatic recovery is not ready for this account yet',
+                code: 'RECOVERY_NOT_READY',
+            });
+        }
+
+        const derivedPublicKeyHex = publicKeyHexFromContentSecretKey(contentSecretKey);
+        if (!publicKeysMatch(derivedPublicKeyHex, joinCode.account.publicKey)) {
+            return reply.code(409).send({
+                error: 'Automatic recovery is not ready for this account yet',
+                code: 'RECOVERY_NOT_READY',
+            });
+        }
+
+        const jwt = await auth.createToken(joinCode.account.id);
+        const encryptedContentSecretKey = await encryptForBoxPublicKey(contentSecretKey, machinePublicKey);
+
+        await db.joinCode.update({
+            where: { id: joinCode.id },
+            data: { usedAt: new Date() },
+        });
+
+        return reply.send({
+            jwt,
+            encryptedContentSecretKey: privacyKit.encodeBase64(encryptedContentSecretKey),
+        });
+    });
+
+
     app.post('/v1/auth/supabase/complete', {
         schema: {
             body: z.object({
                 accessToken: z.string(),
                 recoveryPublicKey: z.string(),
                 newContentSecretKey: z.string(),
+                legacyPublicKey: z.string().nullable().optional(),
+                legacyAuthToken: z.string().nullable().optional(),
             }),
             response: {
                 200: z.object({
@@ -662,9 +769,51 @@ export function authRoutes(app: Fastify) {
         const firstName = verified.name?.split(' ')[0] ?? null;
         const lastName = verified.name?.split(' ').slice(1).join(' ') ?? null;
 
-        const account = await db.account.findFirst({
+        let account = await db.account.findFirst({
             where: { supabaseUserId: verified.supabaseUserId },
         });
+
+        const legacyPublicKey = request.body.legacyPublicKey?.trim() || null;
+        const legacyAuthToken = request.body.legacyAuthToken?.trim() || null;
+        if (!account && legacyAuthToken) {
+            const verifiedLegacyAuth = await auth.verifyToken(legacyAuthToken);
+            if (!verifiedLegacyAuth) {
+                return reply.code(401).send({ error: 'Invalid legacy auth token' });
+            }
+
+            const legacyAccount = await db.account.findUnique({
+                where: { id: verifiedLegacyAuth.userId },
+            });
+
+            if (!legacyAccount) {
+                return reply.code(401).send({ error: 'Invalid legacy auth token' });
+            }
+
+            if (legacyPublicKey && !publicKeysMatch(legacyAccount.publicKey, legacyPublicKey)) {
+                return reply.code(401).send({ error: 'Invalid legacy auth token' });
+            }
+
+            if (legacyAccount?.supabaseUserId && legacyAccount.supabaseUserId !== verified.supabaseUserId) {
+                return reply.code(409).send({
+                    error: 'This restore key is already linked to another sign-in account',
+                    code: 'ACCOUNT_LINK_CONFLICT',
+                });
+            }
+
+            if (legacyAccount && !legacyAccount.supabaseUserId) {
+                account = await db.account.update({
+                    where: { id: legacyAccount.id },
+                    data: {
+                        supabaseUserId: verified.supabaseUserId,
+                        email: verified.email,
+                        firstName,
+                        lastName,
+                        updatedAt: new Date(),
+                    },
+                });
+                log({ module: 'supabase-auth' }, `[SUPABASE COMPLETE] Linked legacy account ${legacyAccount.id} to Supabase user ${verified.supabaseUserId}`);
+            }
+        }
 
         if (account) {
             const contentSecretKey = await readAccountRecoverySecret(account.id);
@@ -680,7 +829,7 @@ export function authRoutes(app: Fastify) {
             }
 
             const derivedPublicKeyHex = publicKeyHexFromContentSecretKey(contentSecretKey);
-            if (derivedPublicKeyHex !== account.publicKey) {
+            if (!publicKeysMatch(derivedPublicKeyHex, account.publicKey)) {
                 log({ module: 'supabase-auth', level: 'warn' }, `[SUPABASE COMPLETE] Recovery material does not match account publicKey for: ${account.id}`);
                 return reply.send({
                     state: 'migration_required',
@@ -931,7 +1080,7 @@ export function authRoutes(app: Fastify) {
         }
 
         const derivedPublicKeyHex = publicKeyHexFromContentSecretKey(contentSecretKey);
-        if (derivedPublicKeyHex !== account.publicKey) {
+        if (!publicKeysMatch(derivedPublicKeyHex, account.publicKey)) {
             log({ module: 'supabase-auth', level: 'warn' }, `[SUPABASE RECOVER] Recovery material does not match account publicKey for: ${account.id}`);
             return reply.code(409).send({
                 error: 'Automatic recovery is not ready for this account yet',

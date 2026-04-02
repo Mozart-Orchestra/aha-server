@@ -92,6 +92,8 @@ spec:
         key: /handy-revenuecat
     - extract:
         key: /handy-elevenlabs
+    - extract:
+        key: /handy-supabase
 ---
 apiVersion: v1
 kind: Service

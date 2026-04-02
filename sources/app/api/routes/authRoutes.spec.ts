@@ -21,6 +21,12 @@ vi.mock('@/storage/db', () => ({
             findUnique: vi.fn(),
             update: vi.fn(),
         },
+        joinCode: {
+            create: vi.fn(),
+            deleteMany: vi.fn(),
+            findUnique: vi.fn(),
+            update: vi.fn(),
+        },
         terminalAuthRequest: {
             upsert: vi.fn(),
             findUnique: vi.fn(),
@@ -39,6 +45,7 @@ vi.mock('@/storage/db', () => ({
 vi.mock('@/app/auth/auth', () => ({
     auth: {
         createToken: vi.fn(),
+        verifyToken: vi.fn(),
     },
 }));
 
@@ -139,9 +146,12 @@ describe('authRoutes', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         vi.mocked(auth.createToken).mockResolvedValue('token-123');
+        vi.mocked(auth.verifyToken).mockResolvedValue(null as never);
         vi.mocked(tweetnacl.sign.detached.verify).mockReturnValue(true as never);
         vi.mocked(db.accountRecoveryMaterial.findUnique).mockResolvedValue(null as never);
         vi.mocked(db.accountJoinTicket.findUnique).mockResolvedValue(null as never);
+        vi.mocked(db.joinCode.deleteMany).mockResolvedValue({ count: 0 } as never);
+        vi.mocked(db.joinCode.findUnique).mockResolvedValue(null as never);
         vi.mocked(readAccountRecoverySecret).mockResolvedValue(null as never);
         vi.mocked(supabaseVerifyToken).mockResolvedValue({
             supabaseUserId: 'supabase-user-1',
@@ -493,6 +503,164 @@ describe('authRoutes', () => {
         await app.close();
     });
 
+    it('links a legacy unbound account during /v1/auth/supabase/complete before requesting migration', async () => {
+        vi.mocked(auth.verifyToken).mockResolvedValue({
+            userId: 'legacy-user-1',
+        } as never);
+        vi.mocked(db.account.findFirst)
+            .mockResolvedValueOnce(null as never);
+        vi.mocked(db.account.findUnique).mockResolvedValue({
+            id: 'legacy-user-1',
+            publicKey: 'HEX-PUBLIC-KEY',
+            supabaseUserId: null,
+        } as never);
+        vi.mocked(db.account.update).mockResolvedValue({
+            id: 'legacy-user-1',
+            publicKey: 'HEX-PUBLIC-KEY',
+            supabaseUserId: 'supabase-user-1',
+        } as never);
+        vi.mocked(readAccountRecoverySecret).mockResolvedValue(null as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/auth/supabase/complete',
+            payload: {
+                accessToken: 'supabase-token',
+                recoveryPublicKey: 'recovery-public-key',
+                newContentSecretKey: 'content-secret',
+                legacyPublicKey: 'hex-public-key',
+                legacyAuthToken: 'legacy-auth-token',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            state: 'migration_required',
+            token: null,
+            userId: null,
+            encryptedContentSecretKey: null,
+            canonicalPublicKey: 'HEX-PUBLIC-KEY',
+            reason: 'recovery_not_ready',
+        });
+        expect(vi.mocked(db.account.update)).toHaveBeenCalledWith({
+            where: { id: 'legacy-user-1' },
+            data: expect.objectContaining({
+                supabaseUserId: 'supabase-user-1',
+                email: 'user@example.com',
+                firstName: 'Test',
+                lastName: 'User',
+                updatedAt: expect.any(Date),
+            }),
+        });
+
+        await app.close();
+    });
+
+    it('recovers a legacy unbound account during /v1/auth/supabase/complete when recovery material exists', async () => {
+        vi.mocked(auth.verifyToken).mockResolvedValue({
+            userId: 'legacy-user-1',
+        } as never);
+        vi.mocked(db.account.findFirst)
+            .mockResolvedValueOnce(null as never);
+        vi.mocked(db.account.findUnique).mockResolvedValue({
+            id: 'legacy-user-1',
+            publicKey: 'HEX-PUBLIC-KEY',
+            supabaseUserId: null,
+        } as never);
+        vi.mocked(db.account.update).mockResolvedValue({
+            id: 'legacy-user-1',
+            publicKey: 'HEX-PUBLIC-KEY',
+            supabaseUserId: 'supabase-user-1',
+        } as never);
+        vi.mocked(readAccountRecoverySecret).mockResolvedValue(new Uint8Array([1, 2, 3]) as never);
+        vi.mocked(markAccountRecoveryUsed).mockResolvedValue(undefined as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/auth/supabase/complete',
+            payload: {
+                accessToken: 'supabase-token',
+                recoveryPublicKey: 'recovery-public-key',
+                newContentSecretKey: 'content-secret',
+                legacyPublicKey: 'hex-public-key',
+                legacyAuthToken: 'legacy-auth-token',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            state: 'existing_recovered',
+            token: 'token-123',
+            userId: 'legacy-user-1',
+            encryptedContentSecretKey: 'encoded-recovery-secret',
+        });
+        expect(vi.mocked(markAccountRecoveryUsed)).toHaveBeenCalledWith('legacy-user-1');
+
+        await app.close();
+    });
+
+    it('returns ACCOUNT_LINK_CONFLICT when a legacy restore key is already linked to another sign-in account', async () => {
+        vi.mocked(auth.verifyToken).mockResolvedValue({
+            userId: 'legacy-user-1',
+        } as never);
+        vi.mocked(db.account.findFirst)
+            .mockResolvedValueOnce(null as never);
+        vi.mocked(db.account.findUnique).mockResolvedValue({
+            id: 'legacy-user-1',
+            publicKey: 'HEX-PUBLIC-KEY',
+            supabaseUserId: 'supabase-user-2',
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/auth/supabase/complete',
+            payload: {
+                accessToken: 'supabase-token',
+                recoveryPublicKey: 'recovery-public-key',
+                newContentSecretKey: 'content-secret',
+                legacyPublicKey: 'hex-public-key',
+                legacyAuthToken: 'legacy-auth-token',
+            },
+        });
+
+        expect(response.statusCode).toBe(409);
+        expect(response.json()).toEqual({
+            error: 'This restore key is already linked to another sign-in account',
+            code: 'ACCOUNT_LINK_CONFLICT',
+        });
+        expect(vi.mocked(db.account.update)).not.toHaveBeenCalled();
+
+        await app.close();
+    });
+
+    it('rejects legacy linking when the legacy auth token is invalid', async () => {
+        vi.mocked(db.account.findFirst).mockResolvedValueOnce(null as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/auth/supabase/complete',
+            payload: {
+                accessToken: 'supabase-token',
+                recoveryPublicKey: 'recovery-public-key',
+                newContentSecretKey: 'content-secret',
+                legacyPublicKey: 'hex-public-key',
+                legacyAuthToken: 'invalid-legacy-auth-token',
+            },
+        });
+
+        expect(response.statusCode).toBe(401);
+        expect(response.json()).toEqual({
+            error: 'Invalid legacy auth token',
+        });
+        expect(vi.mocked(db.account.update)).not.toHaveBeenCalled();
+
+        await app.close();
+    });
+
     it('returns recovery material for Supabase recover when available', async () => {
         vi.mocked(db.account.findFirst).mockResolvedValue({
             id: 'user-1',
@@ -528,8 +696,12 @@ describe('authRoutes', () => {
             id: 'user-1',
             publicKey: 'hex-public-key',
         } as never);
-        vi.mocked(db.accountRecoveryMaterial.findUnique).mockResolvedValue({
-            publicKey: 'hex-public-key',
+        vi.mocked(readAccountRecoverySecret).mockResolvedValue(new Uint8Array([1, 2, 3]) as never);
+        vi.mocked(db.joinCode.create).mockResolvedValue({
+            id: 'code-1',
+            accountId: 'user-1',
+            code: 'A3X9K2',
+            expiresAt: new Date(Date.now() + 60_000),
         } as never);
 
         const app = buildApp();
@@ -544,12 +716,63 @@ describe('authRoutes', () => {
         expect(response.statusCode).toBe(200);
         expect(response.json()).toMatchObject({
             success: true,
-            ticket: expect.stringMatching(/^aha_join_/),
+            ticket: expect.stringMatching(/^[A-HJ-NP-Z2-9]{6}$/),
+            code: expect.stringMatching(/^[A-HJ-NP-Z2-9]{6}$/),
         });
-        expect(vi.mocked(db.accountJoinTicket.create)).toHaveBeenCalledWith({
+        expect(vi.mocked(db.joinCode.deleteMany)).toHaveBeenCalledWith({
+            where: {
+                accountId: 'user-1',
+                usedAt: null,
+            },
+        });
+        expect(vi.mocked(db.joinCode.create)).toHaveBeenCalledWith({
             data: expect.objectContaining({
                 accountId: 'user-1',
-                tokenHash: expect.any(String),
+                code: expect.stringMatching(/^[A-HJ-NP-Z2-9]{6}$/),
+                expiresAt: expect.any(Date),
+            }),
+        });
+
+        await app.close();
+    });
+
+    it('creates a 6-char join code when recovery material is ready', async () => {
+        vi.mocked(db.account.findUnique).mockResolvedValue({
+            id: 'user-1',
+            publicKey: 'hex-public-key',
+        } as never);
+        vi.mocked(readAccountRecoverySecret).mockResolvedValue(new Uint8Array([1, 2, 3]) as never);
+        vi.mocked(db.joinCode.create).mockResolvedValue({
+            id: 'code-1',
+            accountId: 'user-1',
+            code: 'A3X9K2',
+            expiresAt: new Date(Date.now() + 60_000),
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/auth/joincode/create',
+            headers: {
+                authorization: 'Bearer token-123',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toMatchObject({
+            code: expect.stringMatching(/^[A-HJ-NP-Z2-9]{6}$/),
+            expiresAt: expect.any(String),
+        });
+        expect(vi.mocked(db.joinCode.deleteMany)).toHaveBeenCalledWith({
+            where: {
+                accountId: 'user-1',
+                usedAt: null,
+            },
+        });
+        expect(vi.mocked(db.joinCode.create)).toHaveBeenCalledWith({
+            data: expect.objectContaining({
+                accountId: 'user-1',
+                code: expect.stringMatching(/^[A-HJ-NP-Z2-9]{6}$/),
                 expiresAt: expect.any(Date),
             }),
         });
@@ -558,9 +781,10 @@ describe('authRoutes', () => {
     });
 
     it('redeems an account join ticket into encrypted credentials', async () => {
-        vi.mocked(db.accountJoinTicket.findUnique).mockResolvedValue({
-            id: 'join-1',
+        vi.mocked(db.joinCode.findUnique).mockResolvedValue({
+            id: 'code-1',
             accountId: 'user-1',
+            code: 'A3X9K2',
             usedAt: null,
             expiresAt: new Date(Date.now() + 60_000),
         } as never);
@@ -587,8 +811,11 @@ describe('authRoutes', () => {
             userId: 'user-1',
             encryptedContentSecretKey: 'encoded-recovery-secret',
         });
-        expect(vi.mocked(db.accountJoinTicket.update)).toHaveBeenCalledWith({
-            where: { id: 'join-1' },
+        expect(vi.mocked(db.joinCode.findUnique)).toHaveBeenCalledWith({
+            where: { code: 'AHA_JOIN_EXAMPLETICKET123' },
+        });
+        expect(vi.mocked(db.joinCode.update)).toHaveBeenCalledWith({
+            where: { id: 'code-1' },
             data: { usedAt: expect.any(Date) },
         });
 
@@ -608,7 +835,68 @@ describe('authRoutes', () => {
 
         expect(response.statusCode).toBe(401);
         expect(response.json()).toEqual({ error: 'Invalid public key' });
-        expect(vi.mocked(db.accountJoinTicket.findUnique)).not.toHaveBeenCalled();
+        expect(vi.mocked(db.joinCode.findUnique)).not.toHaveBeenCalled();
+
+        await app.close();
+    });
+
+    it('redeems a join code into encrypted credentials', async () => {
+        vi.mocked(db.joinCode.findUnique).mockResolvedValue({
+            id: 'code-1',
+            accountId: 'user-1',
+            code: 'A3X9K2',
+            usedAt: null,
+            expiresAt: new Date(Date.now() + 60_000),
+            account: {
+                id: 'user-1',
+                publicKey: 'hex-public-key',
+            },
+        } as never);
+        vi.mocked(readAccountRecoverySecret).mockResolvedValue(new Uint8Array([1, 2, 3]) as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/auth/joincode/redeem',
+            payload: {
+                code: 'a3x9k2',
+                machinePublicKey: 'valid-public-key',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            jwt: 'token-123',
+            encryptedContentSecretKey: 'encoded-recovery-secret',
+        });
+        expect(vi.mocked(db.joinCode.findUnique)).toHaveBeenCalledWith({
+            where: { code: 'A3X9K2' },
+            include: { account: true },
+        });
+        expect(vi.mocked(db.joinCode.update)).toHaveBeenCalledWith({
+            where: { id: 'code-1' },
+            data: { usedAt: expect.any(Date) },
+        });
+
+        await app.close();
+    });
+
+    it('rejects invalid join code with 404', async () => {
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/auth/joincode/redeem',
+            payload: {
+                code: 'BAD999',
+                machinePublicKey: 'valid-public-key',
+            },
+        });
+
+        expect(response.statusCode).toBe(404);
+        expect(response.json()).toEqual({
+            error: 'Join code is invalid or expired',
+            code: 'JOIN_CODE_INVALID',
+        });
 
         await app.close();
     });
