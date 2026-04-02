@@ -486,6 +486,7 @@ describe('authRoutes', () => {
             token: null,
             userId: null,
             encryptedContentSecretKey: null,
+            canonicalPublicKey: 'hex-public-key',
             reason: 'recovery_not_ready',
         });
 

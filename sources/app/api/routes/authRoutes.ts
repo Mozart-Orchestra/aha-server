@@ -635,6 +635,7 @@ export function authRoutes(app: Fastify) {
                     token: z.string().nullable(),
                     userId: z.string().nullable(),
                     encryptedContentSecretKey: z.string().nullable().optional(),
+                    canonicalPublicKey: z.string().nullable().optional(),
                     reason: z.string().optional(),
                 }),
                 401: z.object({
@@ -673,6 +674,7 @@ export function authRoutes(app: Fastify) {
                     token: null,
                     userId: null,
                     encryptedContentSecretKey: null,
+                    canonicalPublicKey: account.publicKey,
                     reason: 'recovery_not_ready',
                 });
             }
@@ -685,6 +687,7 @@ export function authRoutes(app: Fastify) {
                     token: null,
                     userId: null,
                     encryptedContentSecretKey: null,
+                    canonicalPublicKey: account.publicKey,
                     reason: 'recovery_not_ready',
                 });
             }
