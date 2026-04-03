@@ -12,6 +12,7 @@ import {
     readAccountRecoverySecret,
     upsertAccountRecoveryMaterial,
 } from "@/app/auth/accountRecoveryMaterial";
+import { decryptBoxedContentSecretKey, getWrappingPublicKey } from "@/app/auth/contentWrappingKey";
 
 export function authRoutes(app: Fastify) {
     const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
@@ -178,6 +179,48 @@ export function authRoutes(app: Fastify) {
 
         return publicKey;
     }
+
+    /**
+     * Resolves a plaintext contentSecretKey (as base64) from the request body.
+     * Accepts either the NaCl box-encrypted form or the legacy plaintext fallback.
+     * Returns null if an encrypted payload is incomplete/invalid or when no secret is present.
+     */
+    function resolveContentSecretKeyBase64(body: {
+        encryptedContentSecretKey?: string | null;
+        nonce?: string | null;
+        ephemeralPublicKey?: string | null;
+        contentSecretKey?: string | null;
+    }): string | null {
+        if (body.encryptedContentSecretKey || body.nonce || body.ephemeralPublicKey) {
+            if (!(body.encryptedContentSecretKey && body.nonce && body.ephemeralPublicKey)) {
+                return null;
+            }
+            const decrypted = decryptBoxedContentSecretKey({
+                ciphertext: body.encryptedContentSecretKey,
+                nonce: body.nonce,
+                ephemeralPublicKey: body.ephemeralPublicKey,
+            });
+            if (!decrypted) {
+                return null;
+            }
+            return privacyKit.encodeBase64(decrypted);
+        }
+        return body.contentSecretKey?.trim() || null;
+    }
+
+    app.get('/v1/auth/wrapping-key', {
+        schema: {
+            response: {
+                200: z.object({
+                    wrappingPublicKey: z.string(),
+                }),
+            },
+        },
+    }, async (_request, reply) => {
+        return reply.send({
+            wrappingPublicKey: privacyKit.encodeBase64(getWrappingPublicKey()),
+        });
+    });
 
     app.post('/v1/auth', {
         schema: secretAuthSchema
@@ -362,12 +405,21 @@ export function authRoutes(app: Fastify) {
         preHandler: app.authenticate,
         schema: {
             body: z.object({
-                contentSecretKey: z.string(),
+                // NaCl box-encrypted form: client encrypts contentSecretKey to server wrapping key
+                encryptedContentSecretKey: z.string().optional(),
+                nonce: z.string().optional(),
+                ephemeralPublicKey: z.string().optional(),
+                // Legacy plaintext fallback kept during rollout.
+                contentSecretKey: z.string().optional(),
             }),
             response: {
                 200: z.object({
                     success: z.literal(true),
                     publicKey: z.string(),
+                }),
+                400: z.object({
+                    error: z.string(),
+                    code: z.enum(['decryption-failed', 'content-secret-required']),
                 }),
                 409: z.object({
                     error: z.string(),
@@ -387,8 +439,30 @@ export function authRoutes(app: Fastify) {
             });
         }
 
+        const hasLegacyContentSecretKey = !!request.body.contentSecretKey?.trim();
+        const hasEncryptedContentSecretKeyPayload = !!(
+            request.body.encryptedContentSecretKey ||
+            request.body.nonce ||
+            request.body.ephemeralPublicKey
+        );
+
+        if (!hasLegacyContentSecretKey && !hasEncryptedContentSecretKeyPayload) {
+            return reply.code(400).send({
+                error: 'Missing content secret key',
+                code: 'content-secret-required',
+            });
+        }
+
+        const contentSecretKeyBase64 = resolveContentSecretKeyBase64(request.body);
+        if (request.body.encryptedContentSecretKey && !contentSecretKeyBase64) {
+            return reply.code(400).send({
+                error: 'Failed to decrypt content secret key',
+                code: 'decryption-failed',
+            });
+        }
+
         try {
-            await persistRecoveryMaterialForAccount(account.id, account.publicKey, request.body.contentSecretKey);
+            await persistRecoveryMaterialForAccount(account.id, account.publicKey, contentSecretKeyBase64);
         } catch (error) {
             return reply.code(409).send({
                 error: 'This device secret does not match the current account',
@@ -732,7 +806,12 @@ export function authRoutes(app: Fastify) {
             body: z.object({
                 accessToken: z.string(),
                 recoveryPublicKey: z.string(),
-                newContentSecretKey: z.string(),
+                // Encrypted form (required)
+                newEncryptedContentSecretKey: z.string().optional(),
+                newNonce: z.string().optional(),
+                newEphemeralPublicKey: z.string().optional(),
+                // Legacy plaintext fallback kept during rollout.
+                newContentSecretKey: z.string().optional(),
                 legacyPublicKey: z.string().nullable().optional(),
                 legacyAuthToken: z.string().nullable().optional(),
             }),
@@ -823,7 +902,16 @@ export function authRoutes(app: Fastify) {
             // (b) any account where recovery material was never bootstrapped.
             // The account publicKey is also updated to match the new key.
             if (!contentSecretKey || !publicKeysMatch(publicKeyHexFromContentSecretKey(contentSecretKey), account.publicKey)) {
-                const adoptedKey = privacyKit.decodeBase64(request.body.newContentSecretKey);
+                const resolvedNewKey = resolveContentSecretKeyBase64({
+                    encryptedContentSecretKey: request.body.newEncryptedContentSecretKey,
+                    nonce: request.body.newNonce,
+                    ephemeralPublicKey: request.body.newEphemeralPublicKey,
+                    contentSecretKey: request.body.newContentSecretKey,
+                });
+                if (!resolvedNewKey) {
+                    return reply.code(401).send({ error: 'Missing or invalid new content secret key' });
+                }
+                const adoptedKey = privacyKit.decodeBase64(resolvedNewKey);
                 const adoptedPublicKeyHex = publicKeyHexFromContentSecretKey(adoptedKey);
                 await upsertAccountRecoveryMaterial(account.id, adoptedKey);
                 account = await db.account.update({
@@ -857,7 +945,16 @@ export function authRoutes(app: Fastify) {
             });
         }
 
-        const contentSecretKey = privacyKit.decodeBase64(request.body.newContentSecretKey);
+        const resolvedNewKeyBase64 = resolveContentSecretKeyBase64({
+            encryptedContentSecretKey: request.body.newEncryptedContentSecretKey,
+            nonce: request.body.newNonce,
+            ephemeralPublicKey: request.body.newEphemeralPublicKey,
+            contentSecretKey: request.body.newContentSecretKey,
+        });
+        if (!resolvedNewKeyBase64) {
+            return reply.code(401).send({ error: 'Missing or invalid new content secret key' });
+        }
+        const contentSecretKey = privacyKit.decodeBase64(resolvedNewKeyBase64);
         const publicKeyHex = publicKeyHexFromContentSecretKey(contentSecretKey);
         const existingByPublicKey = await db.account.findUnique({
             where: { publicKey: publicKeyHex },
@@ -903,6 +1000,11 @@ export function authRoutes(app: Fastify) {
             publicKey: z.string(),
             challenge: z.string(),
             signature: z.string(),
+            // Encrypted form: NaCl box-encrypted contentSecretKey
+            encryptedContentSecretKey: z.string().optional(),
+            nonce: z.string().optional(),
+            ephemeralPublicKey: z.string().optional(),
+            // Legacy plaintext fallback kept during rollout.
             contentSecretKey: z.string().optional(),
         }),
         response: {
@@ -1000,9 +1102,14 @@ export function authRoutes(app: Fastify) {
             log({ module: 'supabase-auth' }, `[SUPABASE AUTH] Found existing account: ${account.id}`);
         }
 
+        const contentSecretKeyBase64 = resolveContentSecretKeyBase64(request.body);
+        if (request.body.encryptedContentSecretKey && !contentSecretKeyBase64) {
+            return reply.code(401).send({ error: 'Invalid content secret key payload' });
+        }
+
         let recoveryReady = false;
         try {
-            recoveryReady = await persistRecoveryMaterialForAccount(account.id, account.publicKey, request.body.contentSecretKey);
+            recoveryReady = await persistRecoveryMaterialForAccount(account.id, account.publicKey, contentSecretKeyBase64);
         } catch (error) {
             return reply.code(409).send({
                 error: 'This device secret does not match the current account',

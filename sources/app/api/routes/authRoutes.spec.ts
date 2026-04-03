@@ -60,6 +60,11 @@ vi.mock('@/app/auth/accountRecoveryMaterial', () => ({
     upsertAccountRecoveryMaterial: vi.fn(),
 }));
 
+vi.mock('@/app/auth/contentWrappingKey', () => ({
+    decryptBoxedContentSecretKey: vi.fn(),
+    getWrappingPublicKey: vi.fn(() => new Uint8Array(32).fill(4)),
+}));
+
 vi.mock('privacy-kit', () => ({
     decodeBase64: vi.fn((value: string) => {
         switch (value) {
@@ -125,6 +130,10 @@ import {
     readAccountRecoverySecret,
     upsertAccountRecoveryMaterial,
 } from '@/app/auth/accountRecoveryMaterial';
+import {
+    decryptBoxedContentSecretKey,
+    getWrappingPublicKey,
+} from '@/app/auth/contentWrappingKey';
 import { supabaseVerifyToken } from '@/app/auth/supabaseVerify';
 import { authRoutes } from './authRoutes';
 
@@ -153,6 +162,7 @@ describe('authRoutes', () => {
         vi.mocked(db.joinCode.deleteMany).mockResolvedValue({ count: 0 } as never);
         vi.mocked(db.joinCode.findUnique).mockResolvedValue(null as never);
         vi.mocked(readAccountRecoverySecret).mockResolvedValue(null as never);
+        vi.mocked(decryptBoxedContentSecretKey).mockReturnValue(new Uint8Array(32).fill(9) as never);
         vi.mocked(supabaseVerifyToken).mockResolvedValue({
             supabaseUserId: 'supabase-user-1',
             email: 'user@example.com',
@@ -298,6 +308,101 @@ describe('authRoutes', () => {
             status: 'authorized',
             supportsV2: false,
         });
+
+        await app.close();
+    });
+
+    it('returns the wrapping public key for clients that support encrypted recovery bootstrap', async () => {
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/auth/wrapping-key',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            wrappingPublicKey: 'encoded-recovery-secret',
+        });
+        expect(vi.mocked(getWrappingPublicKey)).toHaveBeenCalled();
+
+        await app.close();
+    });
+
+    it('accepts legacy plaintext recovery material during rollout', async () => {
+        vi.mocked(db.account.findUnique).mockResolvedValue({
+            id: 'user-1',
+            publicKey: 'hex-public-key',
+        } as never);
+        vi.mocked(upsertAccountRecoveryMaterial).mockResolvedValue({
+            accountId: 'user-1',
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/account/recovery-material',
+            payload: {
+                contentSecretKey: 'content-secret',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            success: true,
+            publicKey: 'hex-public-key',
+        });
+        expect(vi.mocked(upsertAccountRecoveryMaterial)).toHaveBeenCalledWith('user-1', expect.any(Uint8Array));
+
+        await app.close();
+    });
+
+    it('rejects recovery bootstrap requests that omit both plaintext and encrypted secrets', async () => {
+        vi.mocked(db.account.findUnique).mockResolvedValue({
+            id: 'user-1',
+            publicKey: 'hex-public-key',
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/account/recovery-material',
+            payload: {},
+        });
+
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toEqual({
+            error: 'Missing content secret key',
+            code: 'content-secret-required',
+        });
+        expect(vi.mocked(upsertAccountRecoveryMaterial)).not.toHaveBeenCalled();
+
+        await app.close();
+    });
+
+    it('rejects invalid encrypted recovery material payloads instead of silently succeeding', async () => {
+        vi.mocked(db.account.findUnique).mockResolvedValue({
+            id: 'user-1',
+            publicKey: 'hex-public-key',
+        } as never);
+        vi.mocked(decryptBoxedContentSecretKey).mockReturnValue(null as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/account/recovery-material',
+            payload: {
+                encryptedContentSecretKey: 'ciphertext',
+                nonce: 'nonce',
+                ephemeralPublicKey: 'ephemeral-public-key',
+            },
+        });
+
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toEqual({
+            error: 'Failed to decrypt content secret key',
+            code: 'decryption-failed',
+        });
+        expect(vi.mocked(upsertAccountRecoveryMaterial)).not.toHaveBeenCalled();
 
         await app.close();
     });
@@ -471,13 +576,22 @@ describe('authRoutes', () => {
         await app.close();
     });
 
-    it('returns migration_required from /v1/auth/supabase/complete when recovery material is not ready', async () => {
+    it('adopts the client secret for an existing Supabase account when recovery material is missing', async () => {
         vi.mocked(db.account.findFirst).mockResolvedValue({
             id: 'user-1',
             publicKey: 'hex-public-key',
             supabaseUserId: 'supabase-user-1',
         } as never);
         vi.mocked(readAccountRecoverySecret).mockResolvedValue(null as never);
+        vi.mocked(db.account.update).mockResolvedValue({
+            id: 'user-1',
+            publicKey: 'hex-public-key',
+            supabaseUserId: 'supabase-user-1',
+        } as never);
+        vi.mocked(upsertAccountRecoveryMaterial).mockResolvedValue({
+            accountId: 'user-1',
+        } as never);
+        vi.mocked(markAccountRecoveryUsed).mockResolvedValue(undefined as never);
 
         const app = buildApp();
         const response = await app.inject({
@@ -492,18 +606,18 @@ describe('authRoutes', () => {
 
         expect(response.statusCode).toBe(200);
         expect(response.json()).toEqual({
-            state: 'migration_required',
-            token: null,
-            userId: null,
-            encryptedContentSecretKey: null,
-            canonicalPublicKey: 'hex-public-key',
-            reason: 'recovery_not_ready',
+            state: 'existing_recovered',
+            token: 'token-123',
+            userId: 'user-1',
+            encryptedContentSecretKey: 'encoded-recovery-secret',
         });
+        expect(vi.mocked(upsertAccountRecoveryMaterial)).toHaveBeenCalledWith('user-1', expect.any(Uint8Array));
+        expect(vi.mocked(markAccountRecoveryUsed)).toHaveBeenCalledWith('user-1');
 
         await app.close();
     });
 
-    it('links a legacy unbound account during /v1/auth/supabase/complete before requesting migration', async () => {
+    it('links and adopts the client secret for a legacy unbound account during /v1/auth/supabase/complete', async () => {
         vi.mocked(auth.verifyToken).mockResolvedValue({
             userId: 'legacy-user-1',
         } as never);
@@ -520,6 +634,10 @@ describe('authRoutes', () => {
             supabaseUserId: 'supabase-user-1',
         } as never);
         vi.mocked(readAccountRecoverySecret).mockResolvedValue(null as never);
+        vi.mocked(upsertAccountRecoveryMaterial).mockResolvedValue({
+            accountId: 'legacy-user-1',
+        } as never);
+        vi.mocked(markAccountRecoveryUsed).mockResolvedValue(undefined as never);
 
         const app = buildApp();
         const response = await app.inject({
@@ -536,12 +654,10 @@ describe('authRoutes', () => {
 
         expect(response.statusCode).toBe(200);
         expect(response.json()).toEqual({
-            state: 'migration_required',
-            token: null,
-            userId: null,
-            encryptedContentSecretKey: null,
-            canonicalPublicKey: 'HEX-PUBLIC-KEY',
-            reason: 'recovery_not_ready',
+            state: 'existing_recovered',
+            token: 'token-123',
+            userId: 'legacy-user-1',
+            encryptedContentSecretKey: 'encoded-recovery-secret',
         });
         expect(vi.mocked(db.account.update)).toHaveBeenCalledWith({
             where: { id: 'legacy-user-1' },
@@ -553,6 +669,8 @@ describe('authRoutes', () => {
                 updatedAt: expect.any(Date),
             }),
         });
+        expect(vi.mocked(upsertAccountRecoveryMaterial)).toHaveBeenCalledWith('legacy-user-1', expect.any(Uint8Array));
+        expect(vi.mocked(markAccountRecoveryUsed)).toHaveBeenCalledWith('legacy-user-1');
 
         await app.close();
     });

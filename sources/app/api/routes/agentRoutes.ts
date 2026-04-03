@@ -66,6 +66,7 @@ function buildAgentResponse(
         status: board.status || 'active',
         metadata: board.metadata || {},
         type,
+        lifecycle: agent?.lifecycle || null,
         createdAt: artifact.createdAt.getTime(),
         updatedAt: artifact.updatedAt.getTime(),
     };
@@ -246,6 +247,8 @@ export function agentRoutes(app: Fastify) {
                             joinedAt: Date.now(),
                             lifecycle: {
                                 spawnRequestedAt: Date.now(),
+                                spawnedAt: Date.now(),
+                                runStatus: 'active',
                             },
                         }],
                     },
