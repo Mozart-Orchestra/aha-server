@@ -13,3 +13,6 @@ dist
 .gstack/
 prisma/local.db
 prisma/local.db
+
+.aha/runtime-events/
+.aha/teams/*/messages.jsonl
