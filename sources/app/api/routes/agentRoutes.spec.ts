@@ -21,6 +21,14 @@ vi.mock('@/storage/db', () => ({
         session: {
             findFirst: vi.fn(),
         },
+        genome: {
+            findFirst: vi.fn(),
+            update: vi.fn(),
+        },
+        artifact: {
+            findFirst: vi.fn(),
+            update: vi.fn(),
+        },
         $transaction: vi.fn(),
     },
 }));
@@ -58,9 +66,45 @@ describe('agentRoutes', () => {
             createdAt: new Date('2026-03-18T00:00:00Z'),
             updatedAt: new Date('2026-03-18T00:00:00Z'),
         });
+        vi.mocked(db.artifact.findFirst).mockResolvedValue({
+            id: 'agent-123',
+            accountId: 'user-1',
+            body: Buffer.from(JSON.stringify({
+                type: 'standalone',
+                name: 'Reviewer',
+                status: 'pending',
+                sourceImageId: 'genome-1',
+                genomeId: 'genome-1',
+                metadata: {},
+                team: {
+                    members: [{
+                        memberId: 'member-1',
+                        sessionTag: 'standalone:agent-123',
+                        roleId: 'standalone',
+                        displayName: 'Reviewer',
+                        sourceImageId: 'genome-1',
+                        specId: 'genome-1',
+                        runtimeType: 'claude',
+                        lifecycle: {
+                            spawnRequestedAt: 123,
+                            runStatus: 'pending',
+                        },
+                    }],
+                },
+            })),
+            createdAt: new Date('2026-03-18T00:00:00Z'),
+            updatedAt: new Date('2026-03-18T00:00:00Z'),
+        } as never);
+        vi.mocked(db.artifact.update).mockResolvedValue({
+            id: 'agent-123',
+            createdAt: new Date('2026-03-18T00:00:00Z'),
+            updatedAt: new Date('2026-03-18T00:01:00Z'),
+        } as never);
+        vi.mocked(db.genome.findFirst).mockResolvedValue({ id: 'genome-1' } as never);
+        vi.mocked(db.genome.update).mockResolvedValue({ id: 'genome-1' } as never);
     });
 
-    it('creates a standalone agent inside a single transaction', async () => {
+    it('creates a standalone agent artifact without a session (artifact-first)', async () => {
         const app = buildApp();
         const response = await app.inject({
             method: 'POST',
@@ -74,9 +118,16 @@ describe('agentRoutes', () => {
 
         expect(response.statusCode).toBe(201);
         expect(db.$transaction).toHaveBeenCalledTimes(1);
-        expect(tx.session.create).toHaveBeenCalledTimes(1);
+        expect(tx.session.create).not.toHaveBeenCalled();
         expect(tx.artifact.create).toHaveBeenCalledTimes(1);
-        expect(tx.genome.update).toHaveBeenCalledTimes(1);
+        expect(tx.genome.update).not.toHaveBeenCalled();
+
+        const body = JSON.parse(response.body);
+        expect(body.agent.sessionId).toBeNull();
+        expect(body.agent.lifecycle).toEqual({
+            spawnRequestedAt: expect.any(Number),
+            runStatus: 'pending',
+        });
 
         await app.close();
     });
@@ -125,6 +176,100 @@ describe('agentRoutes', () => {
         expect(db.session.findFirst).toHaveBeenCalled();
         expect(tx.session.create).not.toHaveBeenCalled();
         expect(tx.artifact.create).toHaveBeenCalledTimes(1);
+        expect(tx.genome.update).not.toHaveBeenCalled();
+
+        const body = JSON.parse(response.body);
+        expect(body.agent.sessionId).toBe('session-live');
+
+        await app.close();
+    });
+
+    it('returns 404 when caller provides sessionId that does not exist', async () => {
+        vi.mocked(db.session.findFirst).mockResolvedValue(null as never);
+        tx.session.findFirst.mockResolvedValue(null as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/agents',
+            payload: {
+                displayName: 'Reviewer',
+                genomeId: 'genome-1',
+                runtimeType: 'claude',
+                sessionId: 'session-nonexistent',
+            },
+        });
+
+        expect(response.statusCode).toBe(404);
+        const body = JSON.parse(response.body);
+        expect(body.error).toBe('Session not found');
+
+        await app.close();
+    });
+
+    it('patches standalone lifecycle as an object and increments counters only on active transition', async () => {
+        vi.mocked(db.session.findFirst).mockResolvedValue({
+            id: 'session-123',
+            tag: 'standalone:agent-123',
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'PATCH',
+            url: '/v1/agents/agent-123',
+            payload: {
+                sessionId: 'session-123',
+                lifecycle: {
+                    runStatus: 'active',
+                    spawnedAt: 456,
+                },
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(db.session.findFirst).toHaveBeenCalledWith({
+            where: {
+                id: 'session-123',
+                accountId: 'user-1',
+            },
+            select: {
+                id: true,
+                tag: true,
+            },
+        });
+        expect(db.genome.update).toHaveBeenCalledTimes(1);
+        expect(db.artifact.update).toHaveBeenCalledTimes(1);
+
+        const body = JSON.parse(response.body);
+        expect(body.agent.sessionId).toBe('session-123');
+        expect(body.agent.lifecycle).toEqual({
+            spawnRequestedAt: 123,
+            runStatus: 'active',
+            spawnedAt: 456,
+        });
+
+        await app.close();
+    });
+
+    it('rejects patch when the provided session does not belong to the user', async () => {
+        vi.mocked(db.session.findFirst).mockResolvedValue(null as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'PATCH',
+            url: '/v1/agents/agent-123',
+            payload: {
+                sessionId: 'session-404',
+                lifecycle: {
+                    runStatus: 'active',
+                },
+            },
+        });
+
+        expect(response.statusCode).toBe(404);
+        expect(JSON.parse(response.body).error).toBe('Session not found');
+        expect(db.artifact.update).not.toHaveBeenCalled();
+        expect(db.genome.update).not.toHaveBeenCalled();
 
         await app.close();
     });

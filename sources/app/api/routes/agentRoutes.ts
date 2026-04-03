@@ -8,6 +8,15 @@ import {
     extractTeamMembers,
     serializeTeamBoard,
 } from "@/app/team/teamArtifacts";
+import { buildImageRefFields, resolveImageRef } from "@/app/team/imageRef";
+import {
+    AgentArtifactStatusSchema,
+    AgentLifecycleSchema,
+    buildActiveAgentLifecycle,
+    buildPendingAgentLifecycle,
+    getLifecycleRunStatus,
+    normalizeAgentLifecycle,
+} from "@/app/team/spawnState";
 
 const GENOME_HUB_URL = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
 const EXISTING_SESSION_LOOKUP_ATTEMPTS = 20;
@@ -20,19 +29,29 @@ const EXISTING_SESSION_LOOKUP_DELAY_MS = 250;
 const AgentCreateSchema = z.object({
     displayName: z.string().min(1).max(100),
     genomeId: z.string().optional(),
+    sourceImageId: z.string().optional(),
+    sourceImageVersion: z.number().int().positive().nullable().optional(),
     genomeSpec: z.record(z.unknown()).optional(),
     sessionId: z.string().optional(),
     sessionTag: z.string().optional(),
     memberId: z.string().optional(),
     runtimeType: z.enum(['claude', 'codex']).default('claude'),
     modelId: z.string().optional(),
+    lifecycle: AgentLifecycleSchema.optional(),
     metadata: z.record(z.unknown()).optional(),
 });
 
 const AgentPatchSchema = z.object({
     displayName: z.string().min(1).max(100).optional(),
     genomeId: z.string().optional(),
-    status: z.enum(['active', 'paused', 'archived']).optional(),
+    sourceImageId: z.string().optional(),
+    sourceImageVersion: z.number().int().positive().nullable().optional(),
+    sessionId: z.string().optional(),
+    sessionTag: z.string().optional(),
+    memberId: z.string().optional(),
+    runtimeType: z.enum(['claude', 'codex']).optional(),
+    lifecycle: AgentLifecycleSchema.optional(),
+    status: AgentArtifactStatusSchema.optional(),
     metadata: z.record(z.unknown()).optional(),
 }).refine((value) => Object.keys(value).length > 0, {
     message: 'At least one field must be provided',
@@ -53,6 +72,15 @@ function buildAgentResponse(
     const members = extractTeamMembers(board);
     const agent = members[0];
     const type = isStandaloneAgent(board) ? 'standalone' : 'team';
+    const lifecycle = normalizeAgentLifecycle(agent?.lifecycle);
+    const runStatus = getLifecycleRunStatus(lifecycle);
+    const imageRef = resolveImageRef({
+        sourceImageId: board.sourceImageId ?? agent?.sourceImageId ?? null,
+        sourceImageVersion: board.sourceImageVersion ?? agent?.sourceImageVersion ?? null,
+        genomeId: board.genomeId ?? agent?.genomeId ?? null,
+        genomeVersion: board.genomeVersion ?? agent?.genomeVersion ?? null,
+        specId: agent?.specId ?? null,
+    });
 
     return {
         id: artifact.id,
@@ -62,14 +90,41 @@ function buildAgentResponse(
         memberId: agent?.memberId || null,
         roleId: agent?.roleId || null,
         runtimeType: agent?.runtimeType || 'claude',
-        genomeId: board.genomeId || null,
-        status: board.status || 'active',
+        sourceImageId: imageRef?.id ?? null,
+        sourceImageVersion: imageRef?.version ?? null,
+        genomeId: imageRef?.id ?? null,
+        status: typeof board.status === 'string'
+            ? board.status
+            : (runStatus ?? 'active'),
         metadata: board.metadata || {},
         type,
-        lifecycle: agent?.lifecycle || null,
+        lifecycle,
         createdAt: artifact.createdAt.getTime(),
         updatedAt: artifact.updatedAt.getTime(),
     };
+}
+
+async function incrementLocalSpawnCount(genomeId: string, userId: string): Promise<void> {
+    const localGenome = await db.genome.findFirst({
+        where: {
+            id: genomeId,
+            deletedAt: null,
+            OR: [{ accountId: userId }, { isPublic: true }],
+        },
+        select: { id: true },
+    });
+
+    if (!localGenome) {
+        return;
+    }
+
+    await db.genome.update({
+        where: { id: genomeId },
+        data: {
+            spawnCount: { increment: 1 },
+            lastSpawnedAt: new Date(),
+        },
+    });
 }
 
 async function waitForExistingSession(
@@ -141,20 +196,30 @@ export function agentRoutes(app: Fastify) {
         const {
             displayName,
             genomeId,
+            sourceImageId,
+            sourceImageVersion,
             genomeSpec,
             sessionId: existingSessionId,
             sessionTag,
             memberId,
             runtimeType,
             modelId,
+            lifecycle,
             metadata,
         } = request.body as z.infer<typeof AgentCreateSchema>;
 
         try {
+            const imageRef = resolveImageRef({
+                sourceImageId,
+                sourceImageVersion,
+                genomeId,
+            });
+            const resolvedSourceImageId = imageRef?.id ?? null;
+            const normalizedLifecycle = normalizeAgentLifecycle(lifecycle);
             // Must have genomeId or genomeSpec
-            if (!genomeId && !genomeSpec) {
+            if (!resolvedSourceImageId && !genomeSpec) {
                 return reply.code(400).send({
-                    error: 'Either genomeId or genomeSpec must be provided',
+                    error: 'Either sourceImageId/genomeId or genomeSpec must be provided',
                 });
             }
 
@@ -168,13 +233,13 @@ export function agentRoutes(app: Fastify) {
             const created = await db.$transaction(async (tx) => {
                 // Validate genomeId: genome-hub is the authoritative source,
                 // local DB is only a fallback (will be deprecated)
-                if (genomeId) {
-                    const hubGenome = await fetchGenomeFromHub(genomeId);
+                if (resolvedSourceImageId) {
+                    const hubGenome = await fetchGenomeFromHub(resolvedSourceImageId);
                     if (!hubGenome) {
                         // Fallback to local genome table (transitional)
                         const localGenome = await tx.genome.findFirst({
                             where: {
-                                id: genomeId,
+                                id: resolvedSourceImageId,
                                 deletedAt: null,
                                 OR: [{ accountId: userId }, { isPublic: true }],
                             },
@@ -189,6 +254,9 @@ export function agentRoutes(app: Fastify) {
                 const agentId = randomKeyNaked(24);
                 const defaultSessionTag = `standalone:${agentId}`;
 
+                // Artifact-first: session is optional. When neither sessionId
+                // nor sessionTag is supplied the agent is created as a
+                // session-less artifact that can be patched later.
                 const session = reusableSession
                     ? reusableSession
                     : (existingSessionId || sessionTag)
@@ -205,51 +273,38 @@ export function agentRoutes(app: Fastify) {
                                 tag: true,
                             },
                         })
-                    : await tx.session.create({
-                        data: {
-                            tag: sessionTag || defaultSessionTag,
-                            accountId: userId,
-                            metadata: JSON.stringify({
-                                name: displayName,
-                                type: 'standalone-agent',
-                                genomeId: genomeId || null,
-                                runtimeType,
-                                modelId: modelId || null,
-                            }),
-                        },
-                        select: {
-                            id: true,
-                            tag: true,
-                        },
-                    });
+                        : null;
 
-                if (!session) {
+                // If caller explicitly asked for a session but it was not
+                // found, that is an error.
+                if ((existingSessionId || sessionTag) && !session) {
                     return { type: 'session-not-found' as const };
                 }
 
-                const resolvedSessionTag = sessionTag || session.tag || defaultSessionTag;
+                const resolvedSessionTag = sessionTag || session?.tag || defaultSessionTag;
 
                 const board: Record<string, any> = {
                     type: 'standalone',
                     name: displayName,
-                    status: 'active',
-                    genomeId: genomeId || null,
+                    status: getLifecycleRunStatus(normalizedLifecycle)
+                        ?? (session ? 'active' : 'pending'),
+                    ...buildImageRefFields(imageRef, { includeLegacyGenome: true }),
                     genomeSpec: genomeSpec || null,
                     metadata: metadata || {},
                     team: {
                         members: [{
                             ...(memberId ? { memberId } : {}),
-                            sessionId: session.id,
+                            ...(session ? { sessionId: session.id } : {}),
                             sessionTag: resolvedSessionTag,
                             roleId: 'standalone',
                             displayName,
+                            ...buildImageRefFields(imageRef, { includeLegacySpec: true }),
                             runtimeType,
                             joinedAt: Date.now(),
-                            lifecycle: {
-                                spawnRequestedAt: Date.now(),
-                                spawnedAt: Date.now(),
-                                runStatus: 'active',
-                            },
+                            lifecycle: normalizedLifecycle
+                                ?? (session
+                                    ? buildActiveAgentLifecycle()
+                                    : buildPendingAgentLifecycle()),
                         }],
                     },
                 };
@@ -267,24 +322,9 @@ export function agentRoutes(app: Fastify) {
                     },
                 });
 
-                if (genomeId) {
-                    // Increment on genome-hub (authoritative)
-                    incrementHubSpawnCount(genomeId).catch(() => {});
-                    // Also increment locally if record exists (transitional fallback)
-                    const localGenome = await tx.genome.findFirst({
-                        where: { id: genomeId, deletedAt: null },
-                        select: { id: true },
-                    });
-                    if (localGenome) {
-                        await tx.genome.update({
-                            where: { id: genomeId },
-                            data: {
-                                spawnCount: { increment: 1 },
-                                lastSpawnedAt: new Date(),
-                            },
-                        });
-                    }
-                }
+                // NOTE: spawnCount is NOT incremented here at creation time.
+                // It is incremented in the PATCH handler when lifecycle.runStatus
+                // transitions to 'active', ensuring we only count successful spawns.
 
                 return {
                     type: 'created' as const,
@@ -403,12 +443,13 @@ export function agentRoutes(app: Fastify) {
                 return reply.code(404).send({ error: 'Agent not found (not standalone)' });
             }
 
-            // Fetch linked genome if present
+            // Fetch linked genome if present (sourceImageId is canonical, genomeId is legacy fallback)
+            const resolvedGenomeLookupId = board.sourceImageId ?? board.genomeId;
             let genome = null;
-            if (board.genomeId) {
+            if (resolvedGenomeLookupId) {
                 genome = await db.genome.findFirst({
                     where: {
-                        id: board.genomeId as string,
+                        id: resolvedGenomeLookupId as string,
                         deletedAt: null,
                     },
                 });
@@ -463,21 +504,56 @@ export function agentRoutes(app: Fastify) {
             }
 
             // Apply updates
-            if (updates.displayName !== undefined) {
-                board.name = updates.displayName;
-                const members = extractTeamMembers(board);
-                if (members[0]) {
-                    members[0].displayName = updates.displayName;
+            const members = extractTeamMembers(board);
+            const primaryMember = members[0] ?? null;
+            const previousRunStatus = getLifecycleRunStatus(normalizeAgentLifecycle(primaryMember?.lifecycle));
+            const resolvedImageRef = resolveImageRef({
+                sourceImageId: board.sourceImageId ?? primaryMember?.sourceImageId ?? null,
+                sourceImageVersion: board.sourceImageVersion ?? primaryMember?.sourceImageVersion ?? null,
+                genomeId: board.genomeId ?? primaryMember?.genomeId ?? null,
+                genomeVersion: board.genomeVersion ?? primaryMember?.genomeVersion ?? null,
+                specId: primaryMember?.specId ?? null,
+            });
+            const resolvedImageId = resolvedImageRef?.id ?? null;
+            const normalizedLifecycleUpdate = normalizeAgentLifecycle(updates.lifecycle);
+
+            let resolvedSessionForPatch: { id: string; tag: string } | null = null;
+            if (updates.sessionId !== undefined) {
+                resolvedSessionForPatch = await db.session.findFirst({
+                    where: {
+                        id: updates.sessionId,
+                        accountId: userId,
+                    },
+                    select: {
+                        id: true,
+                        tag: true,
+                    },
+                });
+
+                if (!resolvedSessionForPatch) {
+                    return reply.code(404).send({ error: 'Session not found' });
                 }
             }
 
-            if (updates.genomeId !== undefined) {
+            if (updates.displayName !== undefined) {
+                board.name = updates.displayName;
+                if (primaryMember) {
+                    primaryMember.displayName = updates.displayName;
+                }
+            }
+
+            const updatedImageRef = resolveImageRef({
+                sourceImageId: updates.sourceImageId,
+                sourceImageVersion: updates.sourceImageVersion,
+                genomeId: updates.genomeId,
+            });
+            if (updatedImageRef) {
                 // genome-hub is authoritative, local is fallback
-                const hubGenome = await fetchGenomeFromHub(updates.genomeId);
+                const hubGenome = await fetchGenomeFromHub(updatedImageRef.id);
                 if (!hubGenome) {
                     const localGenome = await db.genome.findFirst({
                         where: {
-                            id: updates.genomeId,
+                            id: updatedImageRef.id,
                             deletedAt: null,
                             OR: [{ accountId: userId }, { isPublic: true }],
                         },
@@ -487,7 +563,54 @@ export function agentRoutes(app: Fastify) {
                         return reply.code(404).send({ error: 'Genome not found' });
                     }
                 }
-                board.genomeId = updates.genomeId;
+                Object.assign(board, buildImageRefFields(updatedImageRef, { includeLegacyGenome: true }));
+                if (primaryMember) {
+                    Object.assign(primaryMember, buildImageRefFields(updatedImageRef, { includeLegacySpec: true }));
+                }
+            }
+
+            if (updates.sourceImageVersion !== undefined) {
+                const currentImageRef = resolveImageRef({
+                    sourceImageId: board.sourceImageId ?? primaryMember?.sourceImageId ?? null,
+                    sourceImageVersion: updates.sourceImageVersion,
+                    genomeId: board.genomeId ?? primaryMember?.genomeId ?? null,
+                    specId: primaryMember?.specId ?? null,
+                });
+                Object.assign(board, buildImageRefFields(currentImageRef, { includeLegacyGenome: true }));
+                if (primaryMember) {
+                    Object.assign(primaryMember, buildImageRefFields(currentImageRef, { includeLegacySpec: true }));
+                }
+            }
+
+            if (updates.sessionId !== undefined && primaryMember) {
+                primaryMember.sessionId = updates.sessionId;
+                if (resolvedSessionForPatch && updates.sessionTag === undefined) {
+                    primaryMember.sessionTag = resolvedSessionForPatch.tag;
+                }
+            }
+
+            if (updates.sessionTag !== undefined && primaryMember) {
+                primaryMember.sessionTag = updates.sessionTag;
+            }
+
+            if (updates.memberId !== undefined && primaryMember) {
+                primaryMember.memberId = updates.memberId;
+            }
+
+            if (updates.runtimeType !== undefined && primaryMember) {
+                primaryMember.runtimeType = updates.runtimeType;
+            }
+
+            if (updates.lifecycle !== undefined && primaryMember) {
+                const mergedLifecycle = normalizeAgentLifecycle({
+                    ...(normalizeAgentLifecycle(primaryMember.lifecycle) ?? {}),
+                    ...(normalizedLifecycleUpdate ?? {}),
+                }) ?? undefined;
+                primaryMember.lifecycle = mergedLifecycle;
+                const nextBoardStatus = getLifecycleRunStatus(mergedLifecycle);
+                if (nextBoardStatus) {
+                    board.status = nextBoardStatus;
+                }
             }
 
             if (updates.status !== undefined) {
@@ -506,6 +629,13 @@ export function agentRoutes(app: Fastify) {
                     updatedAt: new Date(),
                 },
             });
+
+            const nextRunStatus = getLifecycleRunStatus(normalizeAgentLifecycle(primaryMember?.lifecycle));
+            const transitionedToActive = nextRunStatus === 'active' && previousRunStatus !== 'active';
+            if (transitionedToActive && resolvedImageId) {
+                incrementHubSpawnCount(resolvedImageId).catch(() => {});
+                await incrementLocalSpawnCount(resolvedImageId, userId);
+            }
 
             return reply.send({
                 agent: buildAgentResponse(

@@ -84,6 +84,18 @@ const GenomePromotePayloadSchema = z.object({
     minAvgScore: z.number().min(0).max(100).default(80),
 });
 
+const GenomeForkPayloadSchema = z.object({
+    namespace: z.string().max(256),
+    name: z.string().max(256),
+    version: z.number().int().min(1).default(1),
+    description: z.string().max(256).nullable().optional(),
+    spec: z.string().optional(),
+    tags: z.string().max(256).nullable().optional(),
+    category: z.string().max(256).nullable().optional(),
+    isPublic: z.boolean().optional(),
+    publisherId: z.string().max(256).nullable().optional(),
+});
+
 const EntityDiffProxyPayloadSchema = z.object({
     description: z.string().min(1),
     verdictRefs: z.array(z.string()).optional(),
@@ -101,6 +113,7 @@ const EntityLogRefSchema = z.object({
 
 const EntityTrialCreateSchema = z.object({
     teamId: z.string().optional(),
+    sessionId: z.string().optional(),
     contextNarrative: z.string().optional(),
     logRefs: z.array(EntityLogRefSchema).optional(),
 });
@@ -1268,6 +1281,48 @@ export function evolutionRoutes(app: Fastify) {
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome promote proxy error: ${error}`);
             return reply.code(502).send({ error: error?.message ?? 'Failed to proxy genome promotion' });
+        }
+    });
+
+    // =========================================================================
+    // POST /v1/genomes/id/:id/fork
+    // Proxy marketplace fork/clone requests to genome-hub so the web client can
+    // create a private lineage entry without direct HUB_PUBLISH_KEY access.
+    // =========================================================================
+    app.post('/v1/genomes/id/:id/fork', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                id: z.string(),
+            }),
+            body: GenomeForkPayloadSchema,
+        },
+    }, async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const payload = request.body as z.infer<typeof GenomeForkPayloadSchema>;
+
+        try {
+            const hubUrl = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
+            const hubPublishKey = resolveGenomeHubPublishKey();
+            const { default: axios } = await import('axios');
+
+            const upstream = await axios.post(
+                `${hubUrl}/genomes/id/${encodeURIComponent(id)}/fork`,
+                payload,
+                {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10_000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `genome fork proxy error: ${error}`);
+            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy genome fork' });
         }
     });
 

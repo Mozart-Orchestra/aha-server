@@ -1,4 +1,5 @@
 import { db } from "@/storage/db";
+import type { AgentLifecycle } from "./spawnState";
 import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
 
 type ArtifactLike = {
@@ -19,12 +20,19 @@ export type TeamMemberRecord = {
     displayName?: string;
     focusAreas?: string[];
     joinedAt?: number;
+    sourceImageId?: string;
+    sourceImageVersion?: number | null;
     specId?: string;
+    genomeId?: string;
+    genomeVersion?: number | null;
     customPrompt?: string;
     parentSessionId?: string;
     executionPlane?: string;
     runtimeType?: string;
-    lifecycle?: Record<string, unknown>;
+    machineId?: string;
+    workspacePath?: string;
+    spawnError?: string;
+    lifecycle?: AgentLifecycle;
     [key: string]: unknown;
 };
 

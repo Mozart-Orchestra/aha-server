@@ -13,6 +13,7 @@ import {
     serializeTeamBoard,
     summarizeTeamArtifact,
 } from "@/app/team/teamArtifacts";
+import { AgentLifecycle, AgentLifecycleSchema, normalizeAgentLifecycle } from "@/app/team/spawnState";
 import { getTeamOverviewSnapshot, invalidateTeamOverviewSnapshot } from "@/app/team/teamOverview";
 import { activityCache } from "@/app/presence/sessionCache";
 
@@ -36,10 +37,12 @@ const DEFAULT_TEAM_COLUMNS = [
 
 const CorpsSeatSchema = z.object({
     id: z.string().optional(),
-    genomeId: z.string().min(1),
+    genomeId: z.string().min(1).optional(),
+    sourceImageId: z.string().min(1).optional(),
     genomeName: z.string().nullish(),
     genomeNamespace: z.string().nullish(),
     genomeVersion: z.number().int().positive().nullish(),
+    sourceImageVersion: z.number().int().positive().nullish(),
     genomeDisplayName: z.string().nullish(),
     roleId: z.string().min(1),
     displayName: z.string().optional(),
@@ -83,9 +86,11 @@ const CorpsCreateSchema = z.object({
 interface CorpsSeatConfig {
     id?: string;
     genomeId: string;
+    sourceImageId: string;
     genomeName?: string | null;
     genomeNamespace?: string | null;
     genomeVersion?: number | null;
+    sourceImageVersion?: number | null;
     genomeDisplayName?: string | null;
     roleId: string;
     displayName?: string;
@@ -102,6 +107,8 @@ interface PlannedCorpsMember {
     roleId: string;
     displayName: string;
     genomeId: string;
+    sourceImageId: string;
+    sourceImageVersion?: number | null;
     candidateId: string;
     runtimeType: 'claude' | 'codex';
     machineId: string;
@@ -270,6 +277,7 @@ function normalizeCorpsSeatConfigs(
         const workspacePath = rawSeat.workspacePath?.trim() || fallbackWorkspacePath || '';
         const displayName = rawSeat.displayName?.trim();
         const customPrompt = rawSeat.customPrompt?.trim();
+        const sourceImageId = rawSeat.sourceImageId?.trim() || rawSeat.genomeId?.trim() || '';
 
         if (!machineId) {
             errors.push(`Seat ${index + 1} is missing machineId`);
@@ -277,13 +285,19 @@ function normalizeCorpsSeatConfigs(
         if (!workspacePath) {
             errors.push(`Seat ${index + 1} is missing workspacePath`);
         }
+        if (!sourceImageId) {
+            errors.push(`Seat ${index + 1} is missing sourceImageId/genomeId`);
+            return;
+        }
 
         seats.push({
             id: rawSeat.id?.trim() || undefined,
-            genomeId: rawSeat.genomeId.trim(),
+            genomeId: sourceImageId,
+            sourceImageId,
             genomeName: rawSeat.genomeName?.trim() || null,
             genomeNamespace: rawSeat.genomeNamespace?.trim() || null,
             genomeVersion: rawSeat.genomeVersion ?? null,
+            sourceImageVersion: rawSeat.sourceImageVersion ?? rawSeat.genomeVersion ?? null,
             genomeDisplayName: rawSeat.genomeDisplayName?.trim() || null,
             roleId: rawSeat.roleId.trim(),
             displayName,
@@ -316,7 +330,9 @@ function buildPlannedCorpsMembers(teamId: string, seats: CorpsSeatConfig[]): Pla
                 roleId: seat.roleId,
                 displayName: seat.quantity > 1 ? `${baseDisplayName} ${ordinal}` : baseDisplayName,
                 genomeId: seat.genomeId,
-                candidateId: `spec:${seat.genomeId}`,
+                sourceImageId: seat.sourceImageId,
+                sourceImageVersion: seat.sourceImageVersion ?? null,
+                candidateId: `spec:${seat.sourceImageId}`,
                 runtimeType: seat.runtimeType,
                 machineId: seat.machineId,
                 workspacePath: seat.workspacePath,
@@ -347,6 +363,9 @@ function buildManualCorpsBoard(params: {
         roleId: member.roleId,
         displayName: member.displayName,
         joinedAt: now,
+        sourceImageId: member.sourceImageId,
+        sourceImageVersion: member.sourceImageVersion ?? null,
+        specId: member.sourceImageId,
         runtimeType: member.runtimeType,
         machineId: member.machineId,
         workspacePath: member.workspacePath,
@@ -379,6 +398,8 @@ function buildManualCorpsBoard(params: {
         createdAt: now,
         seats: params.seats.map((seat) => ({
             ...(seat.id ? { id: seat.id } : {}),
+            sourceImageId: seat.sourceImageId,
+            ...(seat.sourceImageVersion ? { sourceImageVersion: seat.sourceImageVersion } : {}),
             genomeId: seat.genomeId,
             ...(seat.genomeName ? { genomeName: seat.genomeName } : {}),
             ...(seat.genomeNamespace ? { genomeNamespace: seat.genomeNamespace } : {}),
@@ -472,6 +493,8 @@ export function teamManagementRoutes(app: Fastify) {
                         roleId: z.string(),
                         displayName: z.string(),
                         genomeId: z.string(),
+                        sourceImageId: z.string(),
+                        sourceImageVersion: z.number().nullable().optional(),
                         candidateId: z.string(),
                         runtimeType: z.enum(['claude', 'codex']),
                         machineId: z.string(),
@@ -501,6 +524,8 @@ export function teamManagementRoutes(app: Fastify) {
                         roleId: z.string(),
                         displayName: z.string(),
                         genomeId: z.string(),
+                        sourceImageId: z.string(),
+                        sourceImageVersion: z.number().nullable().optional(),
                         candidateId: z.string(),
                         runtimeType: z.enum(['claude', 'codex']),
                         machineId: z.string(),
@@ -747,13 +772,20 @@ export function teamManagementRoutes(app: Fastify) {
                 candidateId: z.string().optional(),
                 roleId: z.string(),
                 displayName: z.string().optional(),
+                sourceImageId: z.string().optional(),
+                sourceImageVersion: z.number().int().positive().nullable().optional(),
                 specId: z.string().optional(),
+                // Legacy aliases (corps seat callers)
+                genomeId: z.string().optional(),
+                genomeVersion: z.number().int().positive().nullable().optional(),
                 customPrompt: z.string().optional(),
                 parentSessionId: z.string().optional(),
                 executionPlane: z.string().optional(),
                 runtimeType: z.string().optional(),
                 machineId: z.string().optional(),
                 workspacePath: z.string().optional(),
+                spawnError: z.string().optional(),
+                lifecycle: AgentLifecycleSchema.optional(),
                 authorities: z.array(z.string()).optional(),
                 teamOverlay: z.record(z.string(), z.unknown()).optional()
             })
@@ -761,26 +793,36 @@ export function teamManagementRoutes(app: Fastify) {
     }, async (request, reply) => {
         const userId = request.userId;
         const { teamId } = request.params as { teamId: string };
-        const { memberId, sessionId, sessionTag, candidateId, roleId, displayName, specId, customPrompt, parentSessionId, executionPlane, runtimeType, machineId, workspacePath, authorities, teamOverlay } = request.body as {
+        const { memberId, sessionId, sessionTag, candidateId, roleId, displayName, sourceImageId: rawSourceImageId, sourceImageVersion: rawSourceImageVersion, specId, genomeId, genomeVersion, customPrompt, parentSessionId, executionPlane, runtimeType, machineId, workspacePath, spawnError, lifecycle, authorities, teamOverlay } = request.body as {
             memberId?: string;
             sessionId: string;
             sessionTag?: string;
             candidateId?: string;
             roleId: string;
             displayName?: string;
+            sourceImageId?: string;
+            sourceImageVersion?: number | null;
             specId?: string;
+            genomeId?: string;
+            genomeVersion?: number | null;
             customPrompt?: string;
             parentSessionId?: string;
             executionPlane?: string;
             runtimeType?: string;
             machineId?: string;
             workspacePath?: string;
+            spawnError?: string;
+            lifecycle?: AgentLifecycle;
             authorities?: string[];
             teamOverlay?: Record<string, unknown>;
         };
 
+        // Normalize: sourceImageId is canonical, accept legacy aliases
+        const sourceImageId = rawSourceImageId ?? genomeId ?? specId;
+        const sourceImageVersion = rawSourceImageVersion ?? genomeVersion ?? null;
+
         try {
-            const result = await addTeamMember(userId, teamId, memberId, sessionId, sessionTag, candidateId, roleId, displayName, specId, customPrompt, parentSessionId, executionPlane, runtimeType, machineId, workspacePath, authorities, teamOverlay);
+            const result = await addTeamMember(userId, teamId, memberId, sessionId, sessionTag, candidateId, roleId, displayName, sourceImageId, sourceImageVersion, specId, customPrompt, parentSessionId, executionPlane, runtimeType, machineId, workspacePath, spawnError, lifecycle, authorities, teamOverlay);
             return reply.send(result);
         } catch (error: any) {
             if (error.message === 'Team not found') {
@@ -1097,6 +1139,8 @@ async function addTeamMember(
     candidateId: string | undefined,
     roleId: string,
     displayName?: string,
+    sourceImageId?: string,
+    sourceImageVersion?: number | null,
     specId?: string,
     customPrompt?: string,
     parentSessionId?: string,
@@ -1104,6 +1148,8 @@ async function addTeamMember(
     runtimeType?: string,
     machineId?: string,
     workspacePath?: string,
+    spawnError?: string,
+    lifecycle?: AgentLifecycle,
     authorities?: string[],
     teamOverlay?: Record<string, unknown>
 ): Promise<{ success: boolean; member: any }> {
@@ -1122,6 +1168,11 @@ async function addTeamMember(
         board.team.members = [];
     }
 
+    const resolvedSourceImageId = sourceImageId ?? specId;
+    const resolvedSourceImageVersion = sourceImageVersion ?? null;
+    const resolvedCandidateId = candidateId ?? (resolvedSourceImageId ? `spec:${resolvedSourceImageId}` : undefined);
+    const normalizedLifecycle = normalizeAgentLifecycle(lifecycle);
+
     // Check if already exists
     const existing = board.team.members.find((m: any) => {
         if (memberId && m.memberId) {
@@ -1139,8 +1190,10 @@ async function addTeamMember(
             existing.roleId !== roleId ||
             (memberId !== undefined && existing.memberId !== memberId) ||
             (sessionTag !== undefined && existing.sessionTag !== sessionTag) ||
-            (candidateId !== undefined && existing.candidateId !== candidateId) ||
+            (resolvedCandidateId !== undefined && existing.candidateId !== resolvedCandidateId) ||
             (displayName && existing.displayName !== displayName) ||
+            (resolvedSourceImageId !== undefined && existing.sourceImageId !== resolvedSourceImageId) ||
+            (sourceImageVersion !== undefined && (existing.sourceImageVersion ?? null) !== resolvedSourceImageVersion) ||
             (specId !== undefined && existing.specId !== specId) ||
             (customPrompt !== undefined && existing.customPrompt !== customPrompt) ||
             (parentSessionId !== undefined && existing.parentSessionId !== parentSessionId) ||
@@ -1148,6 +1201,8 @@ async function addTeamMember(
             (runtimeType !== undefined && existing.runtimeType !== runtimeType) ||
             (machineId !== undefined && existing.machineId !== machineId) ||
             (workspacePath !== undefined && existing.workspacePath !== workspacePath) ||
+            (spawnError !== undefined && existing.spawnError !== spawnError) ||
+            (normalizedLifecycle !== null && JSON.stringify(existing.lifecycle ?? null) !== JSON.stringify(normalizedLifecycle)) ||
             (authorities !== undefined && JSON.stringify(existing.authorities ?? []) !== JSON.stringify(authorities)) ||
             (teamOverlay !== undefined && JSON.stringify(existing.teamOverlay ?? null) !== JSON.stringify(teamOverlay));
 
@@ -1159,15 +1214,27 @@ async function addTeamMember(
         if (memberId !== undefined) existing.memberId = memberId;
         existing.roleId = roleId;
         if (sessionTag !== undefined) existing.sessionTag = sessionTag;
-        if (candidateId !== undefined) existing.candidateId = candidateId;
+        if (resolvedCandidateId !== undefined) existing.candidateId = resolvedCandidateId;
         existing.displayName = displayName || existing.displayName;
-        if (specId !== undefined) existing.specId = specId;
+        if (resolvedSourceImageId !== undefined) {
+            existing.sourceImageId = resolvedSourceImageId;
+            // Compat: mirror-write legacy fields
+            existing.specId = resolvedSourceImageId;
+            existing.genomeId = resolvedSourceImageId;
+        }
+        if (sourceImageVersion !== undefined) {
+            existing.sourceImageVersion = resolvedSourceImageVersion;
+            // Compat: mirror-write legacy field
+            existing.genomeVersion = resolvedSourceImageVersion;
+        }
         if (customPrompt !== undefined) existing.customPrompt = customPrompt;
         if (parentSessionId !== undefined) existing.parentSessionId = parentSessionId;
         if (executionPlane !== undefined) existing.executionPlane = executionPlane;
         if (runtimeType !== undefined) existing.runtimeType = runtimeType;
         if (machineId !== undefined) existing.machineId = machineId;
         if (workspacePath !== undefined) existing.workspacePath = workspacePath;
+        if (spawnError !== undefined) existing.spawnError = spawnError;
+        if (normalizedLifecycle !== null) existing.lifecycle = normalizedLifecycle;
         if (authorities !== undefined) existing.authorities = authorities;
         if (teamOverlay !== undefined) existing.teamOverlay = teamOverlay;
     } else {
@@ -1175,18 +1242,30 @@ async function addTeamMember(
             ...(memberId !== undefined && { memberId }),
             sessionId,
             ...(sessionTag !== undefined && { sessionTag }),
-            ...(candidateId !== undefined && { candidateId }),
+            ...(resolvedCandidateId !== undefined && { candidateId: resolvedCandidateId }),
             roleId,
             displayName: displayName || `Agent ${roleId}`,
             focusAreas: [],
             joinedAt: Date.now(),
-            ...(specId !== undefined && { specId }),
+            ...(resolvedSourceImageId !== undefined && {
+                sourceImageId: resolvedSourceImageId,
+                // Compat: mirror-write legacy fields
+                specId: resolvedSourceImageId,
+                genomeId: resolvedSourceImageId,
+            }),
+            ...(sourceImageVersion !== undefined && {
+                sourceImageVersion: resolvedSourceImageVersion,
+                // Compat: mirror-write legacy field
+                genomeVersion: resolvedSourceImageVersion,
+            }),
             ...(customPrompt !== undefined && { customPrompt }),
             ...(parentSessionId !== undefined && { parentSessionId }),
             ...(executionPlane !== undefined && { executionPlane }),
             ...(runtimeType !== undefined && { runtimeType }),
             ...(machineId !== undefined && { machineId }),
             ...(workspacePath !== undefined && { workspacePath }),
+            ...(spawnError !== undefined && { spawnError }),
+            ...(normalizedLifecycle !== null && { lifecycle: normalizedLifecycle }),
             ...(authorities !== undefined && { authorities }),
             ...(teamOverlay !== undefined && { teamOverlay })
         });
