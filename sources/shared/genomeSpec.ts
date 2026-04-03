@@ -31,6 +31,8 @@ export interface AgentImage {
     modelId?: string;
     fallbackModelId?: string;
     modelProvider?: 'anthropic' | 'zhipu' | 'openai' | 'local';
+    preferredModel?: string;
+    modelScores?: Record<string, number>;
 
     // Tier 3 — tool access
     allowedTools?: string[];
@@ -43,10 +45,16 @@ export interface AgentImage {
     executionPlane?: 'mainline' | 'bypass';
     maxTurns?: number;
     authorities?: string[];
+    contextInjections?: Array<{
+        trigger: 'on_join' | 'per_tool_call' | 'on_context_threshold' | 'on_resume';
+        threshold?: number;
+        content: string;
+    }>;
 
     // Tier 6 — team routing
     teamRole?: string;
     capabilities?: string[];
+    handoffProtocol?: string[];
 
     // Tier 7 — messaging / behavior DNA
     messaging?: {
@@ -59,10 +67,86 @@ export interface AgentImage {
         onBlocked?: 'report' | 'escalate' | 'retry';
         canSpawnAgents?: boolean;
         requireExplicitAssignment?: boolean;
+        lifecycle?: 'single-shot' | 'persistent' | 'on-demand';
+        autoRetireAfterComplete?: boolean;
+    };
+
+    // Tier 7.5 — memory / operations / governance
+    memory?: {
+        type?: 'session' | 'persistent' | 'shared';
+        learnings?: string[];
+        iterationGuide?: Record<string, unknown>;
+        knowledgeBase?: string[];
+    };
+    scopeOfResponsibility?: {
+        ownedPaths?: string[];
+        forbiddenPaths?: string[];
+        outOfScope?: string[];
+    };
+    resume?: Record<string, unknown>;
+    operations?: {
+        commonPatterns?: string[];
+        recentChanges?: string[];
+        runtimeConfig?: string;
+    };
+    compatibility?: {
+        worksWellWith?: string[];
+        requiredMcpServers?: string[];
+        requiredEnvVars?: string[];
+        minContextTokens?: number;
+    };
+    validation?: {
+        smokeTest?: {
+            requiredTools?: string[];
+            requiredFiles?: string[];
+            healthChecks?: string[];
+        };
+        minVerifiedScore?: number;
+        minEvaluations?: number;
+    };
+    resourceBudget?: {
+        estimatedTokensPerTask?: number;
+        contextWindowSize?: 'small' | 'medium' | 'large';
+        concurrencyCapable?: boolean;
+    };
+    costProfile?: {
+        typicalTokens?: number;
+        contextWindowReq?: number;
     };
 
     // Tier 10 — lifecycle
     lifecycle?: 'experimental' | 'active' | 'deprecated';
+    runtimeType?: 'claude' | 'codex' | 'open-code';
+    trigger?: {
+        mode?: 'mention' | 'task-assign' | 'scheduled' | 'event';
+        conditions?: string[];
+    };
+    provenance?: {
+        parentId?: string;
+        mutationNote?: string;
+        origin?: 'original' | 'forked' | 'mutated';
+    };
+    evalCriteria?: string[];
+    schedule?: {
+        interval?: string;
+        maxConcurrent?: number;
+        enabled?: boolean;
+    };
+    onMessage?: {
+        patterns?: string[];
+        senderRoles?: string[];
+        priority?: 'normal' | 'high' | 'urgent';
+    };
+    onTaskChange?: {
+        events?: Array<'created' | 'assigned' | 'blocked' | 'review' | 'completed'>;
+        assignedOnly?: boolean;
+    };
+    hooks?: {
+        preToolUse?: Array<{ matcher: string; command: string; description?: string }>;
+        postToolUse?: Array<{ matcher: string; command: string; description?: string }>;
+        stop?: Array<{ command: string; description?: string }>;
+    };
+    skills?: string[];
 
     // Canonical agent.json payload blocks that happy-server passes through.
     workspace?: Record<string, unknown>;
