@@ -54,9 +54,9 @@ export function buildImageRefFields(
 
     return {
         sourceImageId: imageRef.id,
-        ...(imageRef.version !== null ? { sourceImageVersion: imageRef.version } : {}),
+        sourceImageVersion: imageRef.version,
         ...(opts?.includeLegacyGenome ? { genomeId: imageRef.id } : {}),
-        ...(opts?.includeLegacyGenome && imageRef.version !== null ? { genomeVersion: imageRef.version } : {}),
+        ...(opts?.includeLegacyGenome ? { genomeVersion: imageRef.version } : {}),
         ...(opts?.includeLegacySpec ? { specId: imageRef.id } : {}),
     };
 }

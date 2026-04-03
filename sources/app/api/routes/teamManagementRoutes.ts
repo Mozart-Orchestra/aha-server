@@ -13,6 +13,7 @@ import {
     serializeTeamBoard,
     summarizeTeamArtifact,
 } from "@/app/team/teamArtifacts";
+import { buildImageRefFields, resolveCandidateId, resolveImageRef } from "@/app/team/imageRef";
 import { AgentLifecycle, AgentLifecycleSchema, normalizeAgentLifecycle } from "@/app/team/spawnState";
 import { getTeamOverviewSnapshot, invalidateTeamOverviewSnapshot } from "@/app/team/teamOverview";
 import { activityCache } from "@/app/presence/sessionCache";
@@ -277,7 +278,13 @@ function normalizeCorpsSeatConfigs(
         const workspacePath = rawSeat.workspacePath?.trim() || fallbackWorkspacePath || '';
         const displayName = rawSeat.displayName?.trim();
         const customPrompt = rawSeat.customPrompt?.trim();
-        const sourceImageId = rawSeat.sourceImageId?.trim() || rawSeat.genomeId?.trim() || '';
+        const imageRef = resolveImageRef({
+            sourceImageId: rawSeat.sourceImageId?.trim() || null,
+            sourceImageVersion: rawSeat.sourceImageVersion ?? null,
+            genomeId: rawSeat.genomeId?.trim() || null,
+            genomeVersion: rawSeat.genomeVersion ?? null,
+        });
+        const sourceImageId = imageRef?.id ?? '';
 
         if (!machineId) {
             errors.push(`Seat ${index + 1} is missing machineId`);
@@ -296,8 +303,8 @@ function normalizeCorpsSeatConfigs(
             sourceImageId,
             genomeName: rawSeat.genomeName?.trim() || null,
             genomeNamespace: rawSeat.genomeNamespace?.trim() || null,
-            genomeVersion: rawSeat.genomeVersion ?? null,
-            sourceImageVersion: rawSeat.sourceImageVersion ?? rawSeat.genomeVersion ?? null,
+            genomeVersion: imageRef?.version ?? null,
+            sourceImageVersion: imageRef?.version ?? null,
             genomeDisplayName: rawSeat.genomeDisplayName?.trim() || null,
             roleId: rawSeat.roleId.trim(),
             displayName,
@@ -324,15 +331,21 @@ function buildPlannedCorpsMembers(teamId: string, seats: CorpsSeatConfig[]): Pla
 
         for (let ordinal = 1; ordinal <= seat.quantity; ordinal += 1) {
             const memberId = seat.quantity > 1 ? `${baseMemberId}-${ordinal}` : baseMemberId;
+            const imageRef = resolveImageRef({
+                sourceImageId: seat.sourceImageId,
+                sourceImageVersion: seat.sourceImageVersion ?? null,
+                genomeId: seat.genomeId,
+                genomeVersion: seat.genomeVersion ?? null,
+            });
             members.push({
                 memberId,
                 sessionTag: `team:${teamId}:member:${memberId}`,
                 roleId: seat.roleId,
                 displayName: seat.quantity > 1 ? `${baseDisplayName} ${ordinal}` : baseDisplayName,
-                genomeId: seat.genomeId,
-                sourceImageId: seat.sourceImageId,
-                sourceImageVersion: seat.sourceImageVersion ?? null,
-                candidateId: `spec:${seat.sourceImageId}`,
+                genomeId: imageRef?.id ?? seat.genomeId,
+                sourceImageId: imageRef?.id ?? seat.sourceImageId,
+                sourceImageVersion: imageRef?.version ?? null,
+                candidateId: resolveCandidateId(imageRef) ?? `spec:${imageRef?.id ?? seat.sourceImageId}`,
                 runtimeType: seat.runtimeType,
                 machineId: seat.machineId,
                 workspacePath: seat.workspacePath,
@@ -356,6 +369,12 @@ function buildManualCorpsBoard(params: {
     const now = Date.now();
     const trimmedTarget = params.target?.trim();
     const plannedTeamMembers = params.plannedMembers.map((member) => ({
+        ...buildImageRefFields(resolveImageRef({
+            sourceImageId: member.sourceImageId,
+            sourceImageVersion: member.sourceImageVersion ?? null,
+            genomeId: member.genomeId,
+            specId: member.sourceImageId,
+        }), { includeLegacyGenome: true, includeLegacySpec: true }),
         memberId: member.memberId,
         sessionId: member.sessionTag,
         sessionTag: member.sessionTag,
@@ -363,9 +382,6 @@ function buildManualCorpsBoard(params: {
         roleId: member.roleId,
         displayName: member.displayName,
         joinedAt: now,
-        sourceImageId: member.sourceImageId,
-        sourceImageVersion: member.sourceImageVersion ?? null,
-        specId: member.sourceImageId,
         runtimeType: member.runtimeType,
         machineId: member.machineId,
         workspacePath: member.workspacePath,
@@ -398,12 +414,14 @@ function buildManualCorpsBoard(params: {
         createdAt: now,
         seats: params.seats.map((seat) => ({
             ...(seat.id ? { id: seat.id } : {}),
-            sourceImageId: seat.sourceImageId,
-            ...(seat.sourceImageVersion ? { sourceImageVersion: seat.sourceImageVersion } : {}),
-            genomeId: seat.genomeId,
+            ...buildImageRefFields(resolveImageRef({
+                sourceImageId: seat.sourceImageId,
+                sourceImageVersion: seat.sourceImageVersion ?? null,
+                genomeId: seat.genomeId,
+                genomeVersion: seat.genomeVersion ?? null,
+            }), { includeLegacyGenome: true }),
             ...(seat.genomeName ? { genomeName: seat.genomeName } : {}),
             ...(seat.genomeNamespace ? { genomeNamespace: seat.genomeNamespace } : {}),
-            ...(seat.genomeVersion ? { genomeVersion: seat.genomeVersion } : {}),
             ...(seat.genomeDisplayName ? { genomeDisplayName: seat.genomeDisplayName } : {}),
             roleId: seat.roleId,
             displayName: seat.displayName || seat.genomeDisplayName || seat.genomeName || seat.roleId,
@@ -1168,9 +1186,13 @@ async function addTeamMember(
         board.team.members = [];
     }
 
-    const resolvedSourceImageId = sourceImageId ?? specId;
-    const resolvedSourceImageVersion = sourceImageVersion ?? null;
-    const resolvedCandidateId = candidateId ?? (resolvedSourceImageId ? `spec:${resolvedSourceImageId}` : undefined);
+    const imageRef = resolveImageRef({
+        sourceImageId,
+        sourceImageVersion,
+        specId,
+    });
+    const resolvedCandidateId = resolveCandidateId(imageRef, candidateId);
+    const resolvedImageFields = buildImageRefFields(imageRef, { includeLegacyGenome: true, includeLegacySpec: true });
     const normalizedLifecycle = normalizeAgentLifecycle(lifecycle);
 
     // Check if already exists
@@ -1192,9 +1214,7 @@ async function addTeamMember(
             (sessionTag !== undefined && existing.sessionTag !== sessionTag) ||
             (resolvedCandidateId !== undefined && existing.candidateId !== resolvedCandidateId) ||
             (displayName && existing.displayName !== displayName) ||
-            (resolvedSourceImageId !== undefined && existing.sourceImageId !== resolvedSourceImageId) ||
-            (sourceImageVersion !== undefined && (existing.sourceImageVersion ?? null) !== resolvedSourceImageVersion) ||
-            (specId !== undefined && existing.specId !== specId) ||
+            Object.entries(resolvedImageFields).some(([key, value]) => existing[key] !== value) ||
             (customPrompt !== undefined && existing.customPrompt !== customPrompt) ||
             (parentSessionId !== undefined && existing.parentSessionId !== parentSessionId) ||
             (executionPlane !== undefined && existing.executionPlane !== executionPlane) ||
@@ -1216,16 +1236,8 @@ async function addTeamMember(
         if (sessionTag !== undefined) existing.sessionTag = sessionTag;
         if (resolvedCandidateId !== undefined) existing.candidateId = resolvedCandidateId;
         existing.displayName = displayName || existing.displayName;
-        if (resolvedSourceImageId !== undefined) {
-            existing.sourceImageId = resolvedSourceImageId;
-            // Compat: mirror-write legacy fields
-            existing.specId = resolvedSourceImageId;
-            existing.genomeId = resolvedSourceImageId;
-        }
-        if (sourceImageVersion !== undefined) {
-            existing.sourceImageVersion = resolvedSourceImageVersion;
-            // Compat: mirror-write legacy field
-            existing.genomeVersion = resolvedSourceImageVersion;
+        if (Object.keys(resolvedImageFields).length > 0) {
+            Object.assign(existing, resolvedImageFields);
         }
         if (customPrompt !== undefined) existing.customPrompt = customPrompt;
         if (parentSessionId !== undefined) existing.parentSessionId = parentSessionId;
@@ -1247,17 +1259,7 @@ async function addTeamMember(
             displayName: displayName || `Agent ${roleId}`,
             focusAreas: [],
             joinedAt: Date.now(),
-            ...(resolvedSourceImageId !== undefined && {
-                sourceImageId: resolvedSourceImageId,
-                // Compat: mirror-write legacy fields
-                specId: resolvedSourceImageId,
-                genomeId: resolvedSourceImageId,
-            }),
-            ...(sourceImageVersion !== undefined && {
-                sourceImageVersion: resolvedSourceImageVersion,
-                // Compat: mirror-write legacy field
-                genomeVersion: resolvedSourceImageVersion,
-            }),
+            ...resolvedImageFields,
             ...(customPrompt !== undefined && { customPrompt }),
             ...(parentSessionId !== undefined && { parentSessionId }),
             ...(executionPlane !== undefined && { executionPlane }),
