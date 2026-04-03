@@ -614,6 +614,14 @@ describe('evolutionRoutes', () => {
         delete process.env.GENOME_HUB_PUBLISH_KEY;
         process.env.HUB_PUBLISH_KEY = 'shared-hub-key';
 
+        vi.mocked(axios.get).mockResolvedValue({
+            status: 200,
+            data: {
+                genome: {
+                    publisherId: 'user-1',
+                },
+            },
+        } as never);
         vi.mocked(axios.post).mockResolvedValue({
             status: 201,
             data: {
@@ -631,7 +639,7 @@ describe('evolutionRoutes', () => {
             const app = buildApp();
             const response = await app.inject({
                 method: 'POST',
-                url: '/v1/genomes/%40official/implementer/diff',
+                url: '/v1/genomes/%40user-1/implementer/diff',
                 payload: {
                     description: 'Refine task routing',
                     changes: [
@@ -649,16 +657,19 @@ describe('evolutionRoutes', () => {
                         },
                     ],
                     verdictRefs: ['verdict-1'],
-                    authorRole: 'supervisor',
+                    authorRole: 'forged-role',
+                    authorSession: 'forged-session',
                 },
             });
 
             expect(response.statusCode).toBe(201);
             expect(axios.post).toHaveBeenCalledWith(
-                expect.stringContaining('/genomes/%40official/implementer/diff'),
+                expect.stringContaining('/genomes/%40user-1/implementer/diff'),
                 expect.objectContaining({
                     description: 'Refine task routing',
                     verdictRefs: ['verdict-1'],
+                    authorRole: 'happy-server',
+                    authorSession: 'user-1',
                     changes: expect.arrayContaining([
                         expect.objectContaining({
                             type: 'kv',
@@ -708,6 +719,33 @@ describe('evolutionRoutes', () => {
                 process.env.GENOME_HUB_PUBLISH_KEY = previousGenomeHubPublishKey;
             }
         }
+    });
+
+    it('rejects genome diff proxy writes for hub lineages not owned by the caller', async () => {
+        vi.mocked(axios.get).mockResolvedValue({
+            status: 200,
+            data: {
+                genome: {
+                    publisherId: 'other-user',
+                },
+            },
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/genomes/%40foreign/reviewer/diff',
+            payload: {
+                description: 'Attempt unauthorized diff',
+                changes: [{ type: 'narrative', content: 'probe' }],
+            },
+        });
+
+        expect(response.statusCode).toBe(404);
+        expect(response.json()).toEqual({ error: 'Genome not found' });
+        expect(axios.post).not.toHaveBeenCalled();
+
+        await app.close();
     });
 
     it('proxies genome ledger queries to genome-hub with optional version filters', async () => {
@@ -847,6 +885,15 @@ describe('evolutionRoutes', () => {
                         { id: 'entity-diff-1', version: 7 },
                     ],
                 },
+            } as never)
+            .mockResolvedValueOnce({
+                status: 200,
+                data: {
+                    entity: {
+                        id: 'entity-1',
+                        publisherId: 'user-1',
+                    },
+                },
             } as never);
         vi.mocked(axios.post).mockResolvedValueOnce({
             status: 201,
@@ -862,19 +909,21 @@ describe('evolutionRoutes', () => {
             const app = buildApp();
             const entityResponse = await app.inject({
                 method: 'GET',
-                url: '/v1/entities/%40official/implementer',
+                url: '/v1/entities/%40user-1/implementer',
             });
             const diffsResponse = await app.inject({
                 method: 'GET',
-                url: '/v1/entities/%40official/implementer/diffs',
+                url: '/v1/entities/%40user-1/implementer/diffs',
             });
             const createDiffResponse = await app.inject({
                 method: 'POST',
-                url: '/v1/entities/%40official/implementer/diffs',
+                url: '/v1/entities/%40user-1/implementer/diffs',
                 payload: {
                     description: 'Apply structured entity diff',
                     changes: [{ type: 'narrative', content: 'Carry forward the diff ledger evidence.' }],
                     strategy: 'conservative',
+                    authorRole: 'forged-role',
+                    authorSession: 'forged-session',
                 },
             });
 
@@ -883,7 +932,7 @@ describe('evolutionRoutes', () => {
             expect(createDiffResponse.statusCode).toBe(201);
             expect(axios.get).toHaveBeenNthCalledWith(
                 1,
-                expect.stringContaining('/entities/%40official/implementer'),
+                expect.stringContaining('/entities/%40user-1/implementer'),
                 expect.objectContaining({
                     headers: expect.objectContaining({
                         Authorization: 'Bearer shared-hub-key',
@@ -892,7 +941,7 @@ describe('evolutionRoutes', () => {
             );
             expect(axios.get).toHaveBeenNthCalledWith(
                 2,
-                expect.stringContaining('/entities/%40official/implementer/diffs'),
+                expect.stringContaining('/entities/%40user-1/implementer/diffs'),
                 expect.objectContaining({
                     headers: expect.objectContaining({
                         Authorization: 'Bearer shared-hub-key',
@@ -900,9 +949,11 @@ describe('evolutionRoutes', () => {
                 }),
             );
             expect(axios.post).toHaveBeenCalledWith(
-                expect.stringContaining('/entities/%40official/implementer/diffs'),
+                expect.stringContaining('/entities/%40user-1/implementer/diffs'),
                 expect.objectContaining({
                     description: 'Apply structured entity diff',
+                    authorRole: 'happy-server',
+                    authorSession: 'user-1',
                 }),
                 expect.objectContaining({
                     headers: expect.objectContaining({
@@ -924,6 +975,195 @@ describe('evolutionRoutes', () => {
                 process.env.GENOME_HUB_PUBLISH_KEY = previousGenomeHubPublishKey;
             }
         }
+    });
+
+    it('rejects entity diff proxy writes for hub lineages not owned by the caller', async () => {
+        vi.mocked(axios.get).mockResolvedValueOnce({
+            status: 200,
+            data: {
+                entity: {
+                    id: 'entity-1',
+                    publisherId: 'other-user',
+                },
+            },
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/entities/%40foreign/implementer/diffs',
+            payload: {
+                description: 'Attempt unauthorized entity diff',
+                changes: [{ type: 'narrative', content: 'probe' }],
+            },
+        });
+
+        expect(response.statusCode).toBe(404);
+        expect(response.json()).toEqual({ error: 'Genome not found' });
+        expect(axios.post).not.toHaveBeenCalled();
+
+        await app.close();
+    });
+
+    it('proxies entity package diff routes to genome-hub', async () => {
+        const previousHubPublishKey = process.env.HUB_PUBLISH_KEY;
+        const previousGenomeHubPublishKey = process.env.GENOME_HUB_PUBLISH_KEY;
+        delete process.env.GENOME_HUB_PUBLISH_KEY;
+        process.env.HUB_PUBLISH_KEY = 'shared-hub-key';
+
+        vi.mocked(axios.post).mockResolvedValueOnce({
+            status: 201,
+            data: {
+                entity: {
+                    id: 'entity-1',
+                    version: 8,
+                    name: 'implementer',
+                },
+                diff: {
+                    id: 'entity-diff-3',
+                },
+                package: {
+                    kind: 'aha.agent.package.v1',
+                    sourceEntityId: 'entity-1',
+                    manifest: {
+                        kind: 'aha.agent.v1',
+                        identity: {
+                            ref: '@official/implementer',
+                            version: 8,
+                            namespace: '@official',
+                            name: 'implementer',
+                            source: 'hub',
+                        },
+                        genome: {
+                            behavior: {
+                                onIdle: 'self-assign',
+                            },
+                        },
+                    },
+                },
+            },
+        } as never);
+
+        try {
+            vi.mocked(db.genome.findFirst).mockResolvedValueOnce({
+                id: 'local-genome-1',
+                accountId: 'user-1',
+                hubGenomeId: 'entity-1',
+                deletedAt: null,
+            } as never);
+
+            const app = buildApp();
+            const response = await app.inject({
+                method: 'POST',
+                url: '/v1/genomes/id/entity-1/package-diffs',
+                payload: {
+                    description: 'Promote proactive idle behavior',
+                    baseVersion: 7,
+                    strategy: 'moderate',
+                    authorRole: 'forged-role',
+                    authorSession: 'forged-session',
+                    ops: [
+                        {
+                            type: 'manifest_set',
+                            path: 'behavior.onIdle',
+                            value: 'self-assign',
+                        },
+                    ],
+                },
+            });
+
+            expect(response.statusCode).toBe(201);
+            expect(axios.post).toHaveBeenCalledWith(
+                expect.stringContaining('/entities/id/entity-1/package-diffs'),
+                expect.objectContaining({
+                    description: 'Promote proactive idle behavior',
+                    baseVersion: 7,
+                    strategy: 'moderate',
+                    authorRole: 'happy-server',
+                    authorSession: 'user-1',
+                    ops: [
+                        expect.objectContaining({
+                            type: 'manifest_set',
+                            path: 'behavior.onIdle',
+                            value: 'self-assign',
+                        }),
+                    ],
+                }),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(response.json()).toEqual({
+                entity: {
+                    id: 'entity-1',
+                    version: 8,
+                    name: 'implementer',
+                },
+                diff: {
+                    id: 'entity-diff-3',
+                },
+                package: {
+                    kind: 'aha.agent.package.v1',
+                    sourceEntityId: 'entity-1',
+                    manifest: {
+                        kind: 'aha.agent.v1',
+                        identity: {
+                            ref: '@official/implementer',
+                            version: 8,
+                            namespace: '@official',
+                            name: 'implementer',
+                            source: 'hub',
+                        },
+                        genome: {
+                            behavior: {
+                                onIdle: 'self-assign',
+                            },
+                        },
+                    },
+                },
+            });
+
+            await app.close();
+        } finally {
+            if (previousHubPublishKey === undefined) {
+                delete process.env.HUB_PUBLISH_KEY;
+            } else {
+                process.env.HUB_PUBLISH_KEY = previousHubPublishKey;
+            }
+            if (previousGenomeHubPublishKey === undefined) {
+                delete process.env.GENOME_HUB_PUBLISH_KEY;
+            } else {
+                process.env.GENOME_HUB_PUBLISH_KEY = previousGenomeHubPublishKey;
+            }
+        }
+    });
+
+    it('rejects package diffs for genomes the caller does not own', async () => {
+        vi.mocked(db.genome.findFirst).mockResolvedValueOnce(null as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/genomes/id/entity-1/package-diffs',
+            payload: {
+                description: 'Attempt unauthorized package mutation',
+                ops: [
+                    {
+                        type: 'manifest_set',
+                        path: 'behavior.onIdle',
+                        value: 'self-assign',
+                    },
+                ],
+            },
+        });
+
+        expect(response.statusCode).toBe(404);
+        expect(response.json()).toEqual({ error: 'Genome not found' });
+        expect(axios.post).not.toHaveBeenCalled();
+
+        await app.close();
     });
 
     it('proxies entity trial, verdict, and materialization routes to genome-hub', async () => {
@@ -1217,6 +1457,15 @@ describe('evolutionRoutes', () => {
             .mockResolvedValueOnce({
                 status: 200,
                 data: {
+                    entity: {
+                        id: 'entity-1',
+                        publisherId: 'user-1',
+                    },
+                },
+            } as never)
+            .mockResolvedValueOnce({
+                status: 200,
+                data: {
                     trials: [{ id: 'trial-1' }],
                 },
             } as never)
@@ -1232,16 +1481,18 @@ describe('evolutionRoutes', () => {
 
             const diffResponse = await app.inject({
                 method: 'POST',
-                url: '/v1/entities/%40official/implementer/diffs',
+                url: '/v1/entities/%40user-1/implementer/diffs',
                 payload: {
                     description: 'Add stricter completion audit',
                     changes: [{ type: 'kv', path: 'policy.audit', to: true }],
                     strategy: 'moderate',
+                    authorRole: 'forged-role',
+                    authorSession: 'forged-session',
                 },
             });
             const trialCreateResponse = await app.inject({
                 method: 'POST',
-                url: '/v1/entities/%40official/implementer/trials',
+                url: '/v1/entities/%40user-1/implementer/trials',
                 payload: {
                     teamId: 'team-1',
                     contextNarrative: 'Run a focused repair loop',
@@ -1288,10 +1539,12 @@ describe('evolutionRoutes', () => {
 
             expect(axios.post).toHaveBeenNthCalledWith(
                 1,
-                expect.stringContaining('/entities/%40official/implementer/diffs'),
+                expect.stringContaining('/entities/%40user-1/implementer/diffs'),
                 expect.objectContaining({
                     description: 'Add stricter completion audit',
                     strategy: 'moderate',
+                    authorRole: 'happy-server',
+                    authorSession: 'user-1',
                 }),
                 expect.objectContaining({
                     headers: expect.objectContaining({
@@ -1301,7 +1554,7 @@ describe('evolutionRoutes', () => {
             );
             expect(axios.post).toHaveBeenNthCalledWith(
                 2,
-                expect.stringContaining('/entities/%40official/implementer/trials'),
+                expect.stringContaining('/entities/%40user-1/implementer/trials'),
                 expect.objectContaining({
                     teamId: 'team-1',
                 }),
@@ -1313,6 +1566,14 @@ describe('evolutionRoutes', () => {
             );
             expect(axios.get).toHaveBeenNthCalledWith(
                 1,
+                expect.stringContaining('/entities/%40user-1/implementer'),
+                expect.objectContaining({
+                    timeout: 10_000,
+                    validateStatus: expect.any(Function),
+                }),
+            );
+            expect(axios.get).toHaveBeenNthCalledWith(
+                2,
                 expect.stringContaining('/entities/id/entity-1/trials'),
                 expect.objectContaining({
                     headers: expect.objectContaining({
@@ -1346,7 +1607,7 @@ describe('evolutionRoutes', () => {
                 }),
             );
             expect(axios.get).toHaveBeenNthCalledWith(
-                2,
+                3,
                 expect.stringContaining('/trials/trial-1/verdicts'),
                 expect.objectContaining({
                     headers: expect.objectContaining({
@@ -1386,6 +1647,14 @@ describe('evolutionRoutes', () => {
         delete process.env.GENOME_HUB_PUBLISH_KEY;
         process.env.HUB_PUBLISH_KEY = 'shared-hub-key';
 
+        vi.mocked(axios.get).mockResolvedValue({
+            status: 200,
+            data: {
+                genome: {
+                    publisherId: 'user-1',
+                },
+            },
+        } as never);
         vi.mocked(axios.post).mockResolvedValue({
             status: 201,
             data: {
@@ -1400,7 +1669,7 @@ describe('evolutionRoutes', () => {
             const app = buildApp();
             const response = await app.inject({
                 method: 'POST',
-                url: '/v1/genomes/%40official/supervisor/promote',
+                url: '/v1/genomes/%40user-1/supervisor/promote',
                 payload: {
                     spec: '{"displayName":"Supervisor"}',
                     minAvgScore: 60,
@@ -1410,11 +1679,12 @@ describe('evolutionRoutes', () => {
 
             expect(response.statusCode).toBe(201);
             expect(axios.post).toHaveBeenCalledWith(
-                expect.stringContaining('/genomes/%40official/supervisor/promote'),
+                expect.stringContaining('/genomes/%40user-1/supervisor/promote'),
                 expect.objectContaining({
                     spec: '{"displayName":"Supervisor"}',
                     minAvgScore: 60,
                     isPublic: true,
+                    publisherId: 'user-1',
                 }),
                 expect.objectContaining({
                     headers: expect.objectContaining({
@@ -1442,6 +1712,222 @@ describe('evolutionRoutes', () => {
                 process.env.GENOME_HUB_PUBLISH_KEY = previousGenomeHubPublishKey;
             }
         }
+    });
+
+    it('rejects genome promotion proxy writes for hub lineages not owned by the caller', async () => {
+        vi.mocked(axios.get).mockResolvedValue({
+            status: 200,
+            data: {
+                genome: {
+                    publisherId: 'other-user',
+                },
+            },
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/genomes/%40foreign/reviewer/promote',
+            payload: {
+                spec: '{"displayName":"Reviewer"}',
+                isPublic: true,
+            },
+        });
+
+        expect(response.statusCode).toBe(404);
+        expect(response.json()).toEqual({ error: 'Genome not found' });
+        expect(axios.post).not.toHaveBeenCalled();
+
+        await app.close();
+    });
+
+    it('proxies genome forks to genome-hub with publisherId bound to the authenticated user', async () => {
+        const previousHubPublishKey = process.env.HUB_PUBLISH_KEY;
+        const previousGenomeHubPublishKey = process.env.GENOME_HUB_PUBLISH_KEY;
+        delete process.env.GENOME_HUB_PUBLISH_KEY;
+        process.env.HUB_PUBLISH_KEY = 'shared-hub-key';
+
+        vi.mocked(axios.post).mockResolvedValue({
+            status: 201,
+            data: {
+                genome: {
+                    id: 'forked-genome-1',
+                    namespace: '@user-1',
+                    name: 'builder-copy',
+                    version: 1,
+                },
+            },
+        } as never);
+
+        try {
+            const app = buildApp();
+            const response = await app.inject({
+                method: 'POST',
+                url: '/v1/genomes/id/hub-genome-1/fork',
+                payload: {
+                    namespace: '@user-1',
+                    name: 'builder-copy',
+                    version: 1,
+                    description: 'Forked builder',
+                    publisherId: 'forged-user',
+                },
+            });
+
+            expect(response.statusCode).toBe(201);
+            expect(axios.post).toHaveBeenCalledWith(
+                expect.stringContaining('/genomes/id/hub-genome-1/fork'),
+                expect.objectContaining({
+                    namespace: '@user-1',
+                    name: 'builder-copy',
+                    version: 1,
+                    description: 'Forked builder',
+                    publisherId: 'user-1',
+                }),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(response.json()).toEqual({
+                genome: {
+                    id: 'forked-genome-1',
+                    namespace: '@user-1',
+                    name: 'builder-copy',
+                    version: 1,
+                },
+            });
+
+            await app.close();
+        } finally {
+            if (previousHubPublishKey === undefined) {
+                delete process.env.HUB_PUBLISH_KEY;
+            } else {
+                process.env.HUB_PUBLISH_KEY = previousHubPublishKey;
+            }
+            if (previousGenomeHubPublishKey === undefined) {
+                delete process.env.GENOME_HUB_PUBLISH_KEY;
+            } else {
+                process.env.GENOME_HUB_PUBLISH_KEY = previousGenomeHubPublishKey;
+            }
+        }
+    });
+
+    it('rejects fork proxy writes into protected namespaces', async () => {
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/genomes/id/hub-genome-1/fork',
+            payload: {
+                namespace: '@official',
+                name: 'builder-copy',
+                version: 1,
+            },
+        });
+
+        expect(response.statusCode).toBe(403);
+        expect(response.json()).toEqual({ error: 'Namespace not allowed' });
+        expect(axios.post).not.toHaveBeenCalled();
+
+        await app.close();
+    });
+
+    it('proxies hub genome creation with publisherId bound to the authenticated user', async () => {
+        const previousHubPublishKey = process.env.HUB_PUBLISH_KEY;
+        const previousGenomeHubPublishKey = process.env.GENOME_HUB_PUBLISH_KEY;
+        delete process.env.GENOME_HUB_PUBLISH_KEY;
+        process.env.HUB_PUBLISH_KEY = 'shared-hub-key';
+
+        vi.mocked(axios.post).mockResolvedValue({
+            status: 201,
+            data: {
+                genome: {
+                    id: 'hub-genome-9',
+                    namespace: '@user-1',
+                    name: 'builder',
+                    version: 3,
+                },
+            },
+        } as never);
+
+        try {
+            const app = buildApp();
+            const response = await app.inject({
+                method: 'POST',
+                url: '/v1/genomes/hub-create',
+                payload: {
+                    namespace: '@user-1',
+                    name: 'builder',
+                    version: 3,
+                    description: 'Builder genome',
+                    spec: '{"displayName":"Builder","version":1}',
+                    isPublic: false,
+                    category: 'development',
+                    tags: '["builder"]',
+                },
+            });
+
+            expect(response.statusCode).toBe(201);
+            expect(axios.post).toHaveBeenCalledWith(
+                expect.stringContaining('/genomes'),
+                expect.objectContaining({
+                    namespace: '@user-1',
+                    name: 'builder',
+                    version: 3,
+                    description: 'Builder genome',
+                    spec: '{"displayName":"Builder","version":3}',
+                    isPublic: false,
+                    category: 'development',
+                    tags: '["builder"]',
+                    publisherId: 'user-1',
+                }),
+                expect.objectContaining({
+                    headers: expect.objectContaining({
+                        Authorization: 'Bearer shared-hub-key',
+                    }),
+                }),
+            );
+            expect(response.json()).toEqual({
+                genome: {
+                    id: 'hub-genome-9',
+                    namespace: '@user-1',
+                    name: 'builder',
+                    version: 3,
+                },
+            });
+
+            await app.close();
+        } finally {
+            if (previousHubPublishKey === undefined) {
+                delete process.env.HUB_PUBLISH_KEY;
+            } else {
+                process.env.HUB_PUBLISH_KEY = previousHubPublishKey;
+            }
+            if (previousGenomeHubPublishKey === undefined) {
+                delete process.env.GENOME_HUB_PUBLISH_KEY;
+            } else {
+                process.env.GENOME_HUB_PUBLISH_KEY = previousGenomeHubPublishKey;
+            }
+        }
+    });
+
+    it('rejects hub genome creation into protected namespaces', async () => {
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/genomes/hub-create',
+            payload: {
+                namespace: '@official',
+                name: 'builder',
+                spec: '{"displayName":"Builder"}',
+            },
+        });
+
+        expect(response.statusCode).toBe(403);
+        expect(response.json()).toEqual({ error: 'Namespace not allowed' });
+        expect(axios.post).not.toHaveBeenCalled();
+
+        await app.close();
     });
 
     it('marks the local genome public after successful publish and stores hubGenomeId', async () => {
@@ -1497,6 +1983,7 @@ describe('evolutionRoutes', () => {
                 version: 2,
                 spec: '{"role":"builder","version":2}',
                 tags: '["builder"]',
+                publisherId: 'user-1',
             }),
             expect.any(Object),
         );
@@ -1526,6 +2013,32 @@ describe('evolutionRoutes', () => {
             role: 'builder',
             version: 2,
         });
+
+        await app.close();
+    });
+
+    it('rejects publish proxy writes into protected namespaces', async () => {
+        vi.mocked(db.genome.findFirst).mockResolvedValue({
+            id: 'genome-1',
+            accountId: 'user-1',
+            name: 'builder',
+            namespace: '@official',
+            version: 1,
+            description: 'Builder genome',
+            spec: '{"role":"builder","version":1}',
+            deletedAt: null,
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/genomes/genome-1/publish',
+            payload: {},
+        });
+
+        expect(response.statusCode).toBe(403);
+        expect(response.json()).toEqual({ error: 'Namespace not allowed' });
+        expect(axios.post).not.toHaveBeenCalled();
 
         await app.close();
     });

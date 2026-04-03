@@ -19,6 +19,7 @@ const mocked = vi.hoisted(() => ({
     addTaskComment: vi.fn(),
     invalidateTeamOverviewSnapshot: vi.fn(),
     observeSessionActivity: vi.fn(),
+    getAccessibleTeamArtifact: vi.fn(),
 }));
 
 vi.mock('@/app/task/taskOrchestrator', () => ({
@@ -44,6 +45,10 @@ vi.mock('@/app/team/teamOverview', () => ({
 
 vi.mock('@/app/presence/observeSessionActivity', () => ({
     observeSessionActivity: mocked.observeSessionActivity,
+}));
+
+vi.mock('@/app/team/teamArtifacts', () => ({
+    getAccessibleTeamArtifact: mocked.getAccessibleTeamArtifact,
 }));
 
 import { taskRoutes } from './taskRoutes';
@@ -75,6 +80,13 @@ function buildTask(id = 'task-1') {
 describe('taskRoutes', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        mocked.getAccessibleTeamArtifact.mockResolvedValue({
+            id: 'team-1',
+            accountId: 'user-1',
+            body: Buffer.from('{}'),
+            createdAt: new Date('2026-03-17T00:00:00Z'),
+            updatedAt: new Date('2026-03-17T00:05:00Z'),
+        });
     });
 
     it('lists tasks with status and assignee filters', async () => {
@@ -98,6 +110,22 @@ describe('taskRoutes', () => {
             status: 'todo',
             assigneeId: 'session-1',
         });
+
+        await app.close();
+    });
+
+    it('returns 404 before listing tasks when the caller cannot access the team', async () => {
+        mocked.getAccessibleTeamArtifact.mockResolvedValueOnce(null);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/teams/team-foreign/tasks',
+        });
+
+        expect(response.statusCode).toBe(404);
+        expect(response.json()).toEqual({ error: 'Team not found' });
+        expect(mocked.listTasks).not.toHaveBeenCalled();
 
         await app.close();
     });
@@ -285,6 +313,27 @@ describe('taskRoutes', () => {
         expect(response.json()).toEqual({
             error: 'Task overlaps with active work on task-2',
         });
+
+        await app.close();
+    });
+
+    it('returns 404 before starting a task when the caller cannot access the team', async () => {
+        mocked.getAccessibleTeamArtifact.mockResolvedValueOnce(null);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/teams/team-foreign/tasks/task-1/start',
+            payload: {
+                sessionId: 'session-1',
+                role: 'builder',
+            },
+        });
+
+        expect(response.statusCode).toBe(404);
+        expect(response.json()).toEqual({ error: 'Team not found' });
+        expect(mocked.startTask).not.toHaveBeenCalled();
+        expect(mocked.observeSessionActivity).not.toHaveBeenCalled();
 
         await app.close();
     });

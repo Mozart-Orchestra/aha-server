@@ -4,6 +4,7 @@ import { log } from "@/utils/log";
 import { taskOrchestrator } from "@/app/task/taskOrchestrator";
 import { isTaskOperationError, TASK_ERROR_CODES } from "@/app/task/taskErrors";
 import { invalidateTeamOverviewSnapshot } from "@/app/team/teamOverview";
+import { getAccessibleTeamArtifact } from "@/app/team/teamArtifacts";
 import { observeSessionActivity } from "@/app/presence/observeSessionActivity";
 
 /**
@@ -128,9 +129,25 @@ function normalizeTaskUpdateComment(
 export function taskRoutes(app: Fastify) {
     log({ module: 'api' }, 'Registering taskRoutes...');
 
+    const requireTaskTeamAccess = async (request: any, reply: any) => {
+        const userId = request.userId as string | undefined;
+        const teamId = (request.params as { teamId?: string } | undefined)?.teamId;
+
+        if (!userId || !teamId) {
+            return reply.code(404).send({ error: 'Team not found' });
+        }
+
+        const artifact = await getAccessibleTeamArtifact(userId, teamId);
+        if (!artifact) {
+            return reply.code(404).send({ error: 'Team not found' });
+        }
+    };
+
+    const taskRoutePreHandlers = [app.authenticate, requireTaskTeamAccess];
+
     // GET /v1/teams/:teamId/tasks - List all tasks
     app.get('/v1/teams/:teamId/tasks', {
-        preHandler: app.authenticate,
+        preHandler: taskRoutePreHandlers,
         schema: {
             params: z.object({
                 teamId: z.string()
@@ -171,7 +188,7 @@ export function taskRoutes(app: Fastify) {
 
     // GET /v1/teams/:teamId/tasks/:taskId - Get single task
     app.get('/v1/teams/:teamId/tasks/:taskId', {
-        preHandler: app.authenticate,
+        preHandler: taskRoutePreHandlers,
         schema: {
             params: z.object({
                 teamId: z.string(),
@@ -205,7 +222,7 @@ export function taskRoutes(app: Fastify) {
 
     // POST /v1/teams/:teamId/tasks - Create task
     app.post('/v1/teams/:teamId/tasks', {
-        preHandler: app.authenticate,
+        preHandler: taskRoutePreHandlers,
         schema: {
             params: z.object({
                 teamId: z.string()
@@ -251,7 +268,7 @@ export function taskRoutes(app: Fastify) {
 
     // PUT /v1/teams/:teamId/tasks/:taskId - Update task
     app.put('/v1/teams/:teamId/tasks/:taskId', {
-        preHandler: app.authenticate,
+        preHandler: taskRoutePreHandlers,
         schema: {
             params: z.object({
                 teamId: z.string(),
@@ -312,7 +329,7 @@ export function taskRoutes(app: Fastify) {
     });
 
     app.post('/v1/teams/:teamId/tasks/:taskId/human-lock', {
-        preHandler: app.authenticate,
+        preHandler: taskRoutePreHandlers,
         schema: {
             params: z.object({
                 teamId: z.string(),
@@ -350,7 +367,7 @@ export function taskRoutes(app: Fastify) {
     });
 
     app.post('/v1/teams/:teamId/tasks/:taskId/human-lock/clear', {
-        preHandler: app.authenticate,
+        preHandler: taskRoutePreHandlers,
         schema: {
             params: z.object({
                 teamId: z.string(),
@@ -389,7 +406,7 @@ export function taskRoutes(app: Fastify) {
 
     // DELETE /v1/teams/:teamId/tasks/:taskId - Delete task
     app.delete('/v1/teams/:teamId/tasks/:taskId', {
-        preHandler: app.authenticate,
+        preHandler: taskRoutePreHandlers,
         schema: {
             params: z.object({
                 teamId: z.string(),
@@ -427,7 +444,7 @@ export function taskRoutes(app: Fastify) {
 
     // POST /v1/teams/:teamId/tasks/:taskId/start - Start working on task
     app.post('/v1/teams/:teamId/tasks/:taskId/start', {
-        preHandler: app.authenticate,
+        preHandler: taskRoutePreHandlers,
         schema: {
             params: z.object({
                 teamId: z.string(),
@@ -485,7 +502,7 @@ export function taskRoutes(app: Fastify) {
 
     // POST /v1/teams/:teamId/tasks/:taskId/complete - Complete task
     app.post('/v1/teams/:teamId/tasks/:taskId/complete', {
-        preHandler: app.authenticate,
+        preHandler: taskRoutePreHandlers,
         schema: {
             params: z.object({
                 teamId: z.string(),
@@ -541,7 +558,7 @@ export function taskRoutes(app: Fastify) {
 
     // POST /v1/teams/:teamId/tasks/:taskId/blocker - Report blocker
     app.post('/v1/teams/:teamId/tasks/:taskId/blocker', {
-        preHandler: app.authenticate,
+        preHandler: taskRoutePreHandlers,
         schema: {
             params: z.object({
                 teamId: z.string(),
@@ -606,7 +623,7 @@ export function taskRoutes(app: Fastify) {
 
     // POST /v1/teams/:teamId/tasks/:taskId/blocker/:blockerId/resolve - Resolve blocker
     app.post('/v1/teams/:teamId/tasks/:taskId/blocker/:blockerId/resolve', {
-        preHandler: app.authenticate,
+        preHandler: taskRoutePreHandlers,
         schema: {
             params: z.object({
                 teamId: z.string(),
@@ -673,7 +690,7 @@ export function taskRoutes(app: Fastify) {
 
     // POST /v1/teams/:teamId/tasks/:taskId/comments - Add task comment
     app.post('/v1/teams/:teamId/tasks/:taskId/comments', {
-        preHandler: app.authenticate,
+        preHandler: taskRoutePreHandlers,
         schema: {
             params: z.object({
                 teamId: z.string(),

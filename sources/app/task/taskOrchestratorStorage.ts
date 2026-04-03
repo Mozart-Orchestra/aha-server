@@ -1,4 +1,5 @@
 import { eventRouter } from '@/app/events/eventRouter';
+import { getAccessibleTeamArtifact } from '@/app/team/teamArtifacts';
 import { allocateUserSeq } from '@/storage/seq';
 import { db } from '@/storage/db';
 import { parseTeamArtifactBody } from '@/utils/teamArtifacts';
@@ -13,14 +14,12 @@ import {
 } from './taskOrchestratorTypes';
 
 export async function getBoardFromArtifact(userId: string, teamId: string): Promise<KanbanBoard | null> {
-    const artifact = await db.artifact.findFirst({
-        where: { id: teamId },
-    });
+    const artifact = await getAccessibleTeamArtifact(userId, teamId);
 
     if (!artifact) {
         log(
             { module: 'task-orchestrator', teamId, userId, level: 'warn' },
-            'Team artifact not found in database. Team must be created from Kanban UI first (encryption key requirement). See DOC/TEAM_CREATION_WORKFLOW.md',
+            'Team artifact not found or inaccessible. Team must exist and be accessible to the caller before task operations can proceed.',
         );
         return null;
     }
@@ -60,13 +59,22 @@ export async function saveBoardToArtifact(
     taskId: string,
     taskData?: Partial<KanbanTask>,
 ): Promise<void> {
+    const artifact = await getAccessibleTeamArtifact(userId, teamId);
+    if (!artifact) {
+        log(
+            { module: 'task-orchestrator', teamId, userId, level: 'warn' },
+            'Refusing to persist task board for missing or inaccessible team artifact.',
+        );
+        throw new Error('Team not found');
+    }
+
     board.version = (board.version || 0) + 1;
     board.updatedAt = Date.now();
 
     const bodyBuffer = Buffer.from(JSON.stringify(board));
 
     await db.artifact.update({
-        where: { id: teamId },
+        where: { id: artifact.id },
         data: {
             body: bodyBuffer,
             bodyVersion: { increment: 1 },

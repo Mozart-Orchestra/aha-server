@@ -6,6 +6,7 @@ type ArtifactLike = {
     id: string;
     accountId: string;
     body: Uint8Array | null;
+    bodyVersion: number;
     createdAt: Date;
     updatedAt: Date;
 };
@@ -112,6 +113,7 @@ export async function getAccessibleTeamArtifact(userId: string, teamId: string, 
             id: true,
             accountId: true,
             body: true,
+            bodyVersion: true,
             createdAt: true,
             updatedAt: true,
         },
@@ -157,6 +159,7 @@ export async function listAccessibleTeamArtifacts(userId: string): Promise<Artif
                 id: true,
                 accountId: true,
                 body: true,
+                bodyVersion: true,
                 createdAt: true,
                 updatedAt: true,
             },

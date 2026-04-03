@@ -128,6 +128,32 @@ const EntityVerdictCreateSchema = z.object({
     contextNarrative: z.string().optional(),
 });
 
+const EntityPackageDiffProxyPayloadSchema = z.object({
+    description: z.string().min(1),
+    baseVersion: z.number().int().positive().optional(),
+    verdictRefs: z.array(z.string()).optional(),
+    strategy: z.enum(['conservative', 'moderate', 'radical']).optional(),
+    authorRole: z.string().optional(),
+    authorSession: z.string().optional(),
+    ops: z.array(z.discriminatedUnion('type', [
+        z.object({
+            type: z.literal('manifest_set'),
+            path: z.string().min(1),
+            value: z.unknown(),
+        }),
+        z.object({
+            type: z.literal('file_put'),
+            path: z.string().min(1),
+            content: z.string().optional(),
+            hash: z.string().optional(),
+        }),
+        z.object({
+            type: z.literal('file_delete'),
+            path: z.string().min(1),
+        }),
+    ])).min(1),
+});
+
 function buildGenomeVisibilityWhere(userId: string) {
     return {
         deletedAt: null,
@@ -137,6 +163,60 @@ function buildGenomeVisibilityWhere(userId: string) {
 
 function resolveGenomeHubPublishKey(): string | undefined {
     return process.env.GENOME_HUB_PUBLISH_KEY || process.env.HUB_PUBLISH_KEY;
+}
+
+function isProtectedHubNamespace(namespace: string | null | undefined): boolean {
+    return namespace === '@official';
+}
+
+async function readLatestHubGenome(args: { namespace: string; name: string }): Promise<Record<string, unknown> | null> {
+    const { hubUrl, axios } = await loadGenomeHubTransport();
+    const upstream = await axios.get(
+        `${hubUrl}/genomes/${encodeURIComponent(args.namespace)}/${encodeURIComponent(args.name)}`,
+        {
+            timeout: 10_000,
+            validateStatus: () => true,
+        },
+    );
+
+    if (upstream.status !== 200 || !upstream.data || typeof upstream.data !== 'object') {
+        return null;
+    }
+
+    const genome = (upstream.data as Record<string, unknown>).genome;
+    return genome && typeof genome === 'object' && !Array.isArray(genome)
+        ? genome as Record<string, unknown>
+        : null;
+}
+
+async function readLatestHubEntity(args: { namespace: string; name: string }): Promise<Record<string, unknown> | null> {
+    const { hubUrl, axios } = await loadGenomeHubTransport();
+    const upstream = await axios.get(
+        `${hubUrl}/entities/${encodeURIComponent(args.namespace)}/${encodeURIComponent(args.name)}`,
+        {
+            timeout: 10_000,
+            validateStatus: () => true,
+        },
+    );
+
+    if (upstream.status !== 200 || !upstream.data || typeof upstream.data !== 'object') {
+        return null;
+    }
+
+    const entity = (upstream.data as Record<string, unknown>).entity;
+    return entity && typeof entity === 'object' && !Array.isArray(entity)
+        ? entity as Record<string, unknown>
+        : null;
+}
+
+function buildTrustedPackageDiffAuthor(userId: string): {
+    authorRole: string;
+    authorSession: string;
+} {
+    return {
+        authorRole: 'happy-server',
+        authorSession: userId,
+    };
 }
 
 function withGenomeProjection<T extends {
@@ -1213,17 +1293,26 @@ export function evolutionRoutes(app: Fastify) {
             }),
         },
     }, async (request, reply) => {
+        const userId = request.userId;
         const { namespace, name } = request.params as { namespace: string; name: string };
         const payload = request.body as Record<string, unknown>;
+        const { authorRole: _ar, authorSession: _as, ...safePayload } = payload;
 
         try {
-            const hubUrl = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
-            const hubPublishKey = resolveGenomeHubPublishKey();
-            const { default: axios } = await import('axios');
+            if (isProtectedHubNamespace(namespace)) {
+                return reply.code(404).send({ error: 'Genome not found' });
+            }
+
+            const latestHubGenome = await readLatestHubGenome({ namespace, name });
+            if (!latestHubGenome || latestHubGenome.publisherId !== userId) {
+                return reply.code(404).send({ error: 'Genome not found' });
+            }
+
+            const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
 
             const upstream = await axios.post(
                 `${hubUrl}/genomes/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/diff`,
-                payload,
+                { ...safePayload, ...buildTrustedPackageDiffAuthor(userId) },
                 {
                     headers: {
                         'Content-Type': 'application/json',
@@ -1237,7 +1326,68 @@ export function evolutionRoutes(app: Fastify) {
             return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome diff proxy error: ${error}`);
-            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy genome diff' });
+            return reply.code(502).send({ error: 'Failed to proxy genome diff' });
+        }
+    });
+
+    // =========================================================================
+    // POST /v1/genomes/id/:id/package-diffs
+    // Proxy package diff submit calls to genome-hub so clients can mutate agent
+    // packages without direct HUB_PUBLISH_KEY access.
+    // =========================================================================
+    app.post('/v1/genomes/id/:id/package-diffs', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                id: z.string(),
+            }),
+            body: EntityPackageDiffProxyPayloadSchema,
+        },
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { id } = request.params as { id: string };
+        const payload = request.body as z.infer<typeof EntityPackageDiffProxyPayloadSchema>;
+
+        try {
+            const ownedGenome = await db.genome.findFirst({
+                where: {
+                    accountId: userId,
+                    hubGenomeId: id,
+                    deletedAt: null,
+                },
+                select: { id: true },
+            });
+
+            if (!ownedGenome) {
+                return reply.code(404).send({ error: 'Genome not found' });
+            }
+
+            const hubUrl = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
+            const hubPublishKey = resolveGenomeHubPublishKey();
+            const { default: axios } = await import('axios');
+            const { authorRole: _ar, authorSession: _as, ...safePayload } = payload;
+            const upstreamPayload = {
+                ...safePayload,
+                ...buildTrustedPackageDiffAuthor(userId),
+            };
+
+            const upstream = await axios.post(
+                `${hubUrl}/entities/id/${encodeURIComponent(id)}/package-diffs`,
+                upstreamPayload,
+                {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                    timeout: 10_000,
+                    validateStatus: () => true,
+                },
+            );
+
+            return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `genome package-diff proxy error: ${error}`);
+            return reply.code(502).send({ error: 'Failed to proxy package diff' });
         }
     });
 
@@ -1256,17 +1406,25 @@ export function evolutionRoutes(app: Fastify) {
             body: GenomePromotePayloadSchema,
         },
     }, async (request, reply) => {
+        const userId = request.userId;
         const { namespace, name } = request.params as { namespace: string; name: string };
         const payload = request.body as z.infer<typeof GenomePromotePayloadSchema>;
 
         try {
-            const hubUrl = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
-            const hubPublishKey = resolveGenomeHubPublishKey();
-            const { default: axios } = await import('axios');
+            if (isProtectedHubNamespace(namespace)) {
+                return reply.code(404).send({ error: 'Genome not found' });
+            }
+
+            const latestHubGenome = await readLatestHubGenome({ namespace, name });
+            if (!latestHubGenome || latestHubGenome.publisherId !== userId) {
+                return reply.code(404).send({ error: 'Genome not found' });
+            }
+
+            const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
 
             const upstream = await axios.post(
                 `${hubUrl}/genomes/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/promote`,
-                payload,
+                { ...payload, publisherId: userId },
                 {
                     headers: {
                         'Content-Type': 'application/json',
@@ -1280,7 +1438,7 @@ export function evolutionRoutes(app: Fastify) {
             return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome promote proxy error: ${error}`);
-            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy genome promotion' });
+            return reply.code(502).send({ error: 'Failed to proxy genome promotion' });
         }
     });
 
@@ -1298,8 +1456,20 @@ export function evolutionRoutes(app: Fastify) {
             body: GenomeForkPayloadSchema,
         },
     }, async (request, reply) => {
+        const userId = request.userId;
         const { id } = request.params as { id: string };
         const payload = request.body as z.infer<typeof GenomeForkPayloadSchema>;
+
+        if (isProtectedHubNamespace(payload.namespace)) {
+            return reply.code(403).send({ error: 'Namespace not allowed' });
+        }
+
+        // The proxy binds publisherId to the caller, but target namespace policy
+        // still needs hub-native auth for anything broader than this stopgap.
+        const safePayload = {
+            ...payload,
+            publisherId: userId,
+        };
 
         try {
             const hubUrl = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
@@ -1308,7 +1478,7 @@ export function evolutionRoutes(app: Fastify) {
 
             const upstream = await axios.post(
                 `${hubUrl}/genomes/id/${encodeURIComponent(id)}/fork`,
-                payload,
+                safePayload,
                 {
                     headers: {
                         'Content-Type': 'application/json',
@@ -1322,7 +1492,7 @@ export function evolutionRoutes(app: Fastify) {
             return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome fork proxy error: ${error}`);
-            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy genome fork' });
+            return reply.code(502).send({ error: 'Failed to proxy genome fork' });
         }
     });
 
@@ -1349,6 +1519,7 @@ export function evolutionRoutes(app: Fastify) {
             }),
         },
     }, async (request, reply) => {
+        const userId = request.userId;
         const payload = request.body as {
             namespace: string;
             name: string;
@@ -1360,13 +1531,16 @@ export function evolutionRoutes(app: Fastify) {
             tags?: string;
         };
         try {
-            const hubUrl = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
-            const hubPublishKey = resolveGenomeHubPublishKey();
-            const { default: axios } = await import('axios');
+            if (isProtectedHubNamespace(payload.namespace)) {
+                return reply.code(403).send({ error: 'Namespace not allowed' });
+            }
+
+            const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
 
             const projectedPayload = {
                 ...payload,
                 spec: syncGenomeSpecVersion(payload.spec, payload.version),
+                publisherId: userId,
             };
 
             const upstream = await axios.post(`${hubUrl}/genomes`, projectedPayload, {
@@ -1381,7 +1555,7 @@ export function evolutionRoutes(app: Fastify) {
             return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome hub-create proxy error: ${error}`);
-            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy genome creation' });
+            return reply.code(502).send({ error: 'Failed to proxy genome creation' });
         }
     });
 
@@ -1416,6 +1590,9 @@ export function evolutionRoutes(app: Fastify) {
             const projectedSpec = syncGenomeSpecVersion(genome.spec, genome.version);
             const spec = parseGenomeSpec(projectedSpec);
             const publishNamespace = genome.namespace ?? spec.namespace ?? '@public';
+            if (isProtectedHubNamespace(publishNamespace)) {
+                return reply.code(403).send({ error: 'Namespace not allowed' });
+            }
             const publishBody = {
                 namespace: publishNamespace,
                 name: genome.name,
@@ -1425,6 +1602,7 @@ export function evolutionRoutes(app: Fastify) {
                 tags: genome.tags ?? undefined,
                 category: genome.category ?? spec.category,
                 isPublic: true,
+                publisherId: userId,
             };
 
             // 使用动态 import 避免循环依赖；axios 已存在于 happy-server
@@ -1858,15 +2036,26 @@ export function evolutionRoutes(app: Fastify) {
             body: EntityDiffProxyPayloadSchema,
         },
     }, async (request, reply) => {
+        const userId = request.userId;
         const { namespace, name } = request.params as { namespace: string; name: string };
         const payload = request.body as Record<string, unknown>;
+        const { authorRole: _ar, authorSession: _as, ...safePayload } = payload;
 
         try {
+            if (isProtectedHubNamespace(namespace)) {
+                return reply.code(404).send({ error: 'Genome not found' });
+            }
+
+            const latestHubEntity = await readLatestHubEntity({ namespace, name });
+            if (!latestHubEntity || latestHubEntity.publisherId !== userId) {
+                return reply.code(404).send({ error: 'Genome not found' });
+            }
+
             const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
 
             const upstream = await axios.post(
                 `${hubUrl}/entities/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/diffs`,
-                payload,
+                { ...safePayload, ...buildTrustedPackageDiffAuthor(userId) },
                 {
                     headers: {
                         'Content-Type': 'application/json',
@@ -1880,7 +2069,7 @@ export function evolutionRoutes(app: Fastify) {
             return reply.code(upstream.status).send(normalizeGenomeApiPayload(upstream.data));
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `entity diffs post proxy error: ${error}`);
-            return reply.code(502).send({ error: error?.message ?? 'Failed to proxy entity diff submit' });
+            return reply.code(502).send({ error: 'Failed to proxy entity diff submit' });
         }
     });
 
