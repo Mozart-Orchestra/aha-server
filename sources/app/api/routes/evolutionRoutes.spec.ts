@@ -1911,6 +1911,55 @@ describe('evolutionRoutes', () => {
         }
     });
 
+    it('defaults hub genome creation to version 1 when the client omits version', async () => {
+        vi.mocked(axios.post).mockResolvedValue({
+            status: 201,
+            data: {
+                genome: {
+                    id: 'hub-genome-10',
+                    namespace: '@user-1',
+                    name: 'builder',
+                    version: 1,
+                },
+            },
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/genomes/hub-create',
+            payload: {
+                namespace: '@user-1',
+                name: 'builder',
+                spec: '{"displayName":"Builder"}',
+                isPublic: false,
+            },
+        });
+
+        expect(response.statusCode).toBe(201);
+        expect(axios.post).toHaveBeenCalledWith(
+            expect.stringContaining('/genomes'),
+            expect.objectContaining({
+                namespace: '@user-1',
+                name: 'builder',
+                version: 1,
+                spec: '{"displayName":"Builder","version":1}',
+                publisherId: 'user-1',
+            }),
+            expect.any(Object),
+        );
+        expect(response.json()).toEqual({
+            genome: {
+                id: 'hub-genome-10',
+                namespace: '@user-1',
+                name: 'builder',
+                version: 1,
+            },
+        });
+
+        await app.close();
+    });
+
     it('rejects hub genome creation into protected namespaces', async () => {
         const app = buildApp();
         const response = await app.inject({

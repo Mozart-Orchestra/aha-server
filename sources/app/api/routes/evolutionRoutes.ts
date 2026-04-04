@@ -1536,10 +1536,12 @@ export function evolutionRoutes(app: Fastify) {
             }
 
             const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
+            const effectiveVersion = payload.version ?? 1;
 
             const projectedPayload = {
                 ...payload,
-                spec: syncGenomeSpecVersion(payload.spec, payload.version),
+                version: effectiveVersion,
+                spec: syncGenomeSpecVersion(payload.spec, effectiveVersion),
                 publisherId: userId,
             };
 
@@ -2296,6 +2298,317 @@ export function evolutionRoutes(app: Fastify) {
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `entity feedback materialize proxy error: ${error}`);
             return reply.code(502).send({ error: error?.message ?? 'Failed to proxy entity feedback materialization' });
+        }
+    });
+
+    // =========================================================================
+    // Role routes — proxy genome data as role definitions for the CLI.
+    // The CLI calls /v1/roles/* endpoints that were previously unimplemented.
+    // Roles are backed by the Genome table and genome-hub @official genomes.
+    // =========================================================================
+
+    const DEFAULT_ROLE_DEFINITIONS = [
+        { id: 'master', title: 'Master', summary: 'Team coordinator and task dispatcher', icon: '👑', category: 'coordination' },
+        { id: 'supervisor', title: 'Supervisor', summary: 'Agent lifecycle management and scoring', icon: '👁', category: 'coordination' },
+        { id: 'builder', title: 'Builder', summary: 'Backend/server code implementation and testing', icon: '🔧', category: 'development' },
+        { id: 'scout', title: 'Scout', summary: 'Code exploration and root cause analysis', icon: '🔍', category: 'development' },
+        { id: 'qa', title: 'QA', summary: 'Quality assurance and regression testing', icon: '✅', category: 'quality' },
+        { id: 'reviewer', title: 'Reviewer', summary: 'Code review and architecture assessment', icon: '📝', category: 'quality' },
+        { id: 'product-owner', title: 'Product Owner', summary: 'Product decisions and acceptance criteria', icon: '📋', category: 'coordination' },
+        { id: 'ux-designer', title: 'UX Designer', summary: 'User experience and interface design', icon: '🎨', category: 'design' },
+        { id: 'solution-architect', title: 'Solution Architect', summary: 'System architecture and technical design', icon: '🏗', category: 'coordination' },
+        { id: 'framer', title: 'Framer', summary: 'Frontend implementation and prototyping', icon: '🖼', category: 'development' },
+        { id: 'scribe', title: 'Scribe', summary: 'Documentation and knowledge management', icon: '📜', category: 'coordination' },
+        { id: 'help-agent', title: 'Help Agent', summary: 'On-demand assistance for blocked agents', icon: '🆘', category: 'coordination' },
+    ];
+
+    // GET /v1/roles/defaults — static default role templates
+    app.get('/v1/roles/defaults', {
+        preHandler: app.authenticate,
+    }, async (_request, reply) => {
+        return reply.send({ roles: DEFAULT_ROLE_DEFINITIONS });
+    });
+
+    // GET /v1/roles — list user's own genomes as role definitions
+    app.get('/v1/roles', {
+        preHandler: app.authenticate,
+        schema: {
+            querystring: z.object({
+                limit: z.coerce.number().int().min(1).max(200).default(100),
+            }),
+        },
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { limit } = request.query as { limit: number };
+
+        try {
+            const where = { accountId: userId, deletedAt: null };
+            const [genomes, total] = await Promise.all([
+                db.genome.findMany({
+                    where,
+                    orderBy: { updatedAt: 'desc' },
+                    take: limit,
+                }),
+                db.genome.count({ where }),
+            ]);
+
+            const roles = genomes.map((g) => ({
+                id: g.id,
+                title: g.name,
+                summary: g.description ?? '',
+                category: g.category ?? undefined,
+                namespace: g.namespace ?? undefined,
+                status: g.status,
+                version: g.version,
+                isPublic: g.isPublic,
+                updatedAt: g.updatedAt,
+            }));
+
+            return reply.send({ roles, total });
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `list roles error: ${error}`);
+            return reply.code(500).send({ error: 'Failed to list roles' });
+        }
+    });
+
+    // GET /v1/roles/pool — public genomes from genome-hub marketplace
+    app.get('/v1/roles/pool', {
+        preHandler: app.authenticate,
+        schema: {
+            querystring: z.object({
+                limit: z.coerce.number().int().min(1).max(200).default(100),
+                search: z.string().optional(),
+            }),
+        },
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { limit, search } = request.query as { limit: number; search?: string };
+
+        try {
+            // Try genome-hub first for public genomes
+            const { hubUrl, axios: http } = await loadGenomeHubTransport();
+            const params = new URLSearchParams();
+            params.set('limit', String(limit));
+            if (search) params.set('search', search);
+
+            const upstream = await http.get(`${hubUrl}/genomes?${params.toString()}`, {
+                timeout: 5_000,
+                validateStatus: () => true,
+            });
+
+            if (upstream.status === 200 && upstream.data?.genomes) {
+                const roles = (upstream.data.genomes as any[]).map((g: any) => ({
+                    id: g.id,
+                    title: g.name,
+                    summary: g.description ?? '',
+                    category: g.category ?? undefined,
+                    namespace: g.namespace ?? undefined,
+                    status: g.status,
+                    version: g.version,
+                    spawnCount: g.spawnCount ?? 0,
+                }));
+                return reply.send({ roles, total: upstream.data.total ?? roles.length });
+            }
+
+            // Fallback to local DB: public genomes visible to this user
+            const where = {
+                ...buildGenomeVisibilityWhere(userId),
+                ...(search ? { name: { contains: search, mode: 'insensitive' as const } } : {}),
+            };
+            const [genomes, total] = await Promise.all([
+                db.genome.findMany({ where, orderBy: { spawnCount: 'desc' }, take: limit }),
+                db.genome.count({ where }),
+            ]);
+
+            const roles = genomes.map((g) => ({
+                id: g.id,
+                title: g.name,
+                summary: g.description ?? '',
+                category: g.category ?? undefined,
+                namespace: g.namespace ?? undefined,
+                status: g.status,
+                version: g.version,
+                spawnCount: g.spawnCount,
+            }));
+            return reply.send({ roles, total });
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `list role pool error: ${error}`);
+            return reply.send({ roles: [], total: 0 });
+        }
+    });
+
+    // POST /v1/roles/:roleId/reviews — submit a review for a role (genome feedback)
+    app.post('/v1/roles/:roleId/reviews', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ roleId: z.string() }),
+            body: z.object({
+                rating: z.number().min(0).max(100),
+                codeScore: z.number().min(0).max(100).optional(),
+                qualityScore: z.number().min(0).max(100).optional(),
+                source: z.enum(['user', 'master', 'system']).optional(),
+                sourceScores: z.object({
+                    user: z.number().optional(),
+                    master: z.number().optional(),
+                    system: z.number().optional(),
+                }).optional(),
+                teamId: z.string().optional(),
+                comment: z.string().max(2000).optional(),
+            }),
+        },
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { roleId } = request.params as { roleId: string };
+        const payload = request.body;
+
+        try {
+            // Resolve roleId: could be a genome id, or a role name like 'builder'
+            const genome = await db.genome.findFirst({
+                where: {
+                    deletedAt: null,
+                    OR: [
+                        { id: roleId },
+                        { name: roleId, namespace: '@official' },
+                    ],
+                },
+                orderBy: { version: 'desc' },
+            });
+
+            if (!genome) {
+                return reply.code(404).send({ error: `Role/genome '${roleId}' not found` });
+            }
+
+            // Proxy feedback to genome-hub
+            const { hubUrl, hubPublishKey, axios: http } = await loadGenomeHubTransport();
+            const upstream = await http.post(
+                `${hubUrl}/genomes/id/${encodeURIComponent(genome.id)}/feedback`,
+                {
+                    evaluationCount: 1,
+                    avgScore: payload.rating,
+                    dimensions: {
+                        delivery: payload.qualityScore ?? payload.rating,
+                        integrity: payload.rating,
+                        efficiency: payload.rating,
+                        collaboration: payload.rating,
+                        reliability: payload.rating,
+                    },
+                    latestAction: 'keep' as const,
+                    suggestions: payload.comment ? [payload.comment] : [],
+                    reviewerId: userId,
+                    source: payload.source ?? 'user',
+                },
+                {
+                    timeout: 10_000,
+                    validateStatus: () => true,
+                    headers: {
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                },
+            );
+
+            if (upstream.status >= 200 && upstream.status < 300) {
+                return reply.send({
+                    success: true,
+                    review: {
+                        roleId: genome.id,
+                        rating: payload.rating,
+                        comment: payload.comment,
+                        source: payload.source ?? 'user',
+                        createdAt: Date.now(),
+                    },
+                    stats: upstream.data?.stats ?? null,
+                });
+            }
+
+            // Hub unreachable — accept locally
+            log({ module: 'evolution' }, `Role review: hub returned ${upstream.status}, storing locally`);
+            return reply.send({
+                success: true,
+                review: {
+                    roleId: genome.id,
+                    rating: payload.rating,
+                    comment: payload.comment,
+                    source: payload.source ?? 'user',
+                    createdAt: Date.now(),
+                },
+                stats: null,
+            });
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `submit role review error: ${error}`);
+            return reply.code(500).send({ error: 'Failed to submit role review' });
+        }
+    });
+
+    // GET /v1/roles/:roleId/reviews — list reviews for a role (genome feedback)
+    app.get('/v1/roles/:roleId/reviews', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ roleId: z.string() }),
+            querystring: z.object({
+                limit: z.coerce.number().int().min(1).max(200).default(50),
+            }),
+        },
+    }, async (request, reply) => {
+        const { roleId } = request.params as { roleId: string };
+        const { limit } = request.query as { limit: number };
+
+        try {
+            // Resolve roleId
+            const genome = await db.genome.findFirst({
+                where: {
+                    deletedAt: null,
+                    OR: [
+                        { id: roleId },
+                        { name: roleId, namespace: '@official' },
+                    ],
+                },
+                orderBy: { version: 'desc' },
+            });
+
+            if (!genome) {
+                return reply.code(404).send({ error: `Role/genome '${roleId}' not found` });
+            }
+
+            // Try genome-hub for feedback data
+            const { hubUrl, hubPublishKey, axios: http } = await loadGenomeHubTransport();
+            const upstream = await http.get(
+                `${hubUrl}/genomes/id/${encodeURIComponent(genome.id)}/feedback`,
+                {
+                    timeout: 5_000,
+                    validateStatus: () => true,
+                    headers: {
+                        ...(hubPublishKey ? { Authorization: `Bearer ${hubPublishKey}` } : {}),
+                    },
+                },
+            );
+
+            if (upstream.status === 200 && upstream.data) {
+                const feedback = upstream.data;
+                const reviews = Array.isArray(feedback.reviews)
+                    ? feedback.reviews.slice(0, limit)
+                    : [{
+                        roleId: genome.id,
+                        rating: feedback.avgScore ?? feedback.evaluationCount ?? 0,
+                        source: 'system',
+                        createdAt: genome.updatedAt,
+                    }];
+                return reply.send({ reviews, total: reviews.length });
+            }
+
+            // Fallback: return scorecard data from local genome record
+            const scorecard = parseStoredGenomeScorecard(genome.scorecard);
+            const reviews = scorecard ? [{
+                roleId: genome.id,
+                rating: (scorecard as any).avgScore ?? 0,
+                source: 'system',
+                createdAt: genome.updatedAt,
+                scorecard,
+            }] : [];
+
+            return reply.send({ reviews, total: reviews.length });
+        } catch (error: any) {
+            log({ module: 'evolution', level: 'error' }, `list role reviews error: ${error}`);
+            return reply.send({ reviews: [], total: 0 });
         }
     });
 }
