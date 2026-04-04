@@ -93,6 +93,7 @@ export type UpdateEvent = {
     dataEncryptionKey: string | null;
     active: boolean;
     activeAt: number;
+    archivedAt: number | null;
     createdAt: number;
     updatedAt: number;
 } | {
@@ -106,7 +107,12 @@ export type UpdateEvent = {
         value: string;
         version: number;
     };
+    active?: boolean;
     activeAt?: number;
+    archivedAt?: number | null;
+} | {
+    type: 'delete-machine';
+    machineId: string;
 } | {
     type: 'new-artifact';
     artifactId: string;
@@ -504,6 +510,7 @@ export function buildNewMachineUpdate(machine: {
     daemonStateVersion: number;
     dataEncryptionKey: Uint8Array | null;
     active: boolean;
+    archivedAt?: Date | null;
     lastActiveAt: Date;
     createdAt: Date;
     updatedAt: Date;
@@ -522,6 +529,7 @@ export function buildNewMachineUpdate(machine: {
             dataEncryptionKey: machine.dataEncryptionKey ? Buffer.from(machine.dataEncryptionKey).toString('base64') : null,
             active: machine.active,
             activeAt: machine.lastActiveAt.getTime(),
+            archivedAt: machine.archivedAt ? machine.archivedAt.getTime() : null,
             createdAt: machine.createdAt.getTime(),
             updatedAt: machine.updatedAt.getTime()
         },
@@ -529,7 +537,18 @@ export function buildNewMachineUpdate(machine: {
     };
 }
 
-export function buildUpdateMachineUpdate(machineId: string, updateSeq: number, updateId: string, metadata?: { value: string; version: number }, daemonState?: { value: string; version: number }): UpdatePayload {
+export function buildUpdateMachineUpdate(
+    machineId: string,
+    updateSeq: number,
+    updateId: string,
+    metadata?: { value: string; version: number },
+    daemonState?: { value: string; version: number },
+    runtime?: {
+        active?: boolean;
+        activeAt?: number;
+        archivedAt?: number | null;
+    },
+): UpdatePayload {
     return {
         id: updateId,
         seq: updateSeq,
@@ -537,9 +556,24 @@ export function buildUpdateMachineUpdate(machineId: string, updateSeq: number, u
             t: 'update-machine',
             machineId,
             metadata,
-            daemonState
+            daemonState,
+            ...(runtime?.active !== undefined ? { active: runtime.active } : {}),
+            ...(runtime?.activeAt !== undefined ? { activeAt: runtime.activeAt } : {}),
+            ...(runtime && 'archivedAt' in runtime ? { archivedAt: runtime.archivedAt ?? null } : {}),
         },
         createdAt: Date.now()
+    };
+}
+
+export function buildDeleteMachineUpdate(machineId: string, updateSeq: number, updateId: string): UpdatePayload {
+    return {
+        id: updateId,
+        seq: updateSeq,
+        body: {
+            t: 'delete-machine',
+            machineId,
+        },
+        createdAt: Date.now(),
     };
 }
 

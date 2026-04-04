@@ -236,6 +236,7 @@ export function agentRoutes(app: Fastify) {
                 if (resolvedSourceImageId) {
                     const hubGenome = await fetchGenomeFromHub(resolvedSourceImageId);
                     if (!hubGenome) {
+                        log({ module: 'agents', level: 'warn' }, `genome-hub miss for ${resolvedSourceImageId} during agent creation, falling back to local DB`);
                         // Fallback to local genome table (transitional)
                         const localGenome = await tx.genome.findFirst({
                             where: {
@@ -551,6 +552,7 @@ export function agentRoutes(app: Fastify) {
                 // genome-hub is authoritative, local is fallback
                 const hubGenome = await fetchGenomeFromHub(updatedImageRef.id);
                 if (!hubGenome) {
+                    log({ module: 'agents', level: 'warn' }, `genome-hub miss for ${updatedImageRef.id} during agent update, using local DB (data may be stale)`);
                     const localGenome = await db.genome.findFirst({
                         where: {
                             id: updatedImageRef.id,

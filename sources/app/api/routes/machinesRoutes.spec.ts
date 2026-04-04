@@ -4,10 +4,17 @@ import { serializerCompiler, validatorCompiler, ZodTypeProvider } from 'fastify-
 
 vi.mock('@/storage/db', () => ({
     db: {
+        $transaction: vi.fn(),
+        accessKey: {
+            deleteMany: vi.fn(),
+        },
         machine: {
             findFirst: vi.fn(),
+            findMany: vi.fn(),
             findUnique: vi.fn(),
             upsert: vi.fn(),
+            updateMany: vi.fn(),
+            deleteMany: vi.fn(),
         },
     },
 }));
@@ -18,6 +25,7 @@ vi.mock('@/app/events/eventRouter', () => ({
     },
     buildNewMachineUpdate: vi.fn().mockReturnValue({ t: 'new-machine' }),
     buildUpdateMachineUpdate: vi.fn().mockReturnValue({ t: 'update-machine' }),
+    buildDeleteMachineUpdate: vi.fn().mockReturnValue({ t: 'delete-machine' }),
 }));
 
 vi.mock('@/storage/seq', () => ({
@@ -29,6 +37,7 @@ vi.mock('@/utils/randomKeyNaked', () => ({
 }));
 
 import { db } from '@/storage/db';
+import { eventRouter } from '@/app/events/eventRouter';
 import { machinesRoutes } from './machinesRoutes';
 
 function buildApp() {
@@ -47,6 +56,7 @@ describe('machinesRoutes', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         vi.mocked(db.machine.findFirst).mockResolvedValue(null as never);
+        vi.mocked(db.machine.findMany).mockResolvedValue([] as never);
         vi.mocked(db.machine.findUnique).mockResolvedValue(null as never);
         vi.mocked(db.machine.upsert).mockResolvedValue({
             id: 'machine-1',
@@ -56,10 +66,15 @@ describe('machinesRoutes', () => {
             daemonStateVersion: 0,
             dataEncryptionKey: null,
             active: false,
+            archivedAt: null,
             lastActiveAt: new Date('2026-03-19T00:00:00Z'),
             createdAt: new Date('2026-03-19T00:00:00Z'),
             updatedAt: new Date('2026-03-19T00:00:00Z'),
         } as never);
+        vi.mocked(db.machine.updateMany).mockResolvedValue({ count: 1 } as never);
+        vi.mocked(db.machine.deleteMany).mockResolvedValue({ count: 1 } as never);
+        vi.mocked(db.accessKey.deleteMany).mockResolvedValue({ count: 0 } as never);
+        (db.$transaction as any).mockImplementation(async (operations: unknown[]) => operations);
     });
 
     it('rejects cross-account machine registration without proof of ownership', async () => {
@@ -83,6 +98,92 @@ describe('machinesRoutes', () => {
             error: 'Machine already belongs to another account. Clear the local machine ID or reconnect the original account.',
         });
         expect(vi.mocked(db.machine.upsert)).not.toHaveBeenCalled();
+
+        await app.close();
+    });
+
+    it('archives an offline machine', async () => {
+        vi.mocked(db.machine.findFirst).mockResolvedValue({
+            id: 'machine-1',
+            accountId: 'user-1',
+            active: false,
+            archivedAt: null,
+            lastActiveAt: new Date('2026-03-19T00:00:00Z'),
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/machines/machine-1/archive',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toMatchObject({
+            success: true,
+            machineId: 'machine-1',
+            archivedAt: expect.any(Number),
+        });
+        expect(vi.mocked(db.machine.updateMany)).toHaveBeenCalledWith(expect.objectContaining({
+            where: expect.objectContaining({ accountId: 'user-1', id: 'machine-1', archivedAt: null }),
+        }));
+        expect(vi.mocked(eventRouter.emitUpdate)).toHaveBeenCalled();
+
+        await app.close();
+    });
+
+    it('restores an archived machine', async () => {
+        vi.mocked(db.machine.findFirst).mockResolvedValue({
+            id: 'machine-1',
+            accountId: 'user-1',
+            active: false,
+            archivedAt: new Date('2026-03-18T00:00:00Z'),
+            lastActiveAt: new Date('2026-03-19T00:00:00Z'),
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/machines/machine-1/unarchive',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            success: true,
+            machineId: 'machine-1',
+        });
+        expect(vi.mocked(db.machine.updateMany)).toHaveBeenCalledWith(expect.objectContaining({
+            where: expect.objectContaining({ accountId: 'user-1', id: 'machine-1' }),
+            data: { archivedAt: null },
+        }));
+
+        await app.close();
+    });
+
+    it('deletes an offline machine and its access keys', async () => {
+        vi.mocked(db.machine.findFirst).mockResolvedValue({
+            id: 'machine-1',
+            accountId: 'user-1',
+            active: false,
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'DELETE',
+            url: '/v1/machines/machine-1',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            success: true,
+            machineId: 'machine-1',
+        });
+        expect(vi.mocked(db.accessKey.deleteMany)).toHaveBeenCalledWith({
+            where: { accountId: 'user-1', machineId: 'machine-1' },
+        });
+        expect(vi.mocked(db.machine.deleteMany)).toHaveBeenCalledWith({
+            where: { accountId: 'user-1', id: 'machine-1' },
+        });
+        expect(db.$transaction).toHaveBeenCalledTimes(1);
 
         await app.close();
     });

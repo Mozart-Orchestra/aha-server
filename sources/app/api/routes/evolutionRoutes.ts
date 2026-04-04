@@ -2410,6 +2410,7 @@ export function evolutionRoutes(app: Fastify) {
                 return reply.send({ roles, total: upstream.data.total ?? roles.length });
             }
 
+            log({ module: 'evolution', level: 'warn' }, `role pool: genome-hub returned ${upstream.status}, falling back to local DB`);
             // Fallback to local DB: public genomes visible to this user
             const where = {
                 ...buildGenomeVisibilityWhere(userId),
@@ -2430,10 +2431,10 @@ export function evolutionRoutes(app: Fastify) {
                 version: g.version,
                 spawnCount: g.spawnCount,
             }));
-            return reply.send({ roles, total });
+            return reply.send({ roles, total, degraded: true, degradedReason: `genome-hub returned ${upstream.status}` });
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `list role pool error: ${error}`);
-            return reply.send({ roles: [], total: 0 });
+            return reply.send({ roles: [], total: 0, degraded: true, degradedReason: `genome-hub query failed: ${error?.message ?? 'unknown error'}` });
         }
     });
 
@@ -2520,10 +2521,12 @@ export function evolutionRoutes(app: Fastify) {
                 });
             }
 
-            // Hub unreachable — accept locally
-            log({ module: 'evolution' }, `Role review: hub returned ${upstream.status}, storing locally`);
+            // Hub unreachable — accept locally (degraded mode)
+            log({ module: 'evolution', level: 'warn' }, `Role review: hub returned ${upstream.status}, storing locally (degraded)`);
             return reply.send({
                 success: true,
+                degraded: true,
+                degradedReason: `genome-hub returned ${upstream.status}`,
                 review: {
                     roleId: genome.id,
                     rating: payload.rating,

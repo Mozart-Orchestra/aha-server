@@ -75,6 +75,7 @@ declare global {
             dataEncryptionKey: string | null;
             active: boolean;
             activeAt: number;
+            archivedAt: number | null;
             createdAt: number;
             updatedAt: number;
         } | {
@@ -88,7 +89,12 @@ declare global {
                 value: string;
                 version: number;
             };
+            active?: boolean;
             activeAt?: number;
+            archivedAt?: number | null;
+        } | {
+            t: 'delete-machine';
+            machineId: string;
         };
 
         type GitHubProfile = GitHubProfileType;

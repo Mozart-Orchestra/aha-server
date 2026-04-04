@@ -5,7 +5,7 @@ import { db } from "@/storage/db";
 import { log } from "@/utils/log";
 import { randomKeyNaked } from "@/utils/randomKeyNaked";
 import { allocateUserSeq } from "@/storage/seq";
-import { buildNewMachineUpdate, buildUpdateMachineUpdate } from "@/app/events/eventRouter";
+import { buildDeleteMachineUpdate, buildNewMachineUpdate, buildUpdateMachineUpdate } from "@/app/events/eventRouter";
 
 export function machinesRoutes(app: Fastify) {
     app.post('/v1/machines', {
@@ -55,6 +55,7 @@ export function machinesRoutes(app: Fastify) {
                     metadata,
                     metadataVersion: { increment: 1 },
                     lastActiveAt: new Date(),
+                    archivedAt: null,
                 }
             });
 
@@ -97,6 +98,7 @@ export function machinesRoutes(app: Fastify) {
                     dataEncryptionKey: machine.dataEncryptionKey ? Buffer.from(machine.dataEncryptionKey).toString('base64') : null,
                     active: machine.active,
                     activeAt: machine.lastActiveAt.getTime(),
+                    archivedAt: machine.archivedAt ? machine.archivedAt.getTime() : null,
                     createdAt: machine.createdAt.getTime(),
                     updatedAt: machine.updatedAt.getTime()
                 }
@@ -122,6 +124,7 @@ export function machinesRoutes(app: Fastify) {
                             dataEncryptionKey: existingMachine.dataEncryptionKey ? Buffer.from(existingMachine.dataEncryptionKey).toString('base64') : null,
                             active: existingMachine.active,
                             activeAt: existingMachine.lastActiveAt.getTime(),
+                            archivedAt: existingMachine.archivedAt ? existingMachine.archivedAt.getTime() : null,
                             createdAt: existingMachine.createdAt.getTime(),
                             updatedAt: existingMachine.updatedAt.getTime()
                         }
@@ -156,6 +159,7 @@ export function machinesRoutes(app: Fastify) {
             seq: m.seq,
             active: m.active,
             activeAt: m.lastActiveAt.getTime(),
+            archivedAt: m.archivedAt ? m.archivedAt.getTime() : null,
             createdAt: m.createdAt.getTime(),
             updatedAt: m.updatedAt.getTime()
         }));
@@ -195,10 +199,174 @@ export function machinesRoutes(app: Fastify) {
                 seq: machine.seq,
                 active: machine.active,
                 activeAt: machine.lastActiveAt.getTime(),
+                archivedAt: machine.archivedAt ? machine.archivedAt.getTime() : null,
                 createdAt: machine.createdAt.getTime(),
                 updatedAt: machine.updatedAt.getTime()
             }
         };
+    });
+
+    app.post('/v1/machines/:id/archive', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                id: z.string(),
+            }),
+        },
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { id } = request.params;
+
+        const machine = await db.machine.findFirst({
+            where: {
+                accountId: userId,
+                id,
+            },
+        });
+
+        if (!machine) {
+            return reply.code(404).send({ error: 'Machine not found' });
+        }
+
+        if (machine.active) {
+            return reply.code(409).send({ error: 'Stop the daemon or wait for the machine to go offline before archiving it.' });
+        }
+
+        const archivedAt = machine.archivedAt ?? new Date();
+        if (!machine.archivedAt) {
+            await db.machine.updateMany({
+                where: {
+                    accountId: userId,
+                    id,
+                    archivedAt: null,
+                },
+                data: {
+                    archivedAt,
+                },
+            });
+        }
+
+        const updSeq = await allocateUserSeq(userId);
+        eventRouter.emitUpdate({
+            userId,
+            payload: buildUpdateMachineUpdate(id, updSeq, randomKeyNaked(12), undefined, undefined, {
+                active: machine.active,
+                activeAt: machine.lastActiveAt.getTime(),
+                archivedAt: archivedAt.getTime(),
+            }),
+            recipientFilter: { type: 'user-scoped-only' },
+        });
+
+        return reply.send({
+            success: true,
+            machineId: id,
+            archivedAt: archivedAt.getTime(),
+        });
+    });
+
+    app.post('/v1/machines/:id/unarchive', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                id: z.string(),
+            }),
+        },
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { id } = request.params;
+
+        const machine = await db.machine.findFirst({
+            where: {
+                accountId: userId,
+                id,
+            },
+        });
+
+        if (!machine) {
+            return reply.code(404).send({ error: 'Machine not found' });
+        }
+
+        if (machine.archivedAt) {
+            await db.machine.updateMany({
+                where: {
+                    accountId: userId,
+                    id,
+                },
+                data: {
+                    archivedAt: null,
+                },
+            });
+        }
+
+        const updSeq = await allocateUserSeq(userId);
+        eventRouter.emitUpdate({
+            userId,
+            payload: buildUpdateMachineUpdate(id, updSeq, randomKeyNaked(12), undefined, undefined, {
+                active: machine.active,
+                activeAt: machine.lastActiveAt.getTime(),
+                archivedAt: null,
+            }),
+            recipientFilter: { type: 'user-scoped-only' },
+        });
+
+        return reply.send({
+            success: true,
+            machineId: id,
+        });
+    });
+
+    app.delete('/v1/machines/:id', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                id: z.string(),
+            }),
+        },
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { id } = request.params;
+
+        const machine = await db.machine.findFirst({
+            where: {
+                accountId: userId,
+                id,
+            },
+        });
+
+        if (!machine) {
+            return reply.code(404).send({ error: 'Machine not found' });
+        }
+
+        if (machine.active) {
+            return reply.code(409).send({ error: 'Stop the daemon or wait for the machine to go offline before deleting it.' });
+        }
+
+        await db.$transaction([
+            db.accessKey.deleteMany({
+                where: {
+                    accountId: userId,
+                    machineId: id,
+                },
+            }),
+            db.machine.deleteMany({
+                where: {
+                    accountId: userId,
+                    id,
+                },
+            }),
+        ]);
+
+        const updSeq = await allocateUserSeq(userId);
+        eventRouter.emitUpdate({
+            userId,
+            payload: buildDeleteMachineUpdate(id, updSeq, randomKeyNaked(12)),
+            recipientFilter: { type: 'user-scoped-only' },
+        });
+
+        return reply.send({
+            success: true,
+            machineId: id,
+        });
     });
 
 }
