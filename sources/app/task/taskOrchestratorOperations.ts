@@ -359,3 +359,51 @@ export async function deleteTask(
 
     log({ module: 'task-orchestrator', teamId, taskId }, `Task deleted (${idsToDelete.size} total)`);
 }
+
+/**
+ * Release all active task execution locks held by a dead session.
+ *
+ * Called by the daemon when heartbeat detects a session has died without
+ * calling retire_self. Marks the session's execution links as 'abandoned'
+ * so other agents can claim those tasks via start_task.
+ *
+ * Returns the IDs of tasks that were unlocked.
+ */
+export async function releaseSessionTaskLocks(
+    context: TaskOrchestratorContext,
+    userId: string,
+    teamId: string,
+    sessionId: string,
+): Promise<string[]> {
+    const board = await requireBoard(context, userId, teamId);
+
+    const unlockedTaskIds: string[] = [];
+
+    for (const task of board.tasks) {
+        const activeLink = task.executionLinks?.find(
+            (link) => link.status === 'active' && link.sessionId === sessionId,
+        );
+        if (!activeLink) continue;
+
+        activeLink.status = 'abandoned';
+        task.updatedAt = Date.now();
+        unlockedTaskIds.push(task.id);
+    }
+
+    if (unlockedTaskIds.length === 0) {
+        return [];
+    }
+
+    // Persist one save that covers all unlocked tasks; broadcast the last one
+    // (each task will be individually re-fetched by clients on next poll).
+    const lastId = unlockedTaskIds[unlockedTaskIds.length - 1];
+    const lastTask = board.tasks.find((t) => t.id === lastId);
+    await context.saveBoard(userId, teamId, board, 'task-updated', lastId, lastTask);
+
+    log(
+        { module: 'task-orchestrator', teamId, sessionId },
+        `Released execution locks for dead session on ${unlockedTaskIds.length} task(s): ${unlockedTaskIds.join(', ')}`,
+    );
+
+    return unlockedTaskIds;
+}

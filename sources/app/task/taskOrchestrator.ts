@@ -19,6 +19,7 @@ import {
     deleteTask,
     getTask,
     listTasks,
+    releaseSessionTaskLocks,
     setHumanStatusLock,
     updateTask,
 } from './taskOrchestratorOperations';
@@ -220,6 +221,14 @@ export class TaskOrchestrator {
         comment?: Omit<TaskCommentInput, 'sessionId'>,
     ): Promise<KanbanTask> {
         return resolveBlocker(this.context(), userId, teamId, taskId, blockerId, sessionId, resolution, comment);
+    }
+
+    async releaseSessionTaskLocks(
+        userId: string,
+        teamId: string,
+        sessionId: string,
+    ): Promise<string[]> {
+        return releaseSessionTaskLocks(this.context(), userId, teamId, sessionId);
     }
 }
 

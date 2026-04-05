@@ -729,4 +729,39 @@ export function taskRoutes(app: Fastify) {
             return reply.code(500).send({ error: 'Failed to add task comment' });
         }
     });
+
+    // POST /v1/teams/:teamId/sessions/:sessionId/release-locks
+    // Called by the daemon when it detects a session has died (heartbeat timeout).
+    // Marks all active execution links owned by that session as 'abandoned' so
+    // other agents can claim those tasks via start_task.
+    app.post('/v1/teams/:teamId/sessions/:sessionId/release-locks', {
+        preHandler: taskRoutePreHandlers,
+        schema: {
+            params: z.object({
+                teamId: z.string(),
+                sessionId: z.string(),
+            }),
+            response: {
+                200: z.object({
+                    success: z.literal(true),
+                    unlockedTaskIds: z.array(z.string()),
+                }),
+                500: z.object({
+                    error: z.string(),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { teamId, sessionId } = request.params as { teamId: string; sessionId: string };
+
+        try {
+            const unlockedTaskIds = await taskOrchestrator.releaseSessionTaskLocks(userId, teamId, sessionId);
+            log({ module: 'task-routes', teamId, sessionId }, `Released task locks for dead session (${unlockedTaskIds.length} task(s))`);
+            return reply.send({ success: true, unlockedTaskIds });
+        } catch (error: any) {
+            log({ module: 'task-routes', level: 'error' }, `Failed to release session task locks: ${error}`);
+            return reply.code(500).send({ error: 'Failed to release session task locks' });
+        }
+    });
 }
