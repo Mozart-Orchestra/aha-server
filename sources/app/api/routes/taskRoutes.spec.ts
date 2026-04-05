@@ -67,13 +67,14 @@ function buildApp(options?: {
     return typed;
 }
 
-function buildTask(id = 'task-1') {
+function buildTask(id = 'task-1', overrides: Record<string, unknown> = {}) {
     return {
         id,
         title: `Task ${id}`,
         status: 'todo',
         createdAt: 1,
         updatedAt: 1,
+        ...overrides,
     };
 }
 
@@ -169,6 +170,39 @@ describe('taskRoutes', () => {
         await app.close();
     });
 
+    it('accepts acceptanceCriteria on create and passes it through to the orchestrator', async () => {
+        const acceptanceCriteria = [
+            'Task creator can define explicit pass conditions',
+            'Assignee can read them back from the task payload',
+        ];
+        mocked.createTask.mockResolvedValue(buildTask('task-new', { acceptanceCriteria }));
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/teams/team-1/tasks',
+            payload: {
+                title: 'New task',
+                acceptanceCriteria,
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(mocked.createTask).toHaveBeenCalledWith('user-1', 'team-1', expect.objectContaining({
+            title: 'New task',
+            acceptanceCriteria,
+        }));
+        expect(response.json()).toEqual({
+            success: true,
+            task: expect.objectContaining({
+                id: 'task-new',
+                acceptanceCriteria,
+            }),
+        });
+
+        await app.close();
+    });
+
     it('maps maximum nesting depth errors to 400 on create', async () => {
         mocked.createTask.mockRejectedValue(new Error('Maximum nesting depth (3) exceeded'));
 
@@ -184,6 +218,28 @@ describe('taskRoutes', () => {
 
         expect(response.statusCode).toBe(400);
         expect(response.json()).toEqual({ error: 'Maximum nesting depth (3) exceeded' });
+
+        await app.close();
+    });
+
+    it('returns acceptanceCriteria when fetching a task', async () => {
+        const acceptanceCriteria = [
+            'Create API accepts acceptanceCriteria',
+            'GET API returns acceptanceCriteria unchanged',
+        ];
+        mocked.getTask.mockResolvedValue(buildTask('task-acceptance', { acceptanceCriteria }));
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/teams/team-1/tasks/task-acceptance',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual(expect.objectContaining({
+            id: 'task-acceptance',
+            acceptanceCriteria,
+        }));
 
         await app.close();
     });
@@ -235,6 +291,36 @@ describe('taskRoutes', () => {
                 content: 'Migrated during replace_agent handoff',
             },
         }));
+
+        await app.close();
+    });
+
+    it('accepts optional acceptanceCriteria on update, including an empty array', async () => {
+        mocked.updateTask.mockResolvedValue({
+            ...buildTask('task-1'),
+            acceptanceCriteria: [],
+        });
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'PUT',
+            url: '/v1/teams/team-1/tasks/task-1',
+            payload: {
+                acceptanceCriteria: [],
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(mocked.updateTask).toHaveBeenCalledWith('user-1', 'team-1', 'task-1', expect.objectContaining({
+            acceptanceCriteria: [],
+        }));
+        expect(response.json()).toEqual({
+            success: true,
+            task: expect.objectContaining({
+                id: 'task-1',
+                acceptanceCriteria: [],
+            }),
+        });
 
         await app.close();
     });

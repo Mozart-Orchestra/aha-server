@@ -67,6 +67,7 @@ export interface KanbanTask {
     id: string;
     title: string;
     description?: string;
+    acceptanceCriteria?: string[];
     status: string;
     assigneeId?: string | null;
     reporterId?: string;

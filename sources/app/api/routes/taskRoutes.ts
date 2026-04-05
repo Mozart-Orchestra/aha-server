@@ -23,6 +23,7 @@ import { observeSessionActivity } from "@/app/presence/observeSessionActivity";
 const TaskSchema = z.object({
     title: z.string().min(1).max(500),
     description: z.string().max(5000).optional(),
+    acceptanceCriteria: z.array(z.string().min(1).max(1000)).max(50).optional(),
     status: z.enum(['todo', 'in-progress', 'review', 'blocked', 'done']).default('todo'),
     priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
     assigneeId: z.string().nullable().optional(),

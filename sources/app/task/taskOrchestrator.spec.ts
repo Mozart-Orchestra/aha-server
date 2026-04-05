@@ -248,4 +248,69 @@ describe('TaskOrchestrator', () => {
 
         expect(saveBoardSpy).not.toHaveBeenCalled();
     });
+
+    it('stores acceptanceCriteria on create and forwards them to persistence', async () => {
+        const board = buildBoard([]);
+        const orchestrator = new TaskOrchestrator();
+        const saveBoardSpy = wireBoard(orchestrator, board);
+
+        const result = await orchestrator.createTask('user-1', 'team-1', {
+            title: 'Add acceptance criteria support',
+            status: 'todo',
+            acceptanceCriteria: [
+                'Create accepts acceptanceCriteria',
+                'Task payload returns acceptanceCriteria',
+            ],
+        });
+
+        expect(result.acceptanceCriteria).toEqual([
+            'Create accepts acceptanceCriteria',
+            'Task payload returns acceptanceCriteria',
+        ]);
+        expect(board.tasks[0]?.acceptanceCriteria).toEqual([
+            'Create accepts acceptanceCriteria',
+            'Task payload returns acceptanceCriteria',
+        ]);
+        expect(saveBoardSpy).toHaveBeenCalledWith(
+            'user-1',
+            'team-1',
+            board,
+            'task-created',
+            result.id,
+            expect.objectContaining({
+                acceptanceCriteria: [
+                    'Create accepts acceptanceCriteria',
+                    'Task payload returns acceptanceCriteria',
+                ],
+            }),
+        );
+    });
+
+    it('updates acceptanceCriteria, including clearing them with an empty array', async () => {
+        const task = buildTask({
+            id: 'task-1',
+            title: 'Acceptance criteria task',
+            acceptanceCriteria: ['old criterion'],
+        });
+        const board = buildBoard([task]);
+        const orchestrator = new TaskOrchestrator();
+        const saveBoardSpy = wireBoard(orchestrator, board);
+
+        const result = await orchestrator.updateTask('user-1', 'team-1', 'task-1', {
+            acceptanceCriteria: [],
+        });
+
+        expect(result.acceptanceCriteria).toEqual([]);
+        expect(board.tasks[0]?.acceptanceCriteria).toEqual([]);
+        expect(saveBoardSpy).toHaveBeenCalledWith(
+            'user-1',
+            'team-1',
+            board,
+            'task-updated',
+            'task-1',
+            expect.objectContaining({
+                acceptanceCriteria: [],
+            }),
+        );
+    });
 });

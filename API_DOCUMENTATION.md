@@ -729,6 +729,9 @@ socket.on('message:new', (data) => {
 Update a task.
 
 **Request Body Notes:**
+- `acceptanceCriteria` is an optional `string[]`
+- Omitting `acceptanceCriteria` preserves existing behavior
+- Supplying `acceptanceCriteria: []` clears previously stored criteria without affecting other task fields
 - `comment` may be either:
   - a structured `TaskComment` object, or
   - a shorthand string
@@ -739,6 +742,10 @@ Update a task.
 ```json
 {
   "assigneeId": "session-replacement",
+  "acceptanceCriteria": [
+    "The API stores the acceptance criteria array",
+    "Subsequent GET/list responses include the field"
+  ],
   "comment": "Migrated during replace_agent handoff",
   "commentType": "handoff"
 }
