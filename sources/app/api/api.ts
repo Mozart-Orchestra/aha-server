@@ -36,6 +36,7 @@ import { channelRoutes } from "./routes/channelRoutes";
 import { wechatRoutes } from "./routes/wechatRoutes";
 import { getCorsConfig } from "./utils/corsConfig";
 import { getDefaultRateLimitConfig } from "./utils/rateLimitConfig";
+import { getPublicApiServers } from "./utils/publicBaseUrls";
 
 export async function startApi() {
 
@@ -70,16 +71,7 @@ export async function startApi() {
                     url: 'https://opensource.org/licenses/MIT'
                 }
             },
-            servers: [
-                {
-                    url: 'http://localhost:3005',
-                    description: 'Local development server'
-                },
-                {
-                    url: 'https://top1vibe.com',
-                    description: 'Production server'
-                }
-            ],
+            servers: getPublicApiServers(),
             tags: [
                 { name: 'Authentication', description: 'User authentication and authorization' },
                 { name: 'Sessions', description: 'Claude Code session management' },

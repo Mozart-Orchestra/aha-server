@@ -8,6 +8,15 @@ import { githubConnect } from "@/app/github/githubConnect";
 import { githubDisconnect } from "@/app/github/githubDisconnect";
 import { Context } from "@/context";
 import { db } from "@/storage/db";
+import { getPublicWebappUrl } from "../utils/publicBaseUrls";
+
+function redirectToWebapp(request: { headers?: Record<string, string | string[] | undefined> }, reply: { redirect: (url: string) => unknown }, params: Record<string, string>): unknown {
+    const url = new URL(getPublicWebappUrl(request));
+    for (const [key, value] of Object.entries(params)) {
+        url.searchParams.set(key, value);
+    }
+    return reply.redirect(url.toString());
+}
 
 export function connectRoutes(app: Fastify) {
 
@@ -99,7 +108,7 @@ export function connectRoutes(app: Fastify) {
         const tokenData = await auth.verifyGithubToken(state);
         if (!tokenData) {
             log({ module: 'github-oauth' }, `Invalid state token: ${state}`);
-            return reply.redirect('https://app.aha.engineering?error=invalid_state');
+            return redirectToWebapp(request, reply, { error: 'invalid_state' });
         }
 
         const userId = tokenData.userId;
@@ -107,7 +116,7 @@ export function connectRoutes(app: Fastify) {
         const clientSecret = process.env.GITHUB_CLIENT_SECRET;
 
         if (!clientId || !clientSecret) {
-            return reply.redirect('https://app.aha.engineering?error=server_config');
+            return redirectToWebapp(request, reply, { error: 'server_config' });
         }
 
         try {
@@ -132,7 +141,7 @@ export function connectRoutes(app: Fastify) {
             };
 
             if (tokenResponseData.error) {
-                return reply.redirect(`https://app.aha.engineering?error=${encodeURIComponent(tokenResponseData.error)}`);
+                return redirectToWebapp(request, reply, { error: tokenResponseData.error });
             }
 
             const accessToken = tokenResponseData.access_token;
@@ -148,7 +157,7 @@ export function connectRoutes(app: Fastify) {
             const userData = await userResponse.json() as GitHubProfile;
 
             if (!userResponse.ok) {
-                return reply.redirect('https://app.aha.engineering?error=github_user_fetch_failed');
+                return redirectToWebapp(request, reply, { error: 'github_user_fetch_failed' });
             }
 
             // Use the new githubConnect operation
@@ -156,11 +165,11 @@ export function connectRoutes(app: Fastify) {
             await githubConnect(ctx, userData, accessToken!);
 
             // Redirect to app with success
-            return reply.redirect(`https://app.aha.engineering?github=connected&user=${encodeURIComponent(userData.login)}`);
+            return redirectToWebapp(request, reply, { github: 'connected', user: userData.login });
 
         } catch (error) {
             log({ module: 'github-oauth' }, `Error in GitHub GET callback: ${error}`);
-            return reply.redirect('https://app.aha.engineering?error=server_error');
+            return redirectToWebapp(request, reply, { error: 'server_error' });
         }
     });
 

@@ -6,6 +6,7 @@
  */
 
 import { zodToJsonSchema } from 'zod-to-json-schema'
+import { getPublicApiServers } from '../utils/publicBaseUrls'
 
 /**
  * Convert Zod schema to JSON Schema for Swagger
@@ -78,16 +79,7 @@ For more information, visit [GitHub Repository](https://github.com/slopus/aha-se
       url: 'https://opensource.org/licenses/MIT'
     }
   },
-  servers: [
-    {
-      url: 'http://localhost:3005',
-      description: 'Local development server'
-    },
-    {
-      url: 'https://top1vibe.com',
-      description: 'Production server'
-    }
-  ],
+  servers: getPublicApiServers(),
   tags: [
     { name: 'Authentication', description: 'User authentication and authorization' },
     { name: 'Sessions', description: 'Claude Code session management' },
