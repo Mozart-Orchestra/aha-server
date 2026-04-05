@@ -290,7 +290,10 @@ export function buildTeamMirrorSnapshot(
                 ? rawBootContext.initialObjective
                 : null,
         },
-        bootContext: rawBootContext,
+        bootContext: rawBootContext ? {
+            ...(typeof rawBootContext.teamDescription === 'string' ? { teamDescription: rawBootContext.teamDescription } : {}),
+            ...(typeof rawBootContext.initialObjective === 'string' ? { initialObjective: rawBootContext.initialObjective } : {}),
+        } : null,
         projectMap,
         counts: buildTaskCounts(mirrorTasks, members.length),
         members: toMirrorMembers(members),
