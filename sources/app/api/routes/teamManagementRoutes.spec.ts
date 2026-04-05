@@ -60,11 +60,15 @@ import { db } from '@/storage/db';
 import { getTeamOverviewSnapshot } from '@/app/team/teamOverview';
 import { teamManagementRoutes } from './teamManagementRoutes';
 
-function buildTeamArtifact(board: Record<string, unknown>, overrides?: Partial<{ id: string; accountId: string; createdAt: Date; updatedAt: Date }>) {
+function buildTeamArtifact(
+    board: Record<string, unknown>,
+    overrides?: Partial<{ id: string; accountId: string; bodyVersion: number; createdAt: Date; updatedAt: Date }>
+) {
     return {
         id: overrides?.id ?? 'team-1',
         accountId: overrides?.accountId ?? 'user-1',
         body: Buffer.from(JSON.stringify({ body: JSON.stringify(board) })),
+        bodyVersion: overrides?.bodyVersion ?? 1,
         createdAt: overrides?.createdAt ?? new Date('2026-03-17T00:00:00Z'),
         updatedAt: overrides?.updatedAt ?? new Date('2026-03-17T00:05:00Z'),
     };
@@ -650,6 +654,120 @@ describe('teamManagementRoutes', () => {
                 members: [
                     expect.objectContaining({ sessionId: 'session-1', roleId: 'builder' }),
                     expect.objectContaining({ sessionId: 'session-2', roleId: 'master' }),
+                ],
+            }),
+        });
+
+        await app.close();
+    });
+
+    it('returns a canonical team mirror with goal, counts, members, and task summaries', async () => {
+        const board = {
+            name: 'Agent Team',
+            description: 'Team serving agents, not dashboards.',
+            version: 7,
+            team: {
+                name: 'Agent Team',
+                members: [
+                    {
+                        sessionId: 'session-1',
+                        roleId: 'implementer',
+                        displayName: 'Server Implementer',
+                        runtimeType: 'codex',
+                        specId: 'spec-1',
+                    },
+                ],
+                bootContext: {
+                    initialObjective: 'Make new agents see goal + tasks in one read.',
+                    projectMap: {
+                        canonicalRepos: [
+                            '/Users/copizza/Desktop/happyhere/aha-cli-0330-max-redefine-login',
+                            '/Users/copizza/Desktop/happyhere/happy-server-0330-max-redefine-login',
+                        ],
+                    },
+                },
+            },
+            tasks: [
+                {
+                    id: 'task-1',
+                    title: 'Expose team mirror',
+                    status: 'todo',
+                    priority: 'high',
+                    assigneeId: 'session-1',
+                    acceptanceCriteria: ['Mirror returns goal', 'Mirror returns task summaries'],
+                    comments: [{ id: 'comment-1' }],
+                    blockers: [{ id: 'blocker-1' }],
+                    updatedAt: 1710800000000,
+                },
+                {
+                    id: 'task-deleted',
+                    title: 'Hidden task',
+                    status: 'done',
+                    isDeleted: true,
+                },
+            ],
+        };
+
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(buildTeamArtifact(board, { bodyVersion: 4 }) as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/teams/team-1/mirror',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+            mirror: expect.objectContaining({
+                sourceOfTruth: expect.objectContaining({
+                    artifactId: 'team-1',
+                    artifactBodyVersion: 4,
+                    source: 'team-artifact',
+                }),
+                team: expect.objectContaining({
+                    id: 'team-1',
+                    name: 'Agent Team',
+                    description: 'Team serving agents, not dashboards.',
+                    boardVersion: 7,
+                }),
+                goal: {
+                    initialObjective: 'Make new agents see goal + tasks in one read.',
+                },
+                projectMap: {
+                    canonicalRepos: [
+                        '/Users/copizza/Desktop/happyhere/aha-cli-0330-max-redefine-login',
+                        '/Users/copizza/Desktop/happyhere/happy-server-0330-max-redefine-login',
+                    ],
+                },
+                counts: {
+                    members: 1,
+                    tasks: 1,
+                    todo: 1,
+                    inProgress: 0,
+                    review: 0,
+                    blocked: 0,
+                    done: 0,
+                },
+                members: [
+                    expect.objectContaining({
+                        sessionId: 'session-1',
+                        roleId: 'implementer',
+                        displayName: 'Server Implementer',
+                        runtimeType: 'codex',
+                        specId: 'spec-1',
+                    }),
+                ],
+                tasks: [
+                    expect.objectContaining({
+                        id: 'task-1',
+                        title: 'Expose team mirror',
+                        status: 'todo',
+                        priority: 'high',
+                        assigneeId: 'session-1',
+                        acceptanceCriteria: ['Mirror returns goal', 'Mirror returns task summaries'],
+                        commentCount: 1,
+                        blockerCount: 1,
+                    }),
                 ],
             }),
         });

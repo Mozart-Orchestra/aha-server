@@ -6,6 +6,7 @@ import { eventRouter } from "@/app/events/eventRouter";
 import { allocateUserSeq } from "@/storage/seq";
 import { randomKeyNaked } from "@/utils/randomKeyNaked";
 import {
+    buildTeamMirrorSnapshot,
     extractTeamBoard,
     extractTeamMembers,
     getAccessibleTeamArtifact,
@@ -82,6 +83,72 @@ const CorpsCreateSchema = z.object({
             path: ['roles'],
         });
     }
+});
+
+const TeamMirrorMemberSchema = z.object({
+    memberId: z.string().optional(),
+    sessionId: z.string(),
+    sessionTag: z.string().optional(),
+    roleId: z.string().optional(),
+    displayName: z.string().optional(),
+    executionPlane: z.string().optional(),
+    runtimeType: z.string().optional(),
+    specId: z.string().optional(),
+    genomeId: z.string().optional(),
+    genomeVersion: z.number().nullable().optional(),
+    sourceImageId: z.string().optional(),
+    sourceImageVersion: z.number().nullable().optional(),
+    workspacePath: z.string().optional(),
+    machineId: z.string().optional(),
+    lifecycle: AgentLifecycleSchema.optional(),
+});
+
+const TeamMirrorTaskSchema = z.object({
+    id: z.string(),
+    title: z.string(),
+    status: z.string(),
+    priority: z.string().nullable(),
+    assigneeId: z.string().nullable(),
+    parentTaskId: z.string().nullable(),
+    approvalStatus: z.string().nullable(),
+    labels: z.array(z.string()),
+    acceptanceCriteria: z.array(z.string()),
+    commentCount: z.number(),
+    blockerCount: z.number(),
+    updatedAt: z.number().nullable(),
+});
+
+const TeamMirrorSchema = z.object({
+    sourceOfTruth: z.object({
+        artifactId: z.string(),
+        artifactBodyVersion: z.number(),
+        artifactUpdatedAt: z.number(),
+        source: z.literal('team-artifact'),
+    }),
+    team: z.object({
+        id: z.string(),
+        name: z.string(),
+        description: z.string(),
+        createdAt: z.number(),
+        updatedAt: z.number(),
+        boardVersion: z.number().nullable(),
+    }),
+    goal: z.object({
+        initialObjective: z.string().nullable(),
+    }),
+    bootContext: z.record(z.string(), z.any()).nullable(),
+    projectMap: z.any().nullable(),
+    counts: z.object({
+        members: z.number(),
+        tasks: z.number(),
+        todo: z.number(),
+        inProgress: z.number(),
+        review: z.number(),
+        blocked: z.number(),
+        done: z.number(),
+    }),
+    members: z.array(TeamMirrorMemberSchema),
+    tasks: z.array(TeamMirrorTaskSchema),
 });
 
 interface CorpsSeatConfig {
@@ -743,6 +810,41 @@ export function teamManagementRoutes(app: Fastify) {
     });
 
     // === Team Member Management ===
+
+    // GET /v1/teams/:teamId/mirror - Canonical team mirror for agents
+    app.get('/v1/teams/:teamId/mirror', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({ teamId: z.string() }),
+            response: {
+                200: z.object({
+                    mirror: TeamMirrorSchema,
+                }),
+                404: z.object({
+                    error: z.literal('Team not found'),
+                }),
+                500: z.object({
+                    error: z.literal('Failed to get team mirror'),
+                }),
+            },
+        },
+    }, async (request, reply) => {
+        const { teamId } = request.params as { teamId: string };
+
+        try {
+            const artifact = await getAccessibleTeamArtifact(request.userId, teamId, { includeArchived: true });
+            if (!artifact) {
+                return reply.code(404).send({ error: 'Team not found' });
+            }
+
+            return reply.send({
+                mirror: buildTeamMirrorSnapshot(artifact),
+            });
+        } catch (error: any) {
+            log({ module: 'team-management', level: 'error' }, `Failed to get team mirror ${teamId}: ${error}`);
+            return reply.code(500).send({ error: 'Failed to get team mirror' });
+        }
+    });
 
     // GET /v1/teams/:teamId/members - List team members
     app.get('/v1/teams/:teamId/members', {
