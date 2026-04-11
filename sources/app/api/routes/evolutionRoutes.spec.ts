@@ -1326,6 +1326,42 @@ describe('evolutionRoutes', () => {
         }
     });
 
+    it('uses the docker genome-hub hostname fallback when GENOME_HUB_URL is unset inside a container', async () => {
+        const previousHubUrl = process.env.GENOME_HUB_URL;
+        delete process.env.GENOME_HUB_URL;
+        vi.mocked(existsSync).mockImplementation(((path: string) => path === '/.dockerenv') as typeof existsSync);
+        vi.mocked(axios.get).mockResolvedValueOnce({
+            status: 200,
+            data: { trials: [] },
+        } as never);
+
+        try {
+            const app = buildApp();
+            const response = await app.inject({
+                method: 'GET',
+                url: '/v1/entities/id/entity-1/trials',
+            });
+
+            expect(response.statusCode).toBe(200);
+            expect(axios.get).toHaveBeenCalledWith(
+                'http://genome-hub:3006/entities/id/entity-1/trials',
+                expect.objectContaining({
+                    headers: {},
+                    timeout: 10_000,
+                    validateStatus: expect.any(Function),
+                }),
+            );
+
+            await app.close();
+        } finally {
+            if (previousHubUrl === undefined) {
+                delete process.env.GENOME_HUB_URL;
+            } else {
+                process.env.GENOME_HUB_URL = previousHubUrl;
+            }
+        }
+    });
+
     it('proxies entity lookup routes to genome-hub', async () => {
         const previousHubPublishKey = process.env.HUB_PUBLISH_KEY;
         const previousGenomeHubPublishKey = process.env.GENOME_HUB_PUBLISH_KEY;

@@ -165,6 +165,21 @@ function resolveGenomeHubPublishKey(): string | undefined {
     return process.env.GENOME_HUB_PUBLISH_KEY || process.env.HUB_PUBLISH_KEY;
 }
 
+function resolveGenomeHubBaseUrl(): string {
+    const configuredUrl = process.env.GENOME_HUB_URL?.trim();
+    if (configuredUrl) {
+        return configuredUrl.replace(/\/$/, '');
+    }
+
+    // Docker deployments need the internal service hostname instead of the
+    // container-local loopback address.
+    if (existsSync('/.dockerenv')) {
+        return 'http://genome-hub:3006';
+    }
+
+    return 'http://localhost:3006';
+}
+
 function isProtectedHubNamespace(namespace: string | null | undefined): boolean {
     return namespace === '@official';
 }
@@ -273,7 +288,7 @@ function normalizeGenomeApiPayload<T>(payload: T): T {
 }
 
 async function loadGenomeHubTransport() {
-    const hubUrl = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
+    const hubUrl = resolveGenomeHubBaseUrl();
     const hubPublishKey = resolveGenomeHubPublishKey();
     const { default: axios } = await import('axios');
 
