@@ -6,6 +6,9 @@ import { isTaskOperationError, TASK_ERROR_CODES } from "@/app/task/taskErrors";
 import { invalidateTeamOverviewSnapshot } from "@/app/team/teamOverview";
 import { getAccessibleTeamArtifact } from "@/app/team/teamArtifacts";
 import { observeSessionActivity } from "@/app/presence/observeSessionActivity";
+import { buildTeamScopeFromMetadata, normalizeTeamScope } from "@/app/team/teamScope";
+import { db } from "@/storage/db";
+import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
 
 /**
  * Task Routes - Server-Driven Task Management API
@@ -30,7 +33,13 @@ const TaskSchema = z.object({
     reporterId: z.string().optional(),
     parentTaskId: z.string().nullable().optional(),
     labels: z.array(z.string()).optional(),
-    approvalStatus: z.enum(['pending', 'approved', 'rejected']).optional()
+    approvalStatus: z.enum(['pending', 'approved', 'rejected']).optional(),
+    scope: z.object({
+        scopePath: z.string(),
+        scopeLabel: z.string().optional(),
+        repoName: z.string().optional(),
+        visibility: z.enum(['scoped', 'global']).optional(),
+    }).optional(),
 });
 
 const BlockerSchema = z.object({
@@ -61,6 +70,7 @@ const TaskCommentSchema = z.object({
     fromStatus: z.string().optional(),
     toStatus: z.string().optional(),
     mentions: z.array(z.string()).optional(),
+    commitHash: z.string().optional(),
 });
 
 const TaskActorSchema = z.object({
@@ -95,6 +105,82 @@ const TaskUpdateSchema = TaskSchema.partial().extend({
 type TaskCommentPayload = z.infer<typeof TaskCommentSchema>;
 type TaskUpdateCommentPayload = z.infer<typeof TaskUpdateCommentSchema>;
 
+type ResolvedTaskSession = {
+    sessionId: string;
+    role?: string;
+    displayName?: string;
+    scope?: z.infer<typeof TaskSchema>['scope'] | null;
+};
+
+async function resolveTaskSession(
+    userId: string,
+    teamId: string,
+    sessionId: string | undefined,
+): Promise<ResolvedTaskSession | null> {
+    const normalizedSessionId = sessionId?.trim();
+    if (!normalizedSessionId) {
+        return null;
+    }
+
+    const artifact = await getAccessibleTeamArtifact(userId, teamId, { includeArchived: true });
+    if (!artifact) {
+        return null;
+    }
+
+    let memberSessionIds: string[] = [];
+    if (artifact.body) {
+        try {
+            const board = parseTeamArtifactBody(artifact.body) as Record<string, any>;
+            memberSessionIds = Array.isArray(board?.team?.members)
+                ? board.team.members
+                    .map((member: any) => member?.sessionId)
+                    .filter((value: unknown): value is string => typeof value === 'string' && value.length > 0)
+                : [];
+        } catch {
+            memberSessionIds = [];
+        }
+    }
+    if (memberSessionIds.length > 0 && !memberSessionIds.includes(normalizedSessionId)) {
+        return null;
+    }
+
+    const session = await db.session.findFirst({
+        where: {
+            id: normalizedSessionId,
+            accountId: userId,
+            deletedAt: null,
+        },
+        select: {
+            id: true,
+            metadata: true,
+        },
+    });
+
+    if (!session) {
+        return null;
+    }
+
+    let parsedMetadata: Record<string, unknown> | null = null;
+    try {
+        parsedMetadata = JSON.parse(session.metadata) as Record<string, unknown>;
+    } catch {
+        parsedMetadata = null;
+    }
+
+    const scope = buildTeamScopeFromMetadata(parsedMetadata);
+    const role = typeof parsedMetadata?.role === 'string' ? parsedMetadata.role : undefined;
+    const displayName = typeof parsedMetadata?.name === 'string'
+        ? parsedMetadata.name
+        : (typeof parsedMetadata?.path === 'string' ? parsedMetadata.path : undefined);
+
+    return {
+        sessionId: normalizedSessionId,
+        ...(role ? { role } : {}),
+        ...(displayName ? { displayName } : {}),
+        ...(scope ? { scope } : {}),
+    };
+}
+
 function normalizeTaskUpdateComment(
     comment: TaskUpdateCommentPayload | undefined,
     defaults?: {
@@ -127,6 +213,17 @@ function normalizeTaskUpdateComment(
     };
 }
 
+function resolveTaskScope(
+    inputScope: unknown,
+    fallbackScope?: z.infer<typeof TaskSchema>['scope'] | null,
+): z.infer<typeof TaskSchema>['scope'] | undefined {
+    const normalized = normalizeTeamScope(inputScope);
+    if (normalized) {
+        return normalized;
+    }
+    return fallbackScope ?? undefined;
+}
+
 export function taskRoutes(app: Fastify) {
     log({ module: 'api' }, 'Registering taskRoutes...');
 
@@ -155,7 +252,10 @@ export function taskRoutes(app: Fastify) {
             }),
             querystring: z.object({
                 status: z.enum(['todo', 'in-progress', 'review', 'blocked', 'done']).optional(),
-                assigneeId: z.string().optional()
+                assigneeId: z.string().optional(),
+                scopePath: z.string().optional(),
+                repoName: z.string().optional(),
+                includeGlobal: z.coerce.boolean().optional(),
             }),
             response: {
                 200: z.object({
@@ -173,10 +273,16 @@ export function taskRoutes(app: Fastify) {
     }, async (request, reply) => {
         const userId = request.userId;
         const { teamId } = request.params as { teamId: string };
-        const { status, assigneeId } = request.query as { status?: string; assigneeId?: string };
+        const { status, assigneeId, scopePath, repoName, includeGlobal } = request.query as {
+            status?: string;
+            assigneeId?: string;
+            scopePath?: string;
+            repoName?: string;
+            includeGlobal?: boolean;
+        };
 
         try {
-            const result = await taskOrchestrator.listTasks(userId, teamId, { status, assigneeId });
+            const result = await taskOrchestrator.listTasks(userId, teamId, { status, assigneeId, scopePath, repoName, includeGlobal });
             return reply.send(result);
         } catch (error: any) {
             if (error.message === 'Team not found') {
@@ -251,9 +357,31 @@ export function taskRoutes(app: Fastify) {
         const taskData = request.body as z.infer<typeof TaskSchema>;
 
         try {
-            const task = await taskOrchestrator.createTask(userId, teamId, taskData);
+            const reporter = await resolveTaskSession(userId, teamId, taskData.reporterId);
+            if (taskData.reporterId && !reporter) {
+                return reply.code(400).send({ error: 'Invalid reporterId for this team' });
+            }
+
+            let task;
+            const MAX_RETRIES = 3;
+            for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+                try {
+                    task = await taskOrchestrator.createTask(userId, teamId, {
+                        ...taskData,
+                        ...(resolveTaskScope(taskData.scope, reporter?.scope) ? { scope: resolveTaskScope(taskData.scope, reporter?.scope) } : {}),
+                    });
+                    break;
+                } catch (retryError: any) {
+                    if (retryError.message?.includes('Concurrent write conflict') && attempt < MAX_RETRIES - 1) {
+                        log({ module: 'task-routes', teamId }, `Concurrent write conflict on attempt ${attempt + 1}, retrying`);
+                        continue;
+                    }
+                    throw retryError;
+                }
+            }
+
             await invalidateTeamOverviewSnapshot(userId);
-            log({ module: 'task-routes', teamId, taskId: task.id }, 'Task created');
+            log({ module: 'task-routes', teamId, taskId: task!.id }, 'Task created');
             return reply.send({ success: true, task });
         } catch (error: any) {
             if (error.message === 'Team not found') {
@@ -261,6 +389,9 @@ export function taskRoutes(app: Fastify) {
             }
             if (error.message?.includes('Maximum nesting depth')) {
                 return reply.code(400).send({ error: error.message });
+            }
+            if (error.message?.includes('Concurrent write conflict')) {
+                return reply.code(409).send({ error: 'Concurrent modification - please retry' });
             }
             log({ module: 'task-routes', level: 'error' }, `Failed to create task: ${error}`);
             return reply.code(500).send({ error: 'Failed to create task' });
@@ -294,20 +425,49 @@ export function taskRoutes(app: Fastify) {
         const { teamId, taskId } = request.params as { teamId: string; taskId: string };
         const body = request.body as z.infer<typeof TaskUpdateSchema>;
         const { comment, commentType, actor, ...taskUpdates } = body;
+        const resolvedActor = await resolveTaskSession(userId, teamId, actor?.sessionId);
+        if (actor?.sessionId && !resolvedActor) {
+            return reply.code(400).send({ error: 'Invalid actor session for this team' });
+        }
+
+        const normalizedActor = resolvedActor
+            ? {
+                sessionId: resolvedActor.sessionId,
+                ...(resolvedActor.role ? { role: resolvedActor.role } : {}),
+                ...(resolvedActor.displayName ? { displayName: resolvedActor.displayName } : {}),
+                ...(actor?.kind ? { kind: actor.kind } : {}),
+            }
+            : actor;
+
         const updates = {
             ...taskUpdates,
-            ...(actor ? { actor } : {}),
+            ...(normalizedActor ? { actor: normalizedActor } : {}),
+            ...(resolveTaskScope((taskUpdates as any).scope, resolvedActor?.scope) ? { scope: resolveTaskScope((taskUpdates as any).scope, resolvedActor?.scope) } : {}),
             ...(comment !== undefined
                 ? {
                     comment: normalizeTaskUpdateComment(comment, {
-                        sessionId: actor?.sessionId || taskUpdates.assigneeId || 'system',
-                        role: actor?.role,
-                        displayName: actor?.displayName,
+                        sessionId: normalizedActor?.sessionId || taskUpdates.assigneeId || 'system',
+                        role: normalizedActor?.role,
+                        displayName: normalizedActor?.displayName,
                         type: commentType,
                     }),
                 }
                 : {}),
         };
+
+        const normalizedComment = (updates as { comment?: TaskCommentPayload }).comment;
+        if (normalizedComment?.sessionId && normalizedComment.sessionId !== normalizedActor?.sessionId) {
+            const resolvedCommentActor = await resolveTaskSession(userId, teamId, normalizedComment.sessionId);
+            if (!resolvedCommentActor) {
+                return reply.code(400).send({ error: 'Invalid comment session for this team' });
+            }
+            (updates as { comment?: TaskCommentPayload }).comment = {
+                ...normalizedComment,
+                sessionId: resolvedCommentActor.sessionId,
+                role: resolvedCommentActor.role ?? normalizedComment.role,
+                displayName: resolvedCommentActor.displayName ?? normalizedComment.displayName,
+            };
+        }
 
         try {
             const task = await taskOrchestrator.updateTask(userId, teamId, taskId, updates);
@@ -350,11 +510,22 @@ export function taskRoutes(app: Fastify) {
         const userId = request.userId;
         const { teamId, taskId } = request.params as { teamId: string; taskId: string };
         const body = request.body as z.infer<typeof HumanStatusLockSchema>;
+        const resolvedActor = await resolveTaskSession(userId, teamId, body.sessionId);
+        if (body.sessionId && !resolvedActor) {
+            return reply.code(400).send({ error: 'Invalid human lock actor for this team' });
+        }
 
         try {
-            const task = await taskOrchestrator.setHumanStatusLock(userId, teamId, taskId, body);
-            if (body.sessionId) {
-                await observeSessionActivity(userId, body.sessionId, Date.now());
+            const task = await taskOrchestrator.setHumanStatusLock(userId, teamId, taskId, {
+                ...body,
+                ...(resolvedActor ? {
+                    sessionId: resolvedActor.sessionId,
+                    role: resolvedActor.role,
+                    displayName: resolvedActor.displayName,
+                } : {}),
+            });
+            if (resolvedActor?.sessionId) {
+                await observeSessionActivity(userId, resolvedActor.sessionId, Date.now());
             }
             log({ module: 'task-routes', teamId, taskId }, 'Human status lock set');
             return reply.send({ success: true, task });
@@ -388,11 +559,22 @@ export function taskRoutes(app: Fastify) {
         const userId = request.userId;
         const { teamId, taskId } = request.params as { teamId: string; taskId: string };
         const body = (request.body ?? {}) as z.infer<typeof ClearHumanStatusLockSchema>;
+        const resolvedActor = await resolveTaskSession(userId, teamId, body.sessionId);
+        if (body.sessionId && !resolvedActor) {
+            return reply.code(400).send({ error: 'Invalid human lock actor for this team' });
+        }
 
         try {
-            const task = await taskOrchestrator.clearHumanStatusLock(userId, teamId, taskId, body);
-            if (body.sessionId) {
-                await observeSessionActivity(userId, body.sessionId, Date.now());
+            const task = await taskOrchestrator.clearHumanStatusLock(userId, teamId, taskId, {
+                ...body,
+                ...(resolvedActor ? {
+                    sessionId: resolvedActor.sessionId,
+                    role: resolvedActor.role,
+                    displayName: resolvedActor.displayName,
+                } : {}),
+            });
+            if (resolvedActor?.sessionId) {
+                await observeSessionActivity(userId, resolvedActor.sessionId, Date.now());
             }
             log({ module: 'task-routes', teamId, taskId }, 'Human status lock cleared');
             return reply.send({ success: true, task });
@@ -480,10 +662,24 @@ export function taskRoutes(app: Fastify) {
             role: string;
             comment?: { displayName?: string; content: string; mentions?: string[]; type?: 'note' | 'status-change' | 'review-feedback' | 'handoff' | 'blocker' | 'decision' | 'human-override' | 'plan' | 'plan-review' | 'execution-check' | 'rework-request' };
         };
+        const resolvedActor = await resolveTaskSession(userId, teamId, sessionId);
+        if (!resolvedActor) {
+            return reply.code(400).send({ error: 'Invalid session for this team' });
+        }
 
         try {
-            const task = await taskOrchestrator.startTask(userId, teamId, taskId, sessionId, role, comment);
-            await observeSessionActivity(userId, sessionId, Date.now());
+            const task = await taskOrchestrator.startTask(
+                userId,
+                teamId,
+                taskId,
+                resolvedActor.sessionId,
+                resolvedActor.role || role,
+                comment ? {
+                    ...comment,
+                    displayName: resolvedActor.displayName ?? comment.displayName,
+                } : undefined
+            );
+            await observeSessionActivity(userId, resolvedActor.sessionId, Date.now());
             log({ module: 'task-routes', teamId, taskId, sessionId }, 'Task started');
             return reply.send({ success: true, task });
         } catch (error: any) {
@@ -536,10 +732,24 @@ export function taskRoutes(app: Fastify) {
             sessionId: string;
             comment?: { role?: string; displayName?: string; content: string; mentions?: string[]; type?: 'note' | 'status-change' | 'review-feedback' | 'handoff' | 'blocker' | 'decision' | 'human-override' | 'plan' | 'plan-review' | 'execution-check' | 'rework-request' };
         };
+        const resolvedActor = await resolveTaskSession(userId, teamId, sessionId);
+        if (!resolvedActor) {
+            return reply.code(400).send({ error: 'Invalid session for this team' });
+        }
 
         try {
-            const task = await taskOrchestrator.completeTask(userId, teamId, taskId, sessionId, comment);
-            await observeSessionActivity(userId, sessionId, Date.now());
+            const task = await taskOrchestrator.completeTask(
+                userId,
+                teamId,
+                taskId,
+                resolvedActor.sessionId,
+                comment ? {
+                    ...comment,
+                    role: resolvedActor.role ?? comment.role,
+                    displayName: resolvedActor.displayName ?? comment.displayName,
+                } : undefined
+            );
+            await observeSessionActivity(userId, resolvedActor.sessionId, Date.now());
             log({ module: 'task-routes', teamId, taskId, sessionId }, 'Task completed');
             return reply.send({ success: true, task });
         } catch (error: any) {
@@ -598,16 +808,27 @@ export function taskRoutes(app: Fastify) {
             mentions?: string[];
             comment?: string;
         };
+        const resolvedActor = await resolveTaskSession(userId, teamId, sessionId);
+        if (!resolvedActor) {
+            return reply.code(400).send({ error: 'Invalid session for this team' });
+        }
 
         try {
             const task = await taskOrchestrator.reportBlocker(
                 userId,
                 teamId,
                 taskId,
-                sessionId,
-                { type, description, role, displayName, mentions, comment }
+                resolvedActor.sessionId,
+                {
+                    type,
+                    description,
+                    role: resolvedActor.role ?? role,
+                    displayName: resolvedActor.displayName ?? displayName,
+                    mentions,
+                    comment,
+                }
             );
-            await observeSessionActivity(userId, sessionId, Date.now());
+            await observeSessionActivity(userId, resolvedActor.sessionId, Date.now());
             log({ module: 'task-routes', teamId, taskId }, 'Blocker reported');
             return reply.send({ success: true, task });
         } catch (error: any) {
@@ -661,6 +882,10 @@ export function taskRoutes(app: Fastify) {
             resolution: string;
             comment?: { role?: string; displayName?: string; type?: 'note' | 'status-change' | 'review-feedback' | 'handoff' | 'blocker' | 'decision' | 'human-override' | 'plan' | 'plan-review' | 'execution-check' | 'rework-request'; content: string; fromStatus?: string; toStatus?: string; mentions?: string[] };
         };
+        const resolvedActor = await resolveTaskSession(userId, teamId, sessionId);
+        if (!resolvedActor) {
+            return reply.code(400).send({ error: 'Invalid session for this team' });
+        }
 
         try {
             const task = await taskOrchestrator.resolveBlocker(
@@ -668,11 +893,15 @@ export function taskRoutes(app: Fastify) {
                 teamId,
                 taskId,
                 blockerId,
-                sessionId,
+                resolvedActor.sessionId,
                 resolution,
-                comment
+                comment ? {
+                    ...comment,
+                    role: resolvedActor.role ?? comment.role,
+                    displayName: resolvedActor.displayName ?? comment.displayName,
+                } : undefined
             );
-            await observeSessionActivity(userId, sessionId, Date.now());
+            await observeSessionActivity(userId, resolvedActor.sessionId, Date.now());
             log({ module: 'task-routes', teamId, taskId, blockerId }, 'Blocker resolved');
             return reply.send({ success: true, task });
         } catch (error: any) {
@@ -715,10 +944,19 @@ export function taskRoutes(app: Fastify) {
         const userId = request.userId;
         const { teamId, taskId } = request.params as { teamId: string; taskId: string };
         const comment = request.body as z.infer<typeof TaskCommentSchema>;
+        const resolvedActor = await resolveTaskSession(userId, teamId, comment.sessionId);
+        if (!resolvedActor) {
+            return reply.code(400).send({ error: 'Invalid session for this team' });
+        }
 
         try {
-            const task = await taskOrchestrator.addTaskComment(userId, teamId, taskId, comment);
-            await observeSessionActivity(userId, comment.sessionId, Date.now());
+            const task = await taskOrchestrator.addTaskComment(userId, teamId, taskId, {
+                ...comment,
+                sessionId: resolvedActor.sessionId,
+                role: resolvedActor.role ?? comment.role,
+                displayName: resolvedActor.displayName ?? comment.displayName,
+            });
+            await observeSessionActivity(userId, resolvedActor.sessionId, Date.now());
             log({ module: 'task-routes', teamId, taskId }, 'Task comment added');
             return reply.send({ success: true, task });
         } catch (error: any) {

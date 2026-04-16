@@ -1,5 +1,5 @@
 import { eventRouter } from '@/app/events/eventRouter';
-import { getAccessibleTeamArtifact } from '@/app/team/teamArtifacts';
+import { getAccessibleTeamArtifact, getTeamMemberSessionIds } from '@/app/team/teamArtifacts';
 import { allocateUserSeq } from '@/storage/seq';
 import { db } from '@/storage/db';
 import { parseTeamArtifactBody } from '@/utils/teamArtifacts';
@@ -73,14 +73,18 @@ export async function saveBoardToArtifact(
 
     const bodyBuffer = Buffer.from(JSON.stringify(board));
 
-    await db.artifact.update({
-        where: { id: artifact.id },
+    const result = await db.artifact.updateMany({
+        where: { id: artifact.id, bodyVersion: artifact.bodyVersion },
         data: {
             body: bodyBuffer,
             bodyVersion: { increment: 1 },
             updatedAt: new Date(),
         },
     });
+
+    if (result.count === 0) {
+        throw new Error('Concurrent write conflict - board was modified by another operation, please retry');
+    }
 
     await broadcastTaskEvent(userId, teamId, eventType, taskId, taskData);
 }
@@ -106,15 +110,7 @@ async function broadcastTaskEvent(
         createdAt: Date.now(),
     };
 
-    const allSessions = await db.session.findMany({
-        where: { accountId: userId },
-        select: { id: true },
-    });
-
-    const teamSessionIds = new Set<string>();
-    for (const session of allSessions) {
-        teamSessionIds.add(session.id);
-    }
+    const teamSessionIds = new Set(await getTeamMemberSessionIds(teamId));
 
     if (teamSessionIds.size > 0) {
         eventRouter.emitUpdate({
