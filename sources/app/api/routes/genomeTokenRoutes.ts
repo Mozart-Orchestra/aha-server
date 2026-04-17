@@ -1,14 +1,13 @@
 import { auth } from "@/app/auth/auth";
 import { log } from "@/utils/log";
 import { Fastify } from "../types";
-import { requireInvitationVerified } from "../utils/requireInvitationVerified";
 
 const GENOME_TOKEN_TTL_SECONDS = 60 * 60; // aligned with createEphemeralTokenGenerator ttl=1h
 
 export function genomeTokenRoutes(app: Fastify) {
     // POST /v1/genome/token — mint a short-lived token the client uses to talk to genome-hub
     app.post('/v1/genome/token', {
-        preHandler: [app.authenticate, requireInvitationVerified],
+        preHandler: app.authenticate,
     }, async (request, reply) => {
         const userId = request.userId;
         try {
