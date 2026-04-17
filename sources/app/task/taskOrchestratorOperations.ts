@@ -1,5 +1,6 @@
 import { log } from '@/utils/log';
 import { randomKeyNaked } from '@/utils/randomKeyNaked';
+import { matchesTeamScopeFilter } from '@/app/team/teamScope';
 
 import { requireBoard, type TaskOrchestratorContext } from './taskOrchestratorContext';
 import {
@@ -31,7 +32,7 @@ export async function listTasks(
     context: TaskOrchestratorContext,
     userId: string,
     teamId: string,
-    filters?: { status?: string; assigneeId?: string },
+    filters?: { status?: string; assigneeId?: string; scopePath?: string; repoName?: string; includeGlobal?: boolean },
 ): Promise<{ tasks: KanbanTask[]; version: number }> {
     const board = await requireBoard(context, userId, teamId);
 
@@ -41,6 +42,13 @@ export async function listTasks(
     }
     if (filters?.assigneeId) {
         tasks = tasks.filter((task) => task.assigneeId === filters.assigneeId);
+    }
+    if (filters?.scopePath || filters?.repoName) {
+        tasks = tasks.filter((task) => matchesTeamScopeFilter(task.scope, {
+            scopePath: filters.scopePath,
+            repoName: filters.repoName,
+            includeGlobal: filters.includeGlobal,
+        }));
     }
 
     return { tasks, version: board.version || 1 };
@@ -188,6 +196,7 @@ export async function createTask(
         createdAt: Date.now(),
         updatedAt: Date.now(),
         comments: task.comments || [],
+        scope: task.scope ?? parentTask?.scope ?? null,
         depth: parentTask ? (parentTask.depth ?? 0) + 1 : 0,
         statusPropagation: task.statusPropagation || { ...DEFAULT_STATUS_PROPAGATION },
     };

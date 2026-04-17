@@ -231,6 +231,12 @@ export function extractTeamMembers(board: Record<string, any>): TeamMemberRecord
     return board.team.members as TeamMemberRecord[];
 }
 
+export function extractTeamSessionIds(board: Record<string, any>): string[] {
+    return extractTeamMembers(board)
+        .map((member) => member?.sessionId)
+        .filter((value): value is string => typeof value === 'string' && value.length > 0);
+}
+
 export function extractTeamName(board: Record<string, any>, fallbackId: string): string {
     const candidate = board?.team?.name || board?.name;
     if (typeof candidate === 'string' && candidate.trim().length > 0) {
@@ -344,6 +350,19 @@ export async function getAccessibleTeamArtifact(userId: string, teamId: string, 
     });
 
     return session ? artifact : null;
+}
+
+export async function getTeamMemberSessionIds(teamId: string): Promise<string[]> {
+    const artifact = await db.artifact.findUnique({
+        where: { id: teamId },
+        select: { body: true },
+    });
+
+    if (!artifact || !isTeamArtifact(artifact)) {
+        return [];
+    }
+
+    return extractTeamSessionIds(extractTeamBoard(artifact));
 }
 
 export async function listAccessibleTeamArtifacts(userId: string): Promise<ArtifactLike[]> {

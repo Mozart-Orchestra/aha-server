@@ -5,7 +5,6 @@ import { z } from "zod";
 import { randomKeyNaked } from "@/utils/randomKeyNaked";
 import { allocateUserSeq } from "@/storage/seq";
 import { log } from "@/utils/log";
-import { kvList } from "@/app/kv/kvList";
 import { kvMutate } from "@/app/kv/kvMutate";
 import { encryptString } from "@/modules/encrypt";
 import { teamMessagesCounter, teamTaskOperationsCounter } from "@/app/monitoring/metrics2";
@@ -13,6 +12,8 @@ import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
 import { observeSessionActivity } from "@/app/presence/observeSessionActivity";
 import { pushToWeixinIfBound } from "@/app/channels/weixinOutbound";
 import { buildTeamMessageEncryptionPath, decryptTeamMessage } from "@/app/team/teamMessageCrypto";
+import { buildTeamScopeFromMetadata, matchesTeamScopeFilter } from "@/app/team/teamScope";
+import { extractTeamSessionIds, getTeamMemberSessionIds } from "@/app/team/teamArtifacts";
 
 /**
  * Team Messages Routes
@@ -34,7 +35,18 @@ const TeamMessageMetadataSchema = z.object({
         type: z.string().optional(),
         version: z.string().optional(),
         payload: z.record(z.any()).optional()
-    }).optional()
+    }).optional(),
+    scope: z.object({
+        scopePath: z.string(),
+        scopeLabel: z.string().optional(),
+        repoName: z.string().optional(),
+        visibility: z.enum(['scoped', 'global']).optional(),
+    }).optional(),
+    reviewContext: z.object({
+        commitHash: z.string().optional(),
+        scopePath: z.string().optional(),
+        repoName: z.string().optional(),
+    }).optional(),
 }).passthrough();
 
 const TeamMessageSchema = z.object({
@@ -70,10 +82,7 @@ async function canUserAccessTeam(userId: string, teamId: string): Promise<boolea
 
     try {
         const parsed = parseTeamArtifactBody(sharedTeam.body) as Record<string, any>;
-        const members = Array.isArray(parsed.team?.members) ? parsed.team.members : [];
-        const memberSessionIds = members
-            .map((member: any) => member?.sessionId)
-            .filter((sessionId: any): sessionId is string => typeof sessionId === 'string' && sessionId.length > 0);
+        const memberSessionIds = extractTeamSessionIds(parsed);
 
         if (memberSessionIds.length === 0) {
             return false;
@@ -117,13 +126,22 @@ export function teamMessagesRoutes(app: Fastify) {
             }),
             querystring: z.object({
                 limit: z.coerce.number().int().min(1).max(200).default(50),
-                before: z.string().optional()   // KV key cursor（来自上次响应的 cursor 字段）
+                before: z.string().optional(),   // KV key cursor（来自上次响应的 cursor 字段）
+                scopePath: z.string().optional(),
+                repoName: z.string().optional(),
+                includeGlobal: z.coerce.boolean().optional(),
             })
         }
     }, async (request, reply) => {
         const userId = request.userId;
         const { teamId } = request.params as { teamId: string };
-        const { limit, before } = request.query as { limit?: number, before?: string };
+        const { limit, before, scopePath, repoName, includeGlobal } = request.query as {
+            limit?: number;
+            before?: string;
+            scopePath?: string;
+            repoName?: string;
+            includeGlobal?: boolean;
+        };
 
         try {
             if (!(await canUserAccessTeam(userId, teamId))) {
@@ -146,22 +164,52 @@ export function teamMessagesRoutes(app: Fastify) {
                 whereClause.key = { startsWith: prefix, lt: before };
             }
 
-            const results = await db.userKVStore.findMany({
-                where: whereClause,
-                orderBy: { key: 'desc' },
-                take: fetchLimit,
-                select: { key: true, value: true }
-            });
-
             const messages: Array<any & { _key: string }> = [];
-            for (const item of results) {
-                try {
-                    const parts = item.key.split('.');
-                    const messageId = parts[parts.length - 1];
-                    const decrypted = decryptTeamMessage(userId, teamId, messageId, item.value!);
-                    messages.push({ ...JSON.parse(decrypted), _key: item.key });
-                } catch {
-                    // skip corrupted entries silently
+            let exhausted = false;
+            let pageCursor = before;
+
+            while (messages.length < fetchLimit && !exhausted) {
+                const pagedWhereClause: any = {
+                    ...whereClause,
+                    key: pageCursor
+                        ? { startsWith: prefix, lt: pageCursor }
+                        : { startsWith: prefix },
+                };
+
+                const results = await db.userKVStore.findMany({
+                    where: pagedWhereClause,
+                    orderBy: { key: 'desc' },
+                    take: fetchLimit,
+                    select: { key: true, value: true }
+                });
+
+                if (results.length === 0) {
+                    exhausted = true;
+                    break;
+                }
+
+                pageCursor = results[results.length - 1]?.key;
+
+                for (const item of results) {
+                    try {
+                        const parts = item.key.split('.');
+                        const messageId = parts[parts.length - 1];
+                        const decrypted = decryptTeamMessage(userId, teamId, messageId, item.value!);
+                        const parsed = JSON.parse(decrypted);
+                        if (!matchesTeamScopeFilter(parsed?.metadata?.scope, { scopePath, repoName, includeGlobal })) {
+                            continue;
+                        }
+                        messages.push({ ...parsed, _key: item.key });
+                        if (messages.length >= fetchLimit) {
+                            break;
+                        }
+                    } catch {
+                        // skip corrupted entries silently
+                    }
+                }
+
+                if (results.length < fetchLimit) {
+                    exhausted = true;
                 }
             }
 
@@ -173,7 +221,7 @@ export function teamMessagesRoutes(app: Fastify) {
 
             return reply.send({
                 messages: messages.map(({ _key, ...rest }) => rest),
-                hasMore: results.length === fetchLimit,
+                hasMore: !exhausted,
                 cursor: nextCursor
             });
         } catch (error) {
@@ -225,7 +273,7 @@ export function teamMessagesRoutes(app: Fastify) {
             return reply.status(400).send({ error: `Invalid message format: ${parseResult.error.errors.map(e => e.message).join(', ')}` });
         }
         const message = parseResult.data;
-        const { content, type, metadata, fromSessionId, fromRole, fromDisplayName, mentions } = message;
+        const { fromSessionId } = message;
 
         try {
             log({ module: 'team-messages', level: 'info' }, `Sending message to teamId: ${teamId}, userId: ${userId}`);
@@ -269,6 +317,14 @@ export function teamMessagesRoutes(app: Fastify) {
                     // Override display name (always get from session for consistency)
                     if (metadata.name || metadata.path) {
                         message.fromDisplayName = metadata.name || metadata.path;
+                    }
+
+                    const scope = buildTeamScopeFromMetadata(metadata);
+                    if (scope) {
+                        message.metadata = {
+                            ...(message.metadata ?? {}),
+                            scope,
+                        };
                     }
                 } catch (e) {
                     log({ module: 'team-messages', level: 'warn' }, `Failed to parse session metadata for ${fromSessionId}: ${e}`);
@@ -327,12 +383,14 @@ export function teamMessagesRoutes(app: Fastify) {
             // Metadata is encrypted so we cannot filter by teamId server-side;
             // the client filters. Only load session IDs (no metadata) to avoid
             // pulling large encrypted blobs into memory on every message send.
-            const sessionRows = await db.session.findMany({
-                where: { accountId: userId },
-                select: { id: true }
-            });
-
-            const sessionIds = new Set(sessionRows.map(s => s.id));
+            const sessionIds = new Set(await getTeamMemberSessionIds(teamId));
+            if (sessionIds.size === 0) {
+                const sessionRows = await db.session.findMany({
+                    where: { accountId: userId },
+                    select: { id: true }
+                });
+                sessionRows.forEach((session) => sessionIds.add(session.id));
+            }
 
             if (sessionIds.size > 0) {
                 const updSeq = await allocateUserSeq(userId);

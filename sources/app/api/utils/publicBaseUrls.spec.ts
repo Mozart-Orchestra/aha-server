@@ -73,4 +73,16 @@ describe('publicBaseUrls', () => {
             },
         ]);
     });
+
+    it('ignores untrusted forwarded hosts for public redirects', () => {
+        delete process.env.AHA_WEBAPP_URL;
+
+        expect(getPublicWebappUrl({
+            headers: {
+                host: 'internal:3005',
+                'x-forwarded-host': 'evil.example.com',
+                'x-forwarded-proto': 'https',
+            },
+        })).toBe('https://ahaagi.com/webappv3');
+    });
 });

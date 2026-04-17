@@ -4,11 +4,11 @@ import { type Fastify } from "../types";
 const IP_LOOKUP_TIMEOUT_MS = 2500;
 const IP_LOOKUP_ENDPOINTS = [
     {
-        url: 'https://ipapi.co/json/',
+        buildUrl: (ip: string) => `https://ipapi.co/${encodeURIComponent(ip)}/json/`,
         pickCountryCode: (payload: any) => payload?.country_code ?? payload?.country ?? null,
     },
     {
-        url: 'https://api.ipwho.org/me',
+        buildUrl: (ip: string) => `https://ipwho.org/ip/${encodeURIComponent(ip)}`,
         pickCountryCode: (payload: any) => payload?.countryCode ?? payload?.country_code ?? null,
     },
 ];
@@ -20,7 +20,7 @@ async function fetchCountryCodeForIp(ip: string): Promise<string | null> {
     try {
         for (const endpoint of IP_LOOKUP_ENDPOINTS) {
             try {
-                const url = `${endpoint.url}${ip}`;
+                const url = endpoint.buildUrl(ip);
                 const response = await fetch(url, {
                     headers: { Accept: 'application/json' },
                     signal: controller.signal,

@@ -1,3 +1,5 @@
+import type { TeamScope } from '@/app/team/teamScope';
+
 export interface TaskExecutionLink {
     sessionId: string;
     linkedAt: number;
@@ -71,6 +73,7 @@ export interface KanbanTask {
     status: string;
     assigneeId?: string | null;
     reporterId?: string;
+    scope?: TeamScope | null;
     priority?: 'low' | 'medium' | 'high' | 'urgent';
     createdAt: number;
     updatedAt: number;

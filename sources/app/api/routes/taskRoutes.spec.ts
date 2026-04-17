@@ -20,6 +20,7 @@ const mocked = vi.hoisted(() => ({
     invalidateTeamOverviewSnapshot: vi.fn(),
     observeSessionActivity: vi.fn(),
     getAccessibleTeamArtifact: vi.fn(),
+    sessionFindFirst: vi.fn(),
 }));
 
 vi.mock('@/app/task/taskOrchestrator', () => ({
@@ -49,6 +50,14 @@ vi.mock('@/app/presence/observeSessionActivity', () => ({
 
 vi.mock('@/app/team/teamArtifacts', () => ({
     getAccessibleTeamArtifact: mocked.getAccessibleTeamArtifact,
+}));
+
+vi.mock('@/storage/db', () => ({
+    db: {
+        session: {
+            findFirst: mocked.sessionFindFirst,
+        },
+    },
 }));
 
 import { taskRoutes } from './taskRoutes';
@@ -87,6 +96,15 @@ describe('taskRoutes', () => {
             body: Buffer.from('{}'),
             createdAt: new Date('2026-03-17T00:00:00Z'),
             updatedAt: new Date('2026-03-17T00:05:00Z'),
+        });
+        mocked.sessionFindFirst.mockResolvedValue({
+            id: 'session-1',
+            metadata: JSON.stringify({
+                role: 'builder',
+                name: 'Builder Name',
+                path: '/tmp/aha-cli-0330-max-redefine-login',
+                runtimeBuild: { worktreeName: 'aha-cli-0330-max-redefine-login' },
+            }),
         });
     });
 
@@ -285,11 +303,13 @@ describe('taskRoutes', () => {
         expect(response.statusCode).toBe(200);
         expect(mocked.updateTask).toHaveBeenCalledWith('user-1', 'team-1', 'task-1', expect.objectContaining({
             assigneeId: 'session-replacement',
-            comment: {
+            comment: expect.objectContaining({
                 sessionId: 'session-replacement',
+                role: 'builder',
+                displayName: 'Builder Name',
                 type: 'handoff',
                 content: 'Migrated during replace_agent handoff',
-            },
+            }),
         }));
 
         await app.close();

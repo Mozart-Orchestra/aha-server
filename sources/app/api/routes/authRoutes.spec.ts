@@ -496,6 +496,7 @@ describe('authRoutes', () => {
             token: 'token-123',
             userId: 'user-1',
             recoveryReady: true,
+            invitationVerified: false,
         });
         expect(vi.mocked(upsertAccountRecoveryMaterial)).toHaveBeenCalled();
 
@@ -528,6 +529,7 @@ describe('authRoutes', () => {
             token: 'token-123',
             userId: 'user-1',
             encryptedContentSecretKey: 'encoded-recovery-secret',
+            invitationVerified: false,
         });
         expect(vi.mocked(db.account.update)).toHaveBeenCalledWith({
             where: { id: 'user-1' },
@@ -570,6 +572,7 @@ describe('authRoutes', () => {
             token: 'token-123',
             userId: 'user-1',
             encryptedContentSecretKey: null,
+            invitationVerified: false,
         });
         expect(vi.mocked(upsertAccountRecoveryMaterial)).toHaveBeenCalledWith('user-1', expect.any(Uint8Array));
 
@@ -610,6 +613,7 @@ describe('authRoutes', () => {
             token: 'token-123',
             userId: 'user-1',
             encryptedContentSecretKey: 'encoded-recovery-secret',
+            invitationVerified: false,
         });
         expect(vi.mocked(upsertAccountRecoveryMaterial)).toHaveBeenCalledWith('user-1', expect.any(Uint8Array));
         expect(vi.mocked(markAccountRecoveryUsed)).toHaveBeenCalledWith('user-1');
@@ -658,6 +662,7 @@ describe('authRoutes', () => {
             token: 'token-123',
             userId: 'legacy-user-1',
             encryptedContentSecretKey: 'encoded-recovery-secret',
+            invitationVerified: false,
         });
         expect(vi.mocked(db.account.update)).toHaveBeenCalledWith({
             where: { id: 'legacy-user-1' },
@@ -713,6 +718,7 @@ describe('authRoutes', () => {
             token: 'token-123',
             userId: 'legacy-user-1',
             encryptedContentSecretKey: 'encoded-recovery-secret',
+            invitationVerified: false,
         });
         expect(vi.mocked(markAccountRecoveryUsed)).toHaveBeenCalledWith('legacy-user-1');
 

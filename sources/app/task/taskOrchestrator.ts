@@ -119,7 +119,7 @@ export class TaskOrchestrator {
     async listTasks(
         userId: string,
         teamId: string,
-        filters?: { status?: string; assigneeId?: string },
+        filters?: { status?: string; assigneeId?: string; scopePath?: string; repoName?: string; includeGlobal?: boolean },
     ): Promise<{ tasks: KanbanTask[]; version: number }> {
         return listTasks(this.context(), userId, teamId, filters);
     }

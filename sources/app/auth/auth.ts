@@ -13,6 +13,7 @@ interface AuthTokens {
     verifier: Awaited<ReturnType<typeof privacyKit.createPersistentTokenVerifier>>;
     githubVerifier: Awaited<ReturnType<typeof privacyKit.createEphemeralTokenVerifier>>;
     githubGenerator: Awaited<ReturnType<typeof privacyKit.createEphemeralTokenGenerator>>;
+    genomeGenerator: Awaited<ReturnType<typeof privacyKit.createEphemeralTokenGenerator>>;
 }
 
 // Security: Token cache configuration
@@ -59,8 +60,15 @@ class AuthModule {
             publicKey: githubGenerator.publicKey,
         });
 
+        // Genome-hub token generator — signs user-scoped tokens that genome-hub
+        // verifies using only the public key (supports cross-network deployment).
+        const genomeGenerator = await privacyKit.createEphemeralTokenGenerator({
+            service: 'genome-hub',
+            seed: handyMasterSecret,
+            ttl: 60 * 60 * 1000 // 1 hour
+        });
 
-        this.tokens = { generator, verifier, githubVerifier, githubGenerator };
+        this.tokens = { generator, verifier, githubVerifier, githubGenerator, genomeGenerator };
 
         // Start periodic cleanup to prevent memory leaks
         this.startCleanupInterval();
@@ -246,18 +254,43 @@ class AuthModule {
         if (!this.tokens) {
             throw new Error('Auth module not initialized');
         }
-        
+
         try {
             const verified = await this.tokens.githubVerifier.verify(token);
             if (!verified) {
                 return null;
             }
-            
+
             return { userId: verified.user as string };
         } catch (error) {
             log({ module: 'auth', level: 'error' }, `GitHub token verification failed: ${error}`);
             return null;
         }
+    }
+
+    /**
+     * Create a genome-hub scoped token for a user.
+     * The token is signed with an ephemeral key; genome-hub verifies it
+     * using only the public key — no shared secret required.
+     */
+    async createGenomeToken(userId: string, scope: string[] = ['genome:read', 'genome:write', 'feedback:write']): Promise<string> {
+        if (!this.tokens) {
+            throw new Error('Auth module not initialized');
+        }
+
+        return this.tokens.genomeGenerator.new({
+            user: userId,
+            extras: { scope },
+        });
+    }
+
+    /** Expose the public key so genome-hub (or deploy scripts) can verify tokens.
+     *  Returned as base64 so it round-trips safely through JSON. */
+    getGenomePublicKey(): string {
+        if (!this.tokens) {
+            throw new Error('Auth module not initialized');
+        }
+        return privacyKit.encodeBase64(this.tokens.genomeGenerator.publicKey);
     }
 
     // Force cleanup of expired tokens (can be called manually)
