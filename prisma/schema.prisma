@@ -34,6 +34,8 @@ model Account {
     encryptedContentSecretKey Bytes?
     contentKeyVersion        Int      @default(1)
     email           String?
+    invitationVerifiedAt DateTime?
+    invitationCodeUsed   String?
 
     // Profile
     firstName String?
@@ -61,6 +63,41 @@ model Account {
     AccountRecoveryMaterial AccountRecoveryMaterial?
     AccountJoinTicket   AccountJoinTicket[]
     JoinCode           JoinCode[]
+    InvitationCodesIssued InvitationCode[]       @relation("IssuedBy")
+    InvitationRedemptions InvitationRedemption[]
+}
+
+model InvitationCode {
+    id                 String               @id @default(cuid())
+    code               String               @unique
+    issuedByAccountId  String?
+    issuedByAccount    Account?             @relation("IssuedBy", fields: [issuedByAccountId], references: [id], onDelete: SetNull)
+    maxUses            Int                  @default(1)
+    usedCount          Int                  @default(0)
+    expiresAt          DateTime?
+    active             Boolean              @default(true)
+    note               String?
+    createdAt          DateTime             @default(now())
+    updatedAt          DateTime             @updatedAt
+    redemptions        InvitationRedemption[]
+
+    @@index([issuedByAccountId, createdAt(sort: Desc)])
+    @@index([active, expiresAt])
+}
+
+model InvitationRedemption {
+    id          String         @id @default(cuid())
+    codeId      String
+    code        InvitationCode @relation(fields: [codeId], references: [id], onDelete: Cascade)
+    accountId   String
+    account     Account        @relation(fields: [accountId], references: [id], onDelete: Cascade)
+    redeemedAt  DateTime       @default(now())
+    ip          String?
+    userAgent   String?
+
+    @@unique([codeId, accountId])
+    @@index([accountId])
+    @@index([codeId, redeemedAt(sort: Desc)])
 }
 
 model AccountRecoveryMaterial {

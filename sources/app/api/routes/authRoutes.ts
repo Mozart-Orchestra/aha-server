@@ -823,6 +823,7 @@ export function authRoutes(app: Fastify) {
                     encryptedContentSecretKey: z.string().nullable().optional(),
                     canonicalPublicKey: z.string().nullable().optional(),
                     reason: z.string().optional(),
+                    invitationVerified: z.boolean().optional(),
                 }),
                 401: z.object({
                     error: z.string(),
@@ -942,6 +943,7 @@ export function authRoutes(app: Fastify) {
                 token,
                 userId: account.id,
                 encryptedContentSecretKey: privacyKit.encodeBase64(encryptedContentSecretKey),
+                invitationVerified: Boolean(account.invitationVerifiedAt),
             });
         }
 
@@ -985,6 +987,7 @@ export function authRoutes(app: Fastify) {
             token,
             userId: newAccount.id,
             encryptedContentSecretKey: null,
+            invitationVerified: Boolean(newAccount.invitationVerifiedAt),
         });
     });
 
@@ -1013,6 +1016,7 @@ export function authRoutes(app: Fastify) {
                 token: z.string(),
                 userId: z.string(),
                 recoveryReady: z.boolean(),
+                invitationVerified: z.boolean().optional(),
             }),
             401: z.object({
                 error: z.string(),
@@ -1124,6 +1128,7 @@ export function authRoutes(app: Fastify) {
             token,
             userId: account.id,
             recoveryReady,
+            invitationVerified: Boolean(account.invitationVerifiedAt),
         });
     });
     } // end for-loop over supabase paths

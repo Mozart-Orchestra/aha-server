@@ -35,6 +35,8 @@ import { teamReviewRoutes } from "./routes/teamReviewRoutes";
 import { channelRoutes } from "./routes/channelRoutes";
 import { wechatRoutes } from "./routes/wechatRoutes";
 import { geoRoutes } from "./routes/geoRoutes";
+import { invitationRoutes } from "./routes/invitationRoutes";
+import { genomeTokenRoutes } from "./routes/genomeTokenRoutes";
 import { getCorsConfig } from "./utils/corsConfig";
 import { getDefaultRateLimitConfig } from "./utils/rateLimitConfig";
 import { getPublicApiServers } from "./utils/publicBaseUrls";
@@ -172,6 +174,8 @@ export async function startApi() {
     channelRoutes(typed);
     wechatRoutes(typed);
     geoRoutes(typed);
+    invitationRoutes(typed);
+    genomeTokenRoutes(typed);
 
     // Start HTTP
     const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3005;
