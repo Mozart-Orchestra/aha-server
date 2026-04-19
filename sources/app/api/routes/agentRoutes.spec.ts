@@ -251,6 +251,32 @@ describe('agentRoutes', () => {
         await app.close();
     });
 
+    it('clears stale genome attribution when runtime changes without a new image ref', async () => {
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'PATCH',
+            url: '/v1/agents/agent-123',
+            payload: {
+                runtimeType: 'codex',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        const updateCall = vi.mocked(db.artifact.update).mock.calls[0]?.[0];
+        const rawBody = updateCall?.data?.body as Buffer;
+        const parsed = JSON.parse(rawBody.toString());
+        const boardBody = JSON.parse(parsed.body);
+        const member = boardBody.team.members[0];
+
+        expect(boardBody.sourceImageId).toBeNull();
+        expect(boardBody.genomeId).toBeNull();
+        expect(member.runtimeType).toBe('codex');
+        expect(member.sourceImageId).toBeNull();
+        expect(member.specId).toBeNull();
+
+        await app.close();
+    });
+
     it('rejects patch when the provided session does not belong to the user', async () => {
         vi.mocked(db.session.findFirst).mockResolvedValue(null as never);
 

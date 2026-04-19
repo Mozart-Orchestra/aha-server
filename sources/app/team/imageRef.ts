@@ -61,6 +61,18 @@ export function buildImageRefFields(
     };
 }
 
+export function clearImageRefFields(
+    opts?: { includeLegacyGenome?: boolean; includeLegacySpec?: boolean },
+): Record<string, unknown> {
+    return {
+        sourceImageId: null,
+        sourceImageVersion: null,
+        ...(opts?.includeLegacyGenome ? { genomeId: null } : {}),
+        ...(opts?.includeLegacyGenome ? { genomeVersion: null } : {}),
+        ...(opts?.includeLegacySpec ? { specId: null } : {}),
+    };
+}
+
 export function resolveCandidateId(
     imageRef: ImageRef | null | undefined,
     candidateId?: string | null,

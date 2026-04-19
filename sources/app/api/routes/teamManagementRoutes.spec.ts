@@ -878,6 +878,68 @@ describe('teamManagementRoutes', () => {
         await app.close();
     });
 
+    it('clears stale genome attribution when a member runtime changes without a replacement image', async () => {
+        const board = {
+            team: {
+                name: 'Runtime Switch Team',
+                members: [
+                    {
+                        memberId: 'member-1',
+                        sessionId: 'session-old',
+                        sessionTag: 'team:team-1:member:member-1',
+                        roleId: 'builder',
+                        displayName: 'Builder 1',
+                        runtimeType: 'claude',
+                        candidateId: 'spec:spec-1',
+                        sourceImageId: 'spec-1',
+                        sourceImageVersion: 2,
+                        genomeId: 'spec-1',
+                        genomeVersion: 2,
+                        specId: 'spec-1',
+                        joinedAt: 1,
+                    },
+                ],
+            },
+            tasks: [],
+        };
+
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(buildTeamArtifact(board) as never);
+        vi.mocked(db.artifact.update).mockResolvedValue({ id: 'team-1' } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/teams/team-1/members',
+            payload: {
+                sessionId: 'session-new',
+                sessionTag: 'team:team-1:member:member-1',
+                roleId: 'builder',
+                displayName: 'Builder 1',
+                runtimeType: 'codex',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        const updateCall = vi.mocked(db.artifact.update).mock.calls[0]?.[0];
+        const rawBody = updateCall?.data?.body as Buffer;
+        const parsed = JSON.parse(rawBody.toString());
+        const boardBody = JSON.parse(parsed.body);
+        expect(boardBody.team.members).toHaveLength(1);
+        expect(boardBody.team.members[0]).toEqual(expect.objectContaining({
+            sessionId: 'session-new',
+            sessionTag: 'team:team-1:member:member-1',
+            runtimeType: 'codex',
+            sourceImageId: null,
+            sourceImageVersion: null,
+            genomeId: null,
+            genomeVersion: null,
+            specId: null,
+        }));
+        expect(boardBody.team.members[0].candidateId).toBeUndefined();
+
+        await app.close();
+    });
+
     it('persists parentSessionId on add-member so replace chains remain observable', async () => {
         const board = {
             team: {

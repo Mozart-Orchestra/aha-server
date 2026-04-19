@@ -2393,18 +2393,24 @@ export function evolutionRoutes(app: Fastify) {
             querystring: z.object({
                 limit: z.coerce.number().int().min(1).max(200).default(100),
                 search: z.string().optional(),
+                runtimeType: z.enum(['claude', 'codex', 'open-code']).optional(),
             }),
         },
     }, async (request, reply) => {
         const userId = request.userId;
-        const { limit, search } = request.query as { limit: number; search?: string };
+        const { limit, search, runtimeType } = request.query as {
+            limit: number;
+            search?: string;
+            runtimeType?: 'claude' | 'codex' | 'open-code';
+        };
 
         try {
             // Try genome-hub first for public genomes
             const { hubUrl, axios: http } = await loadGenomeHubTransport();
             const params = new URLSearchParams();
             params.set('limit', String(limit));
-            if (search) params.set('search', search);
+            if (search) params.set('q', search);
+            if (runtimeType) params.set('runtimeType', runtimeType);
 
             const upstream = await http.get(`${hubUrl}/genomes?${params.toString()}`, {
                 timeout: 5_000,
@@ -2421,6 +2427,7 @@ export function evolutionRoutes(app: Fastify) {
                     status: g.status,
                     version: g.version,
                     spawnCount: g.spawnCount ?? 0,
+                    runtimeType: g.runtimeType ?? undefined,
                 }));
                 return reply.send({ roles, total: upstream.data.total ?? roles.length });
             }

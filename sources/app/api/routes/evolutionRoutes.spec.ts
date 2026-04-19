@@ -98,6 +98,60 @@ describe('evolutionRoutes', () => {
         vi.mocked(db.$transaction).mockImplementation(async (callback: any) => callback(db));
     });
 
+    it('forwards role pool search and runtime filters to genome-hub', async () => {
+        vi.mocked(axios.get).mockResolvedValue({
+            status: 200,
+            data: {
+                genomes: [
+                    {
+                        id: 'genome-1',
+                        name: 'agent-builder-codex',
+                        description: 'Codex builder',
+                        category: 'implementation',
+                        namespace: '@official',
+                        version: 3,
+                        spawnCount: 11,
+                        runtimeType: 'codex',
+                    },
+                ],
+                total: 1,
+            },
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/roles/pool?limit=25&search=builder&runtimeType=codex',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(axios.get).toHaveBeenCalledWith(
+            'http://localhost:3006/genomes?limit=25&q=builder&runtimeType=codex',
+            expect.objectContaining({
+                timeout: 5_000,
+                validateStatus: expect.any(Function),
+            }),
+        );
+        expect(response.json()).toEqual({
+            roles: [
+                {
+                    id: 'genome-1',
+                    title: 'agent-builder-codex',
+                    summary: 'Codex builder',
+                    category: 'implementation',
+                    namespace: '@official',
+                    status: undefined,
+                    version: 3,
+                    spawnCount: 11,
+                    runtimeType: 'codex',
+                },
+            ],
+            total: 1,
+        });
+
+        await app.close();
+    });
+
     it('retires a bypass agent by removing it from the team roster', async () => {
         vi.mocked(db.artifact.findUnique).mockResolvedValue(buildTeamArtifact({
             team: {

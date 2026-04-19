@@ -24,7 +24,20 @@ export function authRoutes(app: Fastify) {
             publicKey: z.string(),
             challenge: z.string(),
             signature: z.string()
-        })
+        }),
+        response: {
+            200: z.object({
+                success: z.literal(true),
+                token: z.string(),
+                invitationVerified: z.boolean().optional(),
+            }),
+            401: z.object({
+                error: z.string(),
+            }),
+            404: z.object({
+                error: z.string(),
+            }),
+        },
     };
 
     async function authenticateSecretKey(
@@ -53,8 +66,9 @@ export function authRoutes(app: Fastify) {
             return {
                 ok: true as const,
                 body: {
-                    success: true,
-                    token: await auth.createToken(user.id)
+                    success: true as const,
+                    token: await auth.createToken(user.id),
+                    invitationVerified: Boolean(user.invitationVerifiedAt),
                 }
             };
         }
@@ -75,8 +89,9 @@ export function authRoutes(app: Fastify) {
         return {
             ok: true as const,
             body: {
-                success: true,
-                token: await auth.createToken(user.id)
+                success: true as const,
+                token: await auth.createToken(user.id),
+                invitationVerified: Boolean(user.invitationVerifiedAt),
             }
         };
     }
@@ -256,7 +271,8 @@ export function authRoutes(app: Fastify) {
                 }), z.object({
                     state: z.literal('authorized'),
                     token: z.string(),
-                    response: z.string()
+                    response: z.string(),
+                    invitationVerified: z.boolean().optional(),
                 })]),
                 401: z.object({
                     error: z.literal('Invalid public key')
@@ -538,7 +554,8 @@ export function authRoutes(app: Fastify) {
                 }), z.object({
                     state: z.literal('authorized'),
                     token: z.string(),
-                    response: z.string()
+                    response: z.string(),
+                    invitationVerified: z.boolean().optional(),
                 })]),
                 401: z.object({
                     error: z.literal('Invalid public key')
@@ -572,10 +589,15 @@ export function authRoutes(app: Fastify) {
         if (answer.response && answer.responseAccountId) {
             log({ module: 'account-auth-request' }, `[ACCOUNT AUTH] ✅ Already authorized, returning token`);
             const token = await auth.createToken(answer.responseAccountId!);
+            const account = await db.account.findUnique({
+                where: { id: answer.responseAccountId! },
+                select: { invitationVerifiedAt: true },
+            });
             return reply.send({
                 state: 'authorized',
                 token: token,
-                response: answer.response
+                response: answer.response,
+                invitationVerified: Boolean(account?.invitationVerifiedAt),
             });
         }
 
@@ -655,6 +677,7 @@ export function authRoutes(app: Fastify) {
                     token: z.string(),
                     userId: z.string(),
                     encryptedContentSecretKey: z.string(),
+                    invitationVerified: z.boolean().optional(),
                 }),
                 401: z.object({
                     error: z.string(),
@@ -725,6 +748,7 @@ export function authRoutes(app: Fastify) {
             token,
             userId: account.id,
             encryptedContentSecretKey: privacyKit.encodeBase64(encryptedContentSecretKey),
+            invitationVerified: Boolean(account.invitationVerifiedAt),
         });
     });
 
@@ -738,6 +762,7 @@ export function authRoutes(app: Fastify) {
                 200: z.object({
                     jwt: z.string(),
                     encryptedContentSecretKey: z.string(),
+                    invitationVerified: z.boolean().optional(),
                 }),
                 401: z.object({
                     error: z.string(),
@@ -797,6 +822,7 @@ export function authRoutes(app: Fastify) {
         return reply.send({
             jwt,
             encryptedContentSecretKey: privacyKit.encodeBase64(encryptedContentSecretKey),
+            invitationVerified: Boolean(joinCode.account.invitationVerifiedAt),
         });
     });
 
@@ -1145,6 +1171,7 @@ export function authRoutes(app: Fastify) {
                     token: z.string(),
                     userId: z.string(),
                     encryptedContentSecretKey: z.string(),
+                    invitationVerified: z.boolean().optional(),
                 }),
                 401: z.object({
                     error: z.string(),
@@ -1209,6 +1236,7 @@ export function authRoutes(app: Fastify) {
             token,
             userId: account.id,
             encryptedContentSecretKey: privacyKit.encodeBase64(encryptedContentSecretKey),
+            invitationVerified: Boolean(account.invitationVerifiedAt),
         });
     });
 

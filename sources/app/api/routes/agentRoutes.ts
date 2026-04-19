@@ -8,7 +8,7 @@ import {
     extractTeamMembers,
     serializeTeamBoard,
 } from "@/app/team/teamArtifacts";
-import { buildImageRefFields, resolveImageRef } from "@/app/team/imageRef";
+import { buildImageRefFields, clearImageRefFields, resolveImageRef } from "@/app/team/imageRef";
 import {
     AgentArtifactStatusSchema,
     AgentLifecycleSchema,
@@ -600,7 +600,12 @@ export function agentRoutes(app: Fastify) {
             }
 
             if (updates.runtimeType !== undefined && primaryMember) {
+                const runtimeChanged = primaryMember.runtimeType !== updates.runtimeType;
                 primaryMember.runtimeType = updates.runtimeType;
+                if (runtimeChanged && updates.sourceImageId === undefined && updates.genomeId === undefined) {
+                    Object.assign(board, clearImageRefFields({ includeLegacyGenome: true }));
+                    Object.assign(primaryMember, clearImageRefFields({ includeLegacySpec: true }));
+                }
             }
 
             if (updates.lifecycle !== undefined && primaryMember) {

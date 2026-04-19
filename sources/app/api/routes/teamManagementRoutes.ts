@@ -14,7 +14,7 @@ import {
     serializeTeamBoard,
     summarizeTeamArtifact,
 } from "@/app/team/teamArtifacts";
-import { buildImageRefFields, resolveCandidateId, resolveImageRef } from "@/app/team/imageRef";
+import { buildImageRefFields, clearImageRefFields, resolveCandidateId, resolveImageRef } from "@/app/team/imageRef";
 import { AgentLifecycle, AgentLifecycleSchema, normalizeAgentLifecycle } from "@/app/team/spawnState";
 import { getTeamOverviewSnapshot, invalidateTeamOverviewSnapshot } from "@/app/team/teamOverview";
 import { activityCache } from "@/app/presence/sessionCache";
@@ -1308,6 +1308,11 @@ async function addTeamMember(
         return m.sessionId === sessionId;
     });
     if (existing) {
+        const runtimeChanged = runtimeType !== undefined && existing.runtimeType !== runtimeType;
+        const shouldClearImageAttribution = runtimeChanged
+            && Object.keys(resolvedImageFields).length === 0
+            && candidateId === undefined;
+
         // Only write + broadcast if something actually changed
         const hasChanges =
             existing.sessionId !== sessionId ||
@@ -1315,6 +1320,14 @@ async function addTeamMember(
             (memberId !== undefined && existing.memberId !== memberId) ||
             (sessionTag !== undefined && existing.sessionTag !== sessionTag) ||
             (resolvedCandidateId !== undefined && existing.candidateId !== resolvedCandidateId) ||
+            (shouldClearImageAttribution && (
+                existing.sourceImageId != null
+                || existing.sourceImageVersion != null
+                || existing.genomeId != null
+                || existing.genomeVersion != null
+                || existing.specId != null
+                || existing.candidateId != null
+            )) ||
             (displayName && existing.displayName !== displayName) ||
             Object.entries(resolvedImageFields).some(([key, value]) => existing[key] !== value) ||
             (customPrompt !== undefined && existing.customPrompt !== customPrompt) ||
@@ -1340,6 +1353,10 @@ async function addTeamMember(
         existing.displayName = displayName || existing.displayName;
         if (Object.keys(resolvedImageFields).length > 0) {
             Object.assign(existing, resolvedImageFields);
+        }
+        if (shouldClearImageAttribution) {
+            Object.assign(existing, clearImageRefFields({ includeLegacyGenome: true, includeLegacySpec: true }));
+            delete existing.candidateId;
         }
         if (customPrompt !== undefined) existing.customPrompt = customPrompt;
         if (parentSessionId !== undefined) existing.parentSessionId = parentSessionId;
