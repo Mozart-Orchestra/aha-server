@@ -3,8 +3,8 @@ import type { CorsOptions as SocketCorsOptions } from 'cors';
 
 // Security: Allowed origins for production
 const ALLOWED_ORIGINS_PRODUCTION = [
-    'https://ahaagi.com',
-    'https://www.ahaagi.com',
+    'https://aha-agi.com',
+    'https://www.aha-agi.com',
     'https://aha.engineering',
     'https://app.aha.engineering',
     'https://www.aha.engineering',

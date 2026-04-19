@@ -41,10 +41,10 @@ describe('publicBaseUrls', () => {
         expect(getPublicWebappUrl({
             headers: {
                 host: 'internal:3005',
-                'x-forwarded-host': 'ahaagi.com',
+                'x-forwarded-host': 'aha-agi.com',
                 'x-forwarded-proto': 'https',
             },
-        })).toBe('https://ahaagi.com/webappv3');
+        })).toBe('https://aha-agi.com/webappv3');
     });
 
     it('falls back to localhost webapp in development for local requests', () => {
@@ -58,17 +58,17 @@ describe('publicBaseUrls', () => {
         })).toBe('http://localhost:8081');
     });
 
-    it('uses ahaagi public API as the default docs server', () => {
+    it('uses aha-agi public API as the default docs server', () => {
         delete process.env.AHA_PUBLIC_API_URL;
 
-        expect(getPublicApiUrl()).toBe('https://ahaagi.com/api/v3');
+        expect(getPublicApiUrl()).toBe('https://aha-agi.com/api');
         expect(getPublicApiServers()).toEqual([
             {
                 url: 'http://localhost:3005',
                 description: 'Local development server',
             },
             {
-                url: 'https://ahaagi.com/api/v3',
+                url: 'https://aha-agi.com/api',
                 description: 'Public server',
             },
         ]);
@@ -83,6 +83,6 @@ describe('publicBaseUrls', () => {
                 'x-forwarded-host': 'evil.example.com',
                 'x-forwarded-proto': 'https',
             },
-        })).toBe('https://ahaagi.com/webappv3');
+        })).toBe('https://aha-agi.com/webappv3');
     });
 });

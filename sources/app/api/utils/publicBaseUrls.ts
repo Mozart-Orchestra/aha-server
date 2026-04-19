@@ -1,5 +1,5 @@
-const DEFAULT_PUBLIC_WEBAPP_URL = 'https://ahaagi.com/webappv3';
-const DEFAULT_PUBLIC_API_URL = 'https://ahaagi.com/api/v3';
+const DEFAULT_PUBLIC_WEBAPP_URL = 'https://aha-agi.com/webappv3';
+const DEFAULT_PUBLIC_API_URL = 'https://aha-agi.com/api';
 const DEFAULT_LOCAL_WEBAPP_URL = 'http://localhost:8081';
 
 type HeaderValue = string | string[] | undefined;

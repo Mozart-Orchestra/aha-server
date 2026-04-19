@@ -59,13 +59,13 @@ describe('connectRoutes', () => {
             url: '/v1/connect/github/callback?code=test-code&state=bad-state',
             headers: {
                 host: 'internal:3005',
-                'x-forwarded-host': 'ahaagi.com',
+                'x-forwarded-host': 'aha-agi.com',
                 'x-forwarded-proto': 'https',
             },
         });
 
         expect(response.statusCode).toBe(302);
-        expect(response.headers.location).toBe('https://ahaagi.com/webappv3?error=invalid_state');
+        expect(response.headers.location).toBe('https://aha-agi.com/webappv3?error=invalid_state');
 
         await app.close();
     });
