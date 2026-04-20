@@ -198,7 +198,8 @@ describe('startSocket', () => {
         expect(observeSessionActivity).toHaveBeenCalledWith('user-1', 'session-1');
     });
 
-    it('marks session active=false and broadcasts offline activity on disconnect', async () => {
+    it('marks session active=false and broadcasts offline activity after grace period on disconnect', async () => {
+        vi.useFakeTimers();
         startSocket({ server: {} } as any);
         const socket = new FakeSocket({
             token: 'valid-token',
@@ -211,6 +212,14 @@ describe('startSocket', () => {
         sessionUpdateManyAndReturn.mockResolvedValue([{ id: 'session-1' }]);
 
         await socket.trigger('disconnect');
+
+        // Not called yet — grace period in progress
+        expect(sessionUpdateManyAndReturn).not.toHaveBeenCalled();
+        expect(invalidateSession).not.toHaveBeenCalled();
+        expect(emitEphemeral).not.toHaveBeenCalled();
+
+        // Advance past grace period
+        await vi.runAllTimersAsync();
 
         expect(removeConnection).toHaveBeenCalledWith('user-1', expect.objectContaining({
             connectionType: 'session-scoped',
@@ -237,9 +246,44 @@ describe('startSocket', () => {
             }),
             recipientFilter: { type: 'user-scoped-only' },
         });
+        vi.useRealTimers();
+    });
+
+    it('cancels offline grace timer when session reconnects within grace period', async () => {
+        vi.useFakeTimers();
+        startSocket({ server: {} } as any);
+        const socket = new FakeSocket({
+            token: 'valid-token',
+            clientType: 'session-scoped',
+            sessionId: 'session-1',
+        });
+
+        await connectionHandler!(socket);
+        vi.clearAllMocks();
+
+        // Disconnect
+        await socket.trigger('disconnect');
+        expect(sessionUpdateManyAndReturn).not.toHaveBeenCalled();
+
+        // Reconnect within grace period (simulate new socket for same session)
+        const socket2 = new FakeSocket({
+            token: 'valid-token',
+            clientType: 'session-scoped',
+            sessionId: 'session-1',
+        });
+        await connectionHandler!(socket2);
+
+        // Advance past original grace period — timer should have been cancelled
+        await vi.runAllTimersAsync();
+
+        // DB never wrote active=false because reconnect cancelled the timer
+        expect(sessionUpdateManyAndReturn).not.toHaveBeenCalled();
+        expect(invalidateSession).not.toHaveBeenCalled();
+        vi.useRealTimers();
     });
 
     it('does not broadcast offline activity when disconnect does not change any active session row', async () => {
+        vi.useFakeTimers();
         startSocket({ server: {} } as any);
         const socket = new FakeSocket({
             token: 'valid-token',
@@ -252,9 +296,11 @@ describe('startSocket', () => {
         sessionUpdateManyAndReturn.mockResolvedValue([]);
 
         await socket.trigger('disconnect');
+        await vi.runAllTimersAsync();
 
         expect(emitEphemeral).not.toHaveBeenCalled();
         expect(invalidateSession).not.toHaveBeenCalled();
+        vi.useRealTimers();
     });
 
     it('rejects session-scoped reconnect when the auth token is invalid', async () => {

@@ -37,6 +37,8 @@ const DEFAULT_TEAM_COLUMNS = [
     { id: 'done', title: 'Done' },
 ];
 
+const GENOME_HUB_URL = process.env.GENOME_HUB_URL ?? 'http://localhost:3006';
+
 const CorpsSeatSchema = z.object({
     id: z.string().optional(),
     genomeId: z.string().min(1).optional(),
@@ -100,6 +102,7 @@ const TeamMirrorMemberSchema = z.object({
     sourceImageVersion: z.number().nullable().optional(),
     workspacePath: z.string().optional(),
     machineId: z.string().optional(),
+    machineName: z.string().optional(),
     lifecycle: AgentLifecycleSchema.optional(),
 });
 
@@ -386,6 +389,23 @@ function normalizeCorpsSeatConfigs(
     return { seats, errors };
 }
 
+async function getGenomeImageStatus(genomeId: string): Promise<'present' | 'missing' | 'unreachable'> {
+    try {
+        const res = await fetch(`${GENOME_HUB_URL}/genomes/id/${encodeURIComponent(genomeId)}`);
+        if (res.status === 404) {
+            return 'missing';
+        }
+        if (!res.ok) {
+            log({ module: 'team-management', level: 'warn', genomeId }, `genome-hub returned ${res.status} while validating corps seat image`);
+            return 'unreachable';
+        }
+        return 'present';
+    } catch (error) {
+        log({ module: 'team-management', level: 'warn', genomeId }, `genome-hub validation failed: ${error}`);
+        return 'unreachable';
+    }
+}
+
 function buildPlannedCorpsMembers(teamId: string, seats: CorpsSeatConfig[]): PlannedCorpsMember[] {
     const members: PlannedCorpsMember[] = [];
 
@@ -621,6 +641,9 @@ export function teamManagementRoutes(app: Fastify) {
                 400: z.object({
                     error: z.string(),
                 }),
+                502: z.object({
+                    error: z.string(),
+                }),
             },
         },
     }, async (request, reply) => {
@@ -647,6 +670,28 @@ export function teamManagementRoutes(app: Fastify) {
             if (missingMachineIds.length > 0) {
                 return reply.code(400).send({
                     error: `Unknown machineId(s): ${missingMachineIds.join(', ')}`,
+                });
+            }
+
+            const uniqueGenomeIds = [...new Set(seats.map((seat) => seat.sourceImageId))];
+            const genomeStatuses = await Promise.all(
+                uniqueGenomeIds.map(async (genomeId) => [genomeId, await getGenomeImageStatus(genomeId)] as const)
+            );
+            const missingGenomeIds = genomeStatuses
+                .filter(([, status]) => status === 'missing')
+                .map(([genomeId]) => genomeId);
+            if (missingGenomeIds.length > 0) {
+                return reply.code(400).send({
+                    error: `Unknown genomeId(s): ${missingGenomeIds.join(', ')}`,
+                });
+            }
+
+            const unreachableGenomeIds = genomeStatuses
+                .filter(([, status]) => status === 'unreachable')
+                .map(([genomeId]) => genomeId);
+            if (unreachableGenomeIds.length > 0) {
+                return reply.code(502).send({
+                    error: `Genome hub unavailable while validating: ${unreachableGenomeIds.join(', ')}`,
                 });
             }
 
@@ -903,6 +948,7 @@ export function teamManagementRoutes(app: Fastify) {
                 executionPlane: z.string().optional(),
                 runtimeType: z.string().optional(),
                 machineId: z.string().optional(),
+                machineName: z.string().optional(),
                 workspacePath: z.string().optional(),
                 spawnError: z.string().optional(),
                 lifecycle: AgentLifecycleSchema.optional(),
@@ -913,7 +959,7 @@ export function teamManagementRoutes(app: Fastify) {
     }, async (request, reply) => {
         const userId = request.userId;
         const { teamId } = request.params as { teamId: string };
-        const { memberId, sessionId, sessionTag, candidateId, roleId, displayName, sourceImageId: rawSourceImageId, sourceImageVersion: rawSourceImageVersion, specId, genomeId, genomeVersion, customPrompt, parentSessionId, executionPlane, runtimeType, machineId, workspacePath, spawnError, lifecycle, authorities, teamOverlay } = request.body as {
+        const { memberId, sessionId, sessionTag, candidateId, roleId, displayName, sourceImageId: rawSourceImageId, sourceImageVersion: rawSourceImageVersion, specId, genomeId, genomeVersion, customPrompt, parentSessionId, executionPlane, runtimeType, machineId, machineName, workspacePath, spawnError, lifecycle, authorities, teamOverlay } = request.body as {
             memberId?: string;
             sessionId: string;
             sessionTag?: string;
@@ -930,6 +976,7 @@ export function teamManagementRoutes(app: Fastify) {
             executionPlane?: string;
             runtimeType?: string;
             machineId?: string;
+            machineName?: string;
             workspacePath?: string;
             spawnError?: string;
             lifecycle?: AgentLifecycle;
@@ -942,7 +989,7 @@ export function teamManagementRoutes(app: Fastify) {
         const sourceImageVersion = rawSourceImageVersion ?? genomeVersion ?? null;
 
         try {
-            const result = await addTeamMember(userId, teamId, memberId, sessionId, sessionTag, candidateId, roleId, displayName, sourceImageId, sourceImageVersion, specId, customPrompt, parentSessionId, executionPlane, runtimeType, machineId, workspacePath, spawnError, lifecycle, authorities, teamOverlay);
+            const result = await addTeamMember(userId, teamId, memberId, sessionId, sessionTag, candidateId, roleId, displayName, sourceImageId, sourceImageVersion, specId, customPrompt, parentSessionId, executionPlane, runtimeType, machineId, machineName, workspacePath, spawnError, lifecycle, authorities, teamOverlay);
             return reply.send(result);
         } catch (error: any) {
             if (error.message === 'Team not found') {
@@ -1267,6 +1314,7 @@ async function addTeamMember(
     executionPlane?: string,
     runtimeType?: string,
     machineId?: string,
+    machineName?: string,
     workspacePath?: string,
     spawnError?: string,
     lifecycle?: AgentLifecycle,
@@ -1335,6 +1383,7 @@ async function addTeamMember(
             (executionPlane !== undefined && existing.executionPlane !== executionPlane) ||
             (runtimeType !== undefined && existing.runtimeType !== runtimeType) ||
             (machineId !== undefined && existing.machineId !== machineId) ||
+            (machineName !== undefined && existing.machineName !== machineName) ||
             (workspacePath !== undefined && existing.workspacePath !== workspacePath) ||
             (spawnError !== undefined && existing.spawnError !== spawnError) ||
             (normalizedLifecycle !== null && JSON.stringify(existing.lifecycle ?? null) !== JSON.stringify(normalizedLifecycle)) ||
@@ -1363,6 +1412,7 @@ async function addTeamMember(
         if (executionPlane !== undefined) existing.executionPlane = executionPlane;
         if (runtimeType !== undefined) existing.runtimeType = runtimeType;
         if (machineId !== undefined) existing.machineId = machineId;
+        if (machineName !== undefined) existing.machineName = machineName;
         if (workspacePath !== undefined) existing.workspacePath = workspacePath;
         if (spawnError !== undefined) existing.spawnError = spawnError;
         if (normalizedLifecycle !== null) existing.lifecycle = normalizedLifecycle;
@@ -1384,6 +1434,7 @@ async function addTeamMember(
             ...(executionPlane !== undefined && { executionPlane }),
             ...(runtimeType !== undefined && { runtimeType }),
             ...(machineId !== undefined && { machineId }),
+            ...(machineName !== undefined && { machineName }),
             ...(workspacePath !== undefined && { workspacePath }),
             ...(spawnError !== undefined && { spawnError }),
             ...(normalizedLifecycle !== null && { lifecycle: normalizedLifecycle }),
@@ -1817,6 +1868,31 @@ async function batchDeleteSessions(
             }
         });
         deletableIds.forEach((sessionId) => activityCache.invalidateSession(sessionId));
+
+        const deletableSet = new Set(deletableIds);
+        const teamArtifacts = await listAccessibleTeamArtifacts(userId);
+        for (const artifact of teamArtifacts) {
+            const board = extractTeamBoard(artifact);
+            const members = extractTeamMembers(board);
+            const filteredMembers = members.filter((member) => !deletableSet.has(member.sessionId));
+            if (filteredMembers.length !== members.length) {
+                if (!board.team) {
+                    board.team = {};
+                }
+                board.team.members = filteredMembers;
+                await db.artifact.update({
+                    where: { id: artifact.id },
+                    data: {
+                        body: serializeTeamBoard(board),
+                        bodyVersion: { increment: 1 },
+                        updatedAt: new Date(),
+                    },
+                });
+                const removedIds = deletableIds.filter((sessionId) => members.some((member) => member.sessionId === sessionId));
+                await broadcastTeamUpdate(userId, artifact.id, 'member-removed', { sessionIds: removedIds });
+                await invalidateTeamOverviewSnapshot(userId);
+            }
+        }
     }
 
     for (const sessionId of deletableIds) {

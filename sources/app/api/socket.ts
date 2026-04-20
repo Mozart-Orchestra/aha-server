@@ -17,6 +17,15 @@ import { getSocketCorsConfig } from "./utils/corsConfig";
 import { activityCache } from "@/app/presence/sessionCache";
 import { observeSessionActivity } from "@/app/presence/observeSessionActivity";
 
+// Grace-period timers: sessionId → pending offline DB-write timer.
+// When a session-scoped socket disconnects, we wait OFFLINE_GRACE_MS before
+// actually marking the session inactive. If the same session reconnects within
+// that window, the timer is cancelled — the session never appears offline.
+// This prevents rapid Socket.IO reconnects (common under load) from causing
+// false-offline flicker in the kanban.
+const OFFLINE_GRACE_MS = 30_000; // 30 seconds
+const disconnectGraceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
 export function startSocket(app: Fastify) {
     const io = new Server(app.server, {
         cors: getSocketCorsConfig(),
@@ -110,6 +119,14 @@ export function startSocket(app: Fastify) {
         incrementWebSocketConnection(connection.connectionType);
 
         if (connection.connectionType === 'session-scoped') {
+            // Cancel any pending grace-period offline timer for this session.
+            // If the session disconnected and reconnected within OFFLINE_GRACE_MS,
+            // the DB was never written to active=false — nothing to undo.
+            const pendingTimer = disconnectGraceTimers.get(connection.sessionId);
+            if (pendingTimer) {
+                clearTimeout(pendingTimer);
+                disconnectGraceTimers.delete(connection.sessionId);
+            }
             await observeSessionActivity(userId, connection.sessionId);
         }
 
@@ -180,32 +197,42 @@ export function startSocket(app: Fastify) {
             }
 
             if (connection.connectionType === 'session-scoped') {
-                const disconnectedAt = Date.now();
-                try {
-                    const updated = await db.session.updateManyAndReturn({
-                        where: {
-                            id: connection.sessionId,
-                            accountId: userId,
-                            active: true,
-                        },
-                        data: {
-                            active: false,
-                            lastActiveAt: new Date(disconnectedAt),
-                        },
-                    });
-
-                    if (updated.length > 0) {
-                        activityCache.invalidateSession(connection.sessionId);
-                        eventRouter.emitEphemeral({
-                            userId,
-                            payload: buildSessionActivityEphemeral(connection.sessionId, false, disconnectedAt, false),
-                            recipientFilter: { type: 'user-scoped-only' },
+                // Defer the offline write by OFFLINE_GRACE_MS.
+                // Most Socket.IO disconnects are transient (reconnects within 1-5s);
+                // writing active=false immediately causes agents to flicker offline
+                // in the kanban even while they're actively executing MCP tools via HTTP.
+                const sessionId = connection.sessionId;
+                const timer = setTimeout(async () => {
+                    disconnectGraceTimers.delete(sessionId);
+                    const disconnectedAt = Date.now();
+                    try {
+                        const updated = await db.session.updateManyAndReturn({
+                            where: {
+                                id: sessionId,
+                                accountId: userId,
+                                active: true,
+                            },
+                            data: {
+                                active: false,
+                                lastActiveAt: new Date(disconnectedAt),
+                            },
                         });
-                        log({ module: 'websocket' }, `Session ${connection.sessionId} marked as offline on disconnect`);
+
+                        if (updated.length > 0) {
+                            activityCache.invalidateSession(sessionId);
+                            eventRouter.emitEphemeral({
+                                userId,
+                                payload: buildSessionActivityEphemeral(sessionId, false, disconnectedAt, false),
+                                recipientFilter: { type: 'user-scoped-only' },
+                            });
+                            log({ module: 'websocket' }, `Session ${sessionId} marked as offline after grace period`);
+                        }
+                    } catch (error) {
+                        log({ module: 'websocket', level: 'error' }, `Error marking session ${sessionId} as offline: ${error}`);
                     }
-                } catch (error) {
-                    log({ module: 'websocket', level: 'error' }, `Error marking session ${connection.sessionId} as offline: ${error}`);
-                }
+                }, OFFLINE_GRACE_MS);
+                disconnectGraceTimers.set(sessionId, timer);
+                log({ module: 'websocket' }, `Session ${sessionId} disconnect grace timer started (${OFFLINE_GRACE_MS}ms)`);
             }
         });
 

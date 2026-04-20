@@ -31,6 +31,7 @@ export type TeamMemberRecord = {
     executionPlane?: string;
     runtimeType?: string;
     machineId?: string;
+    machineName?: string;
     workspacePath?: string;
     spawnError?: string;
     lifecycle?: AgentLifecycle;
@@ -62,6 +63,7 @@ export type TeamMirrorMember = {
     sourceImageVersion?: number | null;
     workspacePath?: string;
     machineId?: string;
+    machineName?: string;
     lifecycle?: AgentLifecycle;
 };
 
@@ -139,6 +141,7 @@ function toMirrorMembers(members: TeamMemberRecord[]): TeamMirrorMember[] {
             : {}),
         ...(typeof member.workspacePath === 'string' ? { workspacePath: member.workspacePath } : {}),
         ...(typeof member.machineId === 'string' ? { machineId: member.machineId } : {}),
+        ...(typeof member.machineName === 'string' ? { machineName: member.machineName } : {}),
         ...(member.lifecycle ? { lifecycle: member.lifecycle } : {}),
     }));
 }

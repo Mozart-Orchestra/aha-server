@@ -299,6 +299,16 @@ async function loadGenomeHubTransport() {
     };
 }
 
+function buildGenomeHubReadHeaders(hubPublishKey: string | null | undefined): Record<string, string> | undefined {
+    if (!hubPublishKey) {
+        return undefined;
+    }
+
+    return {
+        Authorization: `Bearer ${hubPublishKey}`,
+    };
+}
+
 function parseStoredGenomeScorecard(scorecard: string | null | undefined): Record<string, unknown> | null {
     if (!scorecard) {
         return null;
@@ -785,6 +795,17 @@ export function evolutionRoutes(app: Fastify) {
                 },
             });
             if (!genome) {
+                const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
+                const upstream = await axios.get(`${hubUrl}/genomes/id/${encodeURIComponent(id)}`, {
+                    timeout: 5_000,
+                    validateStatus: () => true,
+                    headers: buildGenomeHubReadHeaders(hubPublishKey),
+                });
+
+                if (upstream.status === 200 && upstream.data?.genome) {
+                    return reply.send({ genome: upstream.data.genome });
+                }
+
                 return reply.code(404).send({ error: 'Genome not found' });
             }
             return reply.send({ genome: withGenomeProjection(genome) });
@@ -1112,7 +1133,23 @@ export function evolutionRoutes(app: Fastify) {
                 },
                 orderBy: { version: 'desc' },
             });
-            if (!genome) return reply.code(404).send({ error: 'Genome not found' });
+            if (!genome) {
+                const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
+                const upstream = await axios.get(
+                    `${hubUrl}/genomes/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`,
+                    {
+                        timeout: 5_000,
+                        validateStatus: () => true,
+                        headers: buildGenomeHubReadHeaders(hubPublishKey),
+                    }
+                );
+
+                if (upstream.status === 200 && upstream.data?.genome) {
+                    return reply.send({ genome: upstream.data.genome });
+                }
+
+                return reply.code(404).send({ error: 'Genome not found' });
+            }
             return reply.send({ genome: withGenomeProjection(genome) });
         } catch (error: any) {
             log({ module: 'evolution', level: 'error' }, `genome latest error: ${error}`);
@@ -1175,7 +1212,24 @@ export function evolutionRoutes(app: Fastify) {
                     ...buildGenomeVisibilityWhere(userId),
                 },
             });
-            if (!genome) return reply.code(404).send({ error: 'Genome not found' });
+            if (!genome) {
+                const { hubUrl, hubPublishKey, axios } = await loadGenomeHubTransport();
+                const upstream = await axios.get(
+                    `${hubUrl}/genomes/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/${encodeURIComponent(String(version))}`,
+                    {
+                        timeout: 5_000,
+                        validateStatus: () => true,
+                        headers: buildGenomeHubReadHeaders(hubPublishKey),
+                    }
+                );
+
+                if (upstream.status === 200 && upstream.data?.genome) {
+                    reply.header('Cache-Control', 'public, immutable, max-age=31536000');
+                    return reply.send({ genome: upstream.data.genome });
+                }
+
+                return reply.code(404).send({ error: 'Genome not found' });
+            }
             // versioned genome is immutable — safe to cache forever
             reply.header('Cache-Control', 'public, immutable, max-age=31536000');
             return reply.send({ genome: withGenomeProjection(genome) });

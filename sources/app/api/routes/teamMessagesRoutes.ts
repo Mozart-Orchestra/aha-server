@@ -13,7 +13,7 @@ import { observeSessionActivity } from "@/app/presence/observeSessionActivity";
 import { pushToWeixinIfBound } from "@/app/channels/weixinOutbound";
 import { buildTeamMessageEncryptionPath, decryptTeamMessage } from "@/app/team/teamMessageCrypto";
 import { buildTeamScopeFromMetadata, matchesTeamScopeFilter } from "@/app/team/teamScope";
-import { extractTeamSessionIds, getTeamMemberSessionIds } from "@/app/team/teamArtifacts";
+import { extractTeamMembers, extractTeamSessionIds, getTeamMemberSessionIds } from "@/app/team/teamArtifacts";
 
 /**
  * Team Messages Routes
@@ -297,40 +297,68 @@ export function teamMessagesRoutes(app: Fastify) {
                 });
 
                 if (!session) {
-                    return reply.code(403).send({ error: `Invalid fromSessionId: ${fromSessionId}` });
-                }
+                    // Live sessions can appear in the team roster before their
+                    // backing Session row is visible here. Fall back to the team
+                    // artifact roster so legitimate team members do not get 403s.
+                    const teamArtifact = await db.artifact.findUnique({
+                        where: { id: teamId },
+                        select: { body: true }
+                    });
+                    const teamBoard = teamArtifact?.body
+                        ? parseTeamArtifactBody(teamArtifact.body) as Record<string, any>
+                        : null;
+                    const teamMember = teamBoard
+                        ? extractTeamMembers(teamBoard).find((member) => member.sessionId === fromSessionId)
+                        : undefined;
 
-                if (session.deletedAt) {
-                    return reply.code(410).send({ error: `Session has been deleted: ${fromSessionId}` });
-                }
-
-                // Parse metadata to get authoritative role and display name
-                try {
-                    const metadata = JSON.parse(session.metadata);
-
-                    // IMPORTANT: Only override fromRole if not already set (preserve user messages with fromRole='user')
-                    // This prevents user messages from being incorrectly overridden by session metadata
-                    if (metadata.role && !message.fromRole) {
-                        message.fromRole = metadata.role;
+                    if (!teamMember) {
+                        return reply.code(403).send({ error: `Invalid fromSessionId: ${fromSessionId}` });
                     }
 
-                    // Override display name (always get from session for consistency)
-                    if (metadata.name || metadata.path) {
-                        message.fromDisplayName = metadata.name || metadata.path;
+                    const rosterRole = typeof teamMember.roleId === 'string'
+                        ? teamMember.roleId
+                        : typeof teamMember.role === 'string'
+                            ? teamMember.role
+                            : undefined;
+
+                    if (rosterRole) {
+                        message.fromRole = rosterRole;
                     }
 
-                    const scope = buildTeamScopeFromMetadata(metadata);
-                    if (scope) {
-                        message.metadata = {
-                            ...(message.metadata ?? {}),
-                            scope,
-                        };
+                    if (typeof teamMember.displayName === 'string' && teamMember.displayName.trim().length > 0) {
+                        message.fromDisplayName = teamMember.displayName;
                     }
-                } catch (e) {
-                    log({ module: 'team-messages', level: 'warn' }, `Failed to parse session metadata for ${fromSessionId}: ${e}`);
+                } else {
+                    if (session.deletedAt) {
+                        return reply.code(410).send({ error: `Session has been deleted: ${fromSessionId}` });
+                    }
+
+                    // Parse metadata to get authoritative role and display name
+                    try {
+                        const metadata = JSON.parse(session.metadata);
+
+                        // IMPORTANT: Only override fromRole if not already set (preserve user messages with fromRole='user')
+                        // This prevents user messages from being incorrectly overridden by session metadata
+                        if (metadata.role && !message.fromRole) {
+                            message.fromRole = metadata.role;
+                        }
+
+                        // Override display name (always get from session for consistency)
+                        if (metadata.name || metadata.path) {
+                            message.fromDisplayName = metadata.name || metadata.path;
+                        }
+
+                        const scope = buildTeamScopeFromMetadata(metadata);
+                        if (scope) {
+                            message.metadata = {
+                                ...(message.metadata ?? {}),
+                                scope,
+                            };
+                        }
+                    } catch (e) {
+                        log({ module: 'team-messages', level: 'warn' }, `Failed to parse session metadata for ${fromSessionId}: ${e}`);
+                    }
                 }
-
-
             }
             if (!message.fromSessionId) {
                 message.fromRole = 'user';

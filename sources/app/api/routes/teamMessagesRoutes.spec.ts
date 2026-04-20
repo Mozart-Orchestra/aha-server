@@ -196,6 +196,53 @@ describe('teamMessagesRoutes', () => {
         await app.close();
     });
 
+    it('falls back to the team roster when the sender session is not yet queryable', async () => {
+        mocked.sessionFindFirst.mockResolvedValue(null);
+        mocked.artifactFindFirst.mockResolvedValue({ id: 'team-1' });
+        mocked.artifactFindUnique.mockResolvedValue({ body: 'team-body' });
+        mocked.parseTeamArtifactBody.mockReturnValue({
+            team: {
+                members: [
+                    {
+                        sessionId: 'session-1',
+                        roleId: 'researcher',
+                        displayName: 'Researcher Name',
+                    },
+                ],
+            },
+        });
+        mocked.sessionFindMany.mockResolvedValue([{ id: 'session-1' }, { id: 'session-2' }]);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/teams/team-1/messages',
+            payload: buildMessage({
+                fromRole: undefined,
+                fromDisplayName: undefined,
+            }),
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(mocked.emitUpdate).toHaveBeenCalledWith({
+            userId: 'user-1',
+            payload: expect.objectContaining({
+                body: expect.objectContaining({
+                    t: 'team-message',
+                    teamId: 'team-1',
+                    message: expect.objectContaining({
+                        fromSessionId: 'session-1',
+                        fromRole: 'researcher',
+                        fromDisplayName: 'Researcher Name',
+                    }),
+                }),
+            }),
+            recipientFilter: { type: 'specific-sessions', sessionIds: new Set(['session-1']) },
+        });
+
+        await app.close();
+    });
+
     it('returns 404 when sending a message to an inaccessible team', async () => {
         mocked.sessionFindFirst.mockResolvedValue({
             id: 'session-1',

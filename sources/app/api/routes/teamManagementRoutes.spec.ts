@@ -93,6 +93,8 @@ describe('teamManagementRoutes', () => {
         vi.clearAllMocks();
         vi.mocked(db.$transaction).mockImplementation(async (callback: any) => callback(db as any));
         vi.mocked(db.machine.findMany).mockResolvedValue([] as never);
+        vi.mocked(db.artifact.findMany).mockResolvedValue([] as never);
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200 } as Response));
     });
 
     it('creates a canonical team artifact with the provided id and initial board', async () => {
@@ -384,6 +386,38 @@ describe('teamManagementRoutes', () => {
         expect(response.statusCode).toBe(400);
         expect(response.json()).toEqual({
             error: 'Unknown machineId(s): machine-2',
+        });
+        expect(vi.mocked(db.artifact.create)).not.toHaveBeenCalled();
+
+        await app.close();
+    });
+
+    it('rejects corps creation when a referenced genome is missing from genome-hub', async () => {
+        vi.mocked(db.machine.findMany).mockResolvedValue([{ id: 'machine-1' }] as never);
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404 } as Response));
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/corps',
+            payload: {
+                name: 'Launch Squad',
+                seats: [
+                    {
+                        genomeId: 'missing-genome',
+                        roleId: 'builder',
+                        runtimeType: 'claude',
+                        machineId: 'machine-1',
+                        workspacePath: '/repo',
+                        quantity: 1,
+                    },
+                ],
+            },
+        });
+
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toEqual({
+            error: 'Unknown genomeId(s): missing-genome',
         });
         expect(vi.mocked(db.artifact.create)).not.toHaveBeenCalled();
 
@@ -1171,6 +1205,47 @@ describe('teamManagementRoutes', () => {
                 { sessionId: 'session-2', success: false, error: 'Session not found or not owned by user' },
             ],
         });
+
+        await app.close();
+    });
+
+    it('removes deleted sessions from stored team rosters during batch delete', async () => {
+        vi.mocked(db.session.findMany).mockResolvedValue([{ id: 'session-1' }] as never);
+        vi.mocked(db.artifact.findMany).mockResolvedValue([
+            buildTeamArtifact({
+                name: 'Ops Team',
+                team: {
+                    name: 'Ops Team',
+                    members: [
+                        { sessionId: 'session-1', roleId: 'builder' },
+                        { sessionId: 'session-2', roleId: 'reviewer' },
+                    ],
+                },
+                tasks: [],
+            }),
+        ] as never);
+        vi.mocked(db.artifact.update).mockResolvedValue({ id: 'team-1' } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/sessions/batch/delete',
+            payload: { sessionIds: ['session-1'] },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(db.artifact.update).toHaveBeenCalledTimes(1);
+
+        const updateCall = vi.mocked(db.artifact.update).mock.calls[0]?.[0];
+        const serializedBoard = updateCall?.data?.body as Buffer;
+        const decoded = JSON.parse(serializedBoard.toString()) as { body: string };
+        const nextBoard = JSON.parse(decoded.body) as {
+            team?: { members?: Array<{ sessionId: string; roleId: string }> };
+        };
+
+        expect(nextBoard.team?.members).toEqual([
+            { sessionId: 'session-2', roleId: 'reviewer' },
+        ]);
 
         await app.close();
     });

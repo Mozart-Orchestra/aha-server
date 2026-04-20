@@ -20,6 +20,7 @@ const mocked = vi.hoisted(() => ({
     invalidateTeamOverviewSnapshot: vi.fn(),
     observeSessionActivity: vi.fn(),
     getAccessibleTeamArtifact: vi.fn(),
+    extractTeamMembers: vi.fn(),
     sessionFindFirst: vi.fn(),
 }));
 
@@ -50,6 +51,7 @@ vi.mock('@/app/presence/observeSessionActivity', () => ({
 
 vi.mock('@/app/team/teamArtifacts', () => ({
     getAccessibleTeamArtifact: mocked.getAccessibleTeamArtifact,
+    extractTeamMembers: mocked.extractTeamMembers,
 }));
 
 vi.mock('@/storage/db', () => ({
@@ -87,13 +89,20 @@ function buildTask(id = 'task-1', overrides: Record<string, unknown> = {}) {
     };
 }
 
+function buildTeamArtifactBody(board: Record<string, unknown>) {
+    return Buffer.from(JSON.stringify({ body: JSON.stringify(board) }));
+}
+
 describe('taskRoutes', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        mocked.extractTeamMembers.mockImplementation((board: Record<string, any>) => (
+            Array.isArray(board?.team?.members) ? board.team.members : []
+        ));
         mocked.getAccessibleTeamArtifact.mockResolvedValue({
             id: 'team-1',
             accountId: 'user-1',
-            body: Buffer.from('{}'),
+            body: buildTeamArtifactBody({}),
             createdAt: new Date('2026-03-17T00:00:00Z'),
             updatedAt: new Date('2026-03-17T00:05:00Z'),
         });
@@ -105,6 +114,7 @@ describe('taskRoutes', () => {
                 path: '/tmp/aha-cli-0330-max-redefine-login',
                 runtimeBuild: { worktreeName: 'aha-cli-0330-max-redefine-login' },
             }),
+            deletedAt: null,
         });
     });
 
@@ -309,6 +319,61 @@ describe('taskRoutes', () => {
                 displayName: 'Builder Name',
                 type: 'handoff',
                 content: 'Migrated during replace_agent handoff',
+            }),
+        }));
+
+        await app.close();
+    });
+
+    it('falls back to the team roster when the update actor session is not yet queryable', async () => {
+        mocked.sessionFindFirst.mockResolvedValue(null);
+        mocked.getAccessibleTeamArtifact.mockResolvedValue({
+            id: 'team-1',
+            accountId: 'user-1',
+            body: buildTeamArtifactBody({
+                team: {
+                    members: [
+                        {
+                            sessionId: 'session-roster',
+                            roleId: 'researcher',
+                            displayName: 'Researcher Name',
+                            workspacePath: '/tmp/happy-server-0330-max-redefine-login',
+                        },
+                    ],
+                },
+            }),
+            createdAt: new Date('2026-03-17T00:00:00Z'),
+            updatedAt: new Date('2026-03-17T00:05:00Z'),
+        });
+        mocked.updateTask.mockResolvedValue(buildTask('task-1'));
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'PUT',
+            url: '/v1/teams/team-1/tasks/task-1',
+            payload: {
+                priority: 'high',
+                actor: {
+                    sessionId: 'session-roster',
+                    kind: 'agent',
+                },
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(mocked.updateTask).toHaveBeenCalledWith('user-1', 'team-1', 'task-1', expect.objectContaining({
+            priority: 'high',
+            actor: expect.objectContaining({
+                sessionId: 'session-roster',
+                role: 'researcher',
+                displayName: 'Researcher Name',
+                kind: 'agent',
+            }),
+            scope: expect.objectContaining({
+                scopePath: '/tmp/happy-server-0330-max-redefine-login',
+                scopeLabel: 'happy-server-0330-max-redefine-login',
+                repoName: 'happy-server',
+                visibility: 'scoped',
             }),
         }));
 
@@ -532,6 +597,51 @@ describe('taskRoutes', () => {
             task: expect.objectContaining({ id: 'task-1' }),
         });
         expect(mocked.observeSessionActivity).toHaveBeenCalledWith('user-1', 'session-1', expect.any(Number));
+
+        await app.close();
+    });
+
+    it('falls back to the team roster when the comment session is not yet queryable', async () => {
+        mocked.sessionFindFirst.mockResolvedValue(null);
+        mocked.getAccessibleTeamArtifact.mockResolvedValue({
+            id: 'team-1',
+            accountId: 'user-1',
+            body: buildTeamArtifactBody({
+                team: {
+                    members: [
+                        {
+                            sessionId: 'session-roster',
+                            roleId: 'researcher',
+                            displayName: 'Researcher Name',
+                            workspacePath: '/tmp/kanban-0330-max-redefine-login',
+                        },
+                    ],
+                },
+            }),
+            createdAt: new Date('2026-03-17T00:00:00Z'),
+            updatedAt: new Date('2026-03-17T00:05:00Z'),
+        });
+        mocked.addTaskComment.mockResolvedValue(buildTask('task-1'));
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/teams/team-1/tasks/task-1/comments',
+            payload: {
+                sessionId: 'session-roster',
+                content: 'Roster fallback comment',
+                type: 'note',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(mocked.addTaskComment).toHaveBeenCalledWith('user-1', 'team-1', 'task-1', expect.objectContaining({
+            sessionId: 'session-roster',
+            role: 'researcher',
+            displayName: 'Researcher Name',
+            content: 'Roster fallback comment',
+            type: 'note',
+        }));
 
         await app.close();
     });

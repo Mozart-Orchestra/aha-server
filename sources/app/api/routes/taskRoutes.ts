@@ -1,10 +1,11 @@
+import path from "node:path";
 import { Fastify } from "../types";
 import { z } from "zod";
 import { log } from "@/utils/log";
 import { taskOrchestrator } from "@/app/task/taskOrchestrator";
 import { isTaskOperationError, TASK_ERROR_CODES } from "@/app/task/taskErrors";
 import { invalidateTeamOverviewSnapshot } from "@/app/team/teamOverview";
-import { getAccessibleTeamArtifact } from "@/app/team/teamArtifacts";
+import { extractTeamMembers, getAccessibleTeamArtifact } from "@/app/team/teamArtifacts";
 import { observeSessionActivity } from "@/app/presence/observeSessionActivity";
 import { buildTeamScopeFromMetadata, normalizeTeamScope } from "@/app/team/teamScope";
 import { db } from "@/storage/db";
@@ -112,6 +113,27 @@ type ResolvedTaskSession = {
     scope?: z.infer<typeof TaskSchema>['scope'] | null;
 };
 
+function normalizeOptionalString(value: unknown): string | undefined {
+    if (typeof value !== 'string') {
+        return undefined;
+    }
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function buildRosterTaskScope(member: Record<string, unknown>): z.infer<typeof TaskSchema>['scope'] | null {
+    const workspacePath = normalizeOptionalString(member.workspacePath);
+    if (!workspacePath) {
+        return null;
+    }
+
+    return normalizeTeamScope({
+        scopePath: workspacePath,
+        scopeLabel: path.basename(workspacePath),
+        visibility: 'scoped',
+    });
+}
+
 async function resolveTaskSession(
     userId: string,
     teamId: string,
@@ -127,36 +149,53 @@ async function resolveTaskSession(
         return null;
     }
 
-    let memberSessionIds: string[] = [];
+    let rosterMember: Record<string, unknown> | null = null;
     if (artifact.body) {
         try {
             const board = parseTeamArtifactBody(artifact.body) as Record<string, any>;
-            memberSessionIds = Array.isArray(board?.team?.members)
-                ? board.team.members
-                    .map((member: any) => member?.sessionId)
-                    .filter((value: unknown): value is string => typeof value === 'string' && value.length > 0)
-                : [];
+            const teamMembers = extractTeamMembers(board);
+            if (teamMembers.length > 0) {
+                rosterMember = teamMembers.find((member) => member?.sessionId === normalizedSessionId) ?? null;
+                if (!rosterMember) {
+                    return null;
+                }
+            }
         } catch {
-            memberSessionIds = [];
+            rosterMember = null;
         }
-    }
-    if (memberSessionIds.length > 0 && !memberSessionIds.includes(normalizedSessionId)) {
-        return null;
     }
 
     const session = await db.session.findFirst({
         where: {
             id: normalizedSessionId,
             accountId: userId,
-            deletedAt: null,
         },
         select: {
             id: true,
             metadata: true,
+            deletedAt: true,
         },
     });
 
     if (!session) {
+        if (!rosterMember) {
+            return null;
+        }
+
+        const rosterRole = normalizeOptionalString(rosterMember.roleId)
+            ?? normalizeOptionalString(rosterMember.role);
+        const rosterDisplayName = normalizeOptionalString(rosterMember.displayName);
+        const rosterScope = buildRosterTaskScope(rosterMember);
+
+        return {
+            sessionId: normalizedSessionId,
+            ...(rosterRole ? { role: rosterRole } : {}),
+            ...(rosterDisplayName ? { displayName: rosterDisplayName } : {}),
+            ...(rosterScope ? { scope: rosterScope } : {}),
+        };
+    }
+
+    if (session.deletedAt) {
         return null;
     }
 
