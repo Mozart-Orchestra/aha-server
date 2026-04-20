@@ -59,15 +59,19 @@ class ActivityCache {
         sessionCacheCounter.inc({ operation: 'session_validation', result: 'miss' });
         
         // Cache miss - check database
+        // NOTE: Do NOT filter by active=true here. A daemon that reconnects after a
+        // 2-minute timeout gap must be able to self-heal its session by sending
+        // session-alive heartbeats. The flush path sets active=true when writing,
+        // so the session will come back online automatically.
+        // (Mirrors the same pattern used in isMachineValid.)
         try {
             const session = await db.session.findFirst({
                 where: {
                     id: sessionId,
                     accountId: userId,
-                    active: true,
                 }
             });
-            
+
             if (session) {
                 // Cache the result
                 this.sessionCache.set(sessionId, {
@@ -78,7 +82,7 @@ class ActivityCache {
                 });
                 return true;
             }
-            
+
             return false;
         } catch (error) {
             log({ module: 'session-cache', level: 'error' }, `Error validating session ${sessionId}: ${error}`);
