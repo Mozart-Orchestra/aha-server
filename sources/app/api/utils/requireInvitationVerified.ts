@@ -1,5 +1,6 @@
 import { db } from "@/storage/db";
 import { log } from "@/utils/log";
+import { isInvitationGateEnabled } from "./invitationGate";
 
 /**
  * Fastify preHandler that 403s unless the authenticated account has
@@ -7,6 +8,10 @@ import { log } from "@/utils/log";
  * already run and populated `request.userId`.
  */
 export async function requireInvitationVerified(request: any, reply: any) {
+    if (!isInvitationGateEnabled()) {
+        return;
+    }
+
     const userId = request.userId as string | undefined;
     if (!userId) {
         // authenticate preHandler must run before this

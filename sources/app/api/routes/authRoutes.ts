@@ -13,6 +13,7 @@ import {
     upsertAccountRecoveryMaterial,
 } from "@/app/auth/accountRecoveryMaterial";
 import { decryptBoxedContentSecretKey, getWrappingPublicKey } from "@/app/auth/contentWrappingKey";
+import { invitationVerifiedForResponse } from "../utils/invitationGate";
 
 export function authRoutes(app: Fastify) {
     const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
@@ -68,7 +69,7 @@ export function authRoutes(app: Fastify) {
                 body: {
                     success: true as const,
                     token: await auth.createToken(user.id),
-                    invitationVerified: Boolean(user.invitationVerifiedAt),
+                    invitationVerified: invitationVerifiedForResponse(user.invitationVerifiedAt),
                 }
             };
         }
@@ -91,7 +92,7 @@ export function authRoutes(app: Fastify) {
             body: {
                 success: true as const,
                 token: await auth.createToken(user.id),
-                invitationVerified: Boolean(user.invitationVerifiedAt),
+                invitationVerified: invitationVerifiedForResponse(user.invitationVerifiedAt),
             }
         };
     }
@@ -597,7 +598,7 @@ export function authRoutes(app: Fastify) {
                 state: 'authorized',
                 token: token,
                 response: answer.response,
-                invitationVerified: Boolean(account?.invitationVerifiedAt),
+                invitationVerified: invitationVerifiedForResponse(account?.invitationVerifiedAt),
             });
         }
 
@@ -748,7 +749,7 @@ export function authRoutes(app: Fastify) {
             token,
             userId: account.id,
             encryptedContentSecretKey: privacyKit.encodeBase64(encryptedContentSecretKey),
-            invitationVerified: Boolean(account.invitationVerifiedAt),
+            invitationVerified: invitationVerifiedForResponse(account.invitationVerifiedAt),
         });
     });
 
@@ -822,7 +823,7 @@ export function authRoutes(app: Fastify) {
         return reply.send({
             jwt,
             encryptedContentSecretKey: privacyKit.encodeBase64(encryptedContentSecretKey),
-            invitationVerified: Boolean(joinCode.account.invitationVerifiedAt),
+            invitationVerified: invitationVerifiedForResponse(joinCode.account.invitationVerifiedAt),
         });
     });
 
@@ -969,7 +970,7 @@ export function authRoutes(app: Fastify) {
                 token,
                 userId: account.id,
                 encryptedContentSecretKey: privacyKit.encodeBase64(encryptedContentSecretKey),
-                invitationVerified: Boolean(account.invitationVerifiedAt),
+                invitationVerified: invitationVerifiedForResponse(account.invitationVerifiedAt),
             });
         }
 
@@ -1013,7 +1014,7 @@ export function authRoutes(app: Fastify) {
             token,
             userId: newAccount.id,
             encryptedContentSecretKey: null,
-            invitationVerified: Boolean(newAccount.invitationVerifiedAt),
+            invitationVerified: invitationVerifiedForResponse(newAccount.invitationVerifiedAt),
         });
     });
 
@@ -1154,7 +1155,7 @@ export function authRoutes(app: Fastify) {
             token,
             userId: account.id,
             recoveryReady,
-            invitationVerified: Boolean(account.invitationVerifiedAt),
+            invitationVerified: invitationVerifiedForResponse(account.invitationVerifiedAt),
         });
     });
     } // end for-loop over supabase paths
@@ -1236,7 +1237,7 @@ export function authRoutes(app: Fastify) {
             token,
             userId: account.id,
             encryptedContentSecretKey: privacyKit.encodeBase64(encryptedContentSecretKey),
-            invitationVerified: Boolean(account.invitationVerifiedAt),
+            invitationVerified: invitationVerifiedForResponse(account.invitationVerifiedAt),
         });
     });
 

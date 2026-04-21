@@ -1,5 +1,5 @@
 import fastify from 'fastify';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { serializerCompiler, validatorCompiler, ZodTypeProvider } from 'fastify-type-provider-zod';
 
 vi.mock('@/storage/db', () => ({
@@ -152,8 +152,11 @@ function buildApp(options?: {
 }
 
 describe('authRoutes', () => {
+    const originalInvitationGateEnabled = process.env.INVITATION_GATE_ENABLED;
+
     beforeEach(() => {
         vi.clearAllMocks();
+        process.env.INVITATION_GATE_ENABLED = 'true';
         vi.mocked(auth.createToken).mockResolvedValue('token-123');
         vi.mocked(auth.verifyToken).mockResolvedValue(null as never);
         vi.mocked(tweetnacl.sign.detached.verify).mockReturnValue(true as never);
@@ -169,6 +172,14 @@ describe('authRoutes', () => {
             name: 'Test User',
             avatarUrl: null,
         } as never);
+    });
+
+    afterEach(() => {
+        if (originalInvitationGateEnabled === undefined) {
+            delete process.env.INVITATION_GATE_ENABLED;
+        } else {
+            process.env.INVITATION_GATE_ENABLED = originalInvitationGateEnabled;
+        }
     });
 
     it('rejects /v1/auth when the signature is invalid', async () => {
@@ -210,6 +221,7 @@ describe('authRoutes', () => {
         expect(response.json()).toEqual({
             success: true,
             token: 'token-123',
+            invitationVerified: false,
         });
         expect(vi.mocked(db.account.upsert)).toHaveBeenCalledWith({
             where: { publicKey: 'hex-public-key' },
@@ -810,6 +822,7 @@ describe('authRoutes', () => {
             token: 'token-123',
             userId: 'user-1',
             encryptedContentSecretKey: 'encoded-recovery-secret',
+            invitationVerified: false,
         });
 
         await app.close();
@@ -934,6 +947,7 @@ describe('authRoutes', () => {
             token: 'token-123',
             userId: 'user-1',
             encryptedContentSecretKey: 'encoded-recovery-secret',
+            invitationVerified: false,
         });
         expect(vi.mocked(db.joinCode.findUnique)).toHaveBeenCalledWith({
             where: { code: 'AHA_JOIN_EXAMPLETICKET123' },
@@ -992,6 +1006,7 @@ describe('authRoutes', () => {
         expect(response.json()).toEqual({
             jwt: 'token-123',
             encryptedContentSecretKey: 'encoded-recovery-secret',
+            invitationVerified: false,
         });
         expect(vi.mocked(db.joinCode.findUnique)).toHaveBeenCalledWith({
             where: { code: 'A3X9K2' },

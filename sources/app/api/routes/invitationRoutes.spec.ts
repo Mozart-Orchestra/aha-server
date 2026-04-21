@@ -1,5 +1,5 @@
 import fastify from 'fastify';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { serializerCompiler, validatorCompiler, ZodTypeProvider } from 'fastify-type-provider-zod';
 
 vi.mock('@/storage/db', () => ({
@@ -53,8 +53,19 @@ function mockRedeemTransaction() {
 }
 
 describe('invitationRoutes', () => {
+    const originalInvitationGateEnabled = process.env.INVITATION_GATE_ENABLED;
+
     beforeEach(() => {
         vi.clearAllMocks();
+        process.env.INVITATION_GATE_ENABLED = 'true';
+    });
+
+    afterEach(() => {
+        if (originalInvitationGateEnabled === undefined) {
+            delete process.env.INVITATION_GATE_ENABLED;
+        } else {
+            process.env.INVITATION_GATE_ENABLED = originalInvitationGateEnabled;
+        }
     });
 
     describe('GET /v1/invitation/status', () => {
@@ -73,6 +84,27 @@ describe('invitationRoutes', () => {
                 verified: false,
                 verifiedAt: null,
                 codeUsed: null,
+                gateEnabled: true,
+            });
+        });
+
+        it('returns verified=true when the invitation gate is disabled', async () => {
+            process.env.INVITATION_GATE_ENABLED = 'false';
+            vi.mocked(db.account.findUnique).mockResolvedValue({
+                invitationVerifiedAt: null,
+                invitationCodeUsed: null,
+            } as never);
+            const app = buildApp();
+            const response = await app.inject({
+                method: 'GET',
+                url: '/v1/invitation/status',
+            });
+            expect(response.statusCode).toBe(200);
+            expect(response.json()).toEqual({
+                verified: true,
+                verifiedAt: null,
+                codeUsed: null,
+                gateEnabled: false,
             });
         });
 

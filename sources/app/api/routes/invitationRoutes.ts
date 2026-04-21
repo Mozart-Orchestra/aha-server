@@ -4,6 +4,7 @@ import { db } from "@/storage/db";
 import { log } from "@/utils/log";
 import { Fastify } from "../types";
 import { requireInvitationVerified } from "../utils/requireInvitationVerified";
+import { invitationVerifiedForResponse, isInvitationGateEnabled } from "../utils/invitationGate";
 
 const MAX_CODE_LENGTH = 64;
 
@@ -28,10 +29,12 @@ export function invitationRoutes(app: Fastify) {
             where: { id: userId },
             select: { invitationVerifiedAt: true, invitationCodeUsed: true },
         });
+        const gateEnabled = isInvitationGateEnabled();
         return reply.send({
-            verified: Boolean(account?.invitationVerifiedAt),
+            verified: invitationVerifiedForResponse(account?.invitationVerifiedAt),
             verifiedAt: account?.invitationVerifiedAt ?? null,
             codeUsed: account?.invitationCodeUsed ?? null,
+            gateEnabled,
         });
     });
 
