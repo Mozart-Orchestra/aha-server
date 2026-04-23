@@ -8,9 +8,6 @@ const ALLOWED_ORIGINS_PRODUCTION = [
     'https://aha.engineering',
     'https://app.aha.engineering',
     'https://www.aha.engineering',
-    'https://top1vibe.com',
-    'https://app.top1vibe.com',
-    'https://www.top1vibe.com',
     // Mobile app origins (Expo)
     'exp://localhost:8081',
     'exp://localhost:19000',
@@ -60,6 +57,14 @@ const ALLOWED_HEADERS = [
     'Content-Type',
     'Authorization',
     'X-Request-Id',
+    'X-Aha-Trace-Id',
+    'X-Aha-Span-Id',
+    'X-Aha-Parent-Span-Id',
+    'X-Aha-Request-Id',
+    'X-Aha-Session-Id',
+    'X-Aha-Machine-Id',
+    'X-Aha-Team-Id',
+    'X-Aha-Task-Id',
     'X-Client-Version',
     'X-Device-Id',
 ];
@@ -72,6 +77,12 @@ const ALLOWED_METHODS: ('GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS')
     'PATCH',
     'DELETE',
     'OPTIONS',
+];
+
+const EXPOSED_HEADERS = [
+    'X-Aha-Trace-Id',
+    'X-Aha-Span-Id',
+    'X-Aha-Request-Id',
 ];
 
 function isProduction(): boolean {
@@ -164,6 +175,7 @@ export function getCorsConfig(): FastifyCorsOptions {
         return {
             origin: getProductionAllowedOrigins(),
             allowedHeaders: ALLOWED_HEADERS,
+            exposedHeaders: EXPOSED_HEADERS,
             methods: ALLOWED_METHODS,
             credentials: true,
             maxAge: 86400, // Cache preflight for 24 hours
@@ -174,6 +186,7 @@ export function getCorsConfig(): FastifyCorsOptions {
     return {
         origin: getDevelopmentOriginHandler(),
         allowedHeaders: [...ALLOWED_HEADERS, '*'], // More permissive in dev
+        exposedHeaders: EXPOSED_HEADERS,
         methods: ALLOWED_METHODS,
         credentials: true,
     };

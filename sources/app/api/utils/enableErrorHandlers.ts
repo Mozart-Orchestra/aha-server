@@ -1,6 +1,7 @@
 import { log } from "@/utils/log";
 import { Fastify } from "../types";
 import { ZodError } from "zod";
+import { getAhaTraceLogFields } from "./traceContext";
 
 export function enableErrorHandlers(app: Fastify) {
     // Global error handler
@@ -18,6 +19,7 @@ export function enableErrorHandlers(app: Fastify) {
             log({
                 module: 'fastify-validation-error',
                 level: 'error',
+                ...getAhaTraceLogFields(request),
                 method,
                 url,
                 validation: JSON.stringify(err.validation || err.message)
@@ -25,7 +27,9 @@ export function enableErrorHandlers(app: Fastify) {
             return reply.code(400).send({
                 error: 'Validation Error',
                 message: err.message,
-                details: err.validation
+                details: err.validation,
+                requestId: request.ahaTrace?.requestId,
+                traceId: request.ahaTrace?.traceId,
             });
         }
 
@@ -33,6 +37,7 @@ export function enableErrorHandlers(app: Fastify) {
         log({
             module: 'fastify-error',
             level: 'error',
+            ...getAhaTraceLogFields(request),
             method,
             url,
             userAgent,
@@ -50,22 +55,26 @@ export function enableErrorHandlers(app: Fastify) {
             return reply.code(statusCode).send({
                 error: 'Internal Server Error',
                 message: 'An unexpected error occurred',
-                statusCode
+                statusCode,
+                requestId: request.ahaTrace?.requestId,
+                traceId: request.ahaTrace?.traceId,
             });
         } else {
             // Client errors - can expose more details
             return reply.code(statusCode).send({
                 error: err.name || 'Error',
                 message: err.message || 'An error occurred',
-                statusCode
+                statusCode,
+                requestId: request.ahaTrace?.requestId,
+                traceId: request.ahaTrace?.traceId,
             });
         }
     });
 
     // Catch-all route for debugging 404s
     app.setNotFoundHandler((request, reply) => {
-        log({ module: '404-handler' }, `404 - Method: ${request.method}, Path: ${request.url}, Headers: ${JSON.stringify(request.headers)}`);
-        reply.code(404).send({ error: 'Not found', path: request.url, method: request.method });
+        log({ module: '404-handler', ...getAhaTraceLogFields(request) }, `404 - Method: ${request.method}, Path: ${request.url}, Headers: ${JSON.stringify(request.headers)}`);
+        reply.code(404).send({ error: 'Not found', path: request.url, method: request.method, requestId: request.ahaTrace?.requestId, traceId: request.ahaTrace?.traceId });
     });
 
     // Error hook for additional logging
@@ -80,6 +89,7 @@ export function enableErrorHandlers(app: Fastify) {
         log({
             module: 'fastify-hook-error',
             level: 'error',
+            ...getAhaTraceLogFields(request),
             method,
             url,
             duration,
@@ -101,6 +111,7 @@ export function enableErrorHandlers(app: Fastify) {
                 log({
                     module: 'fastify-serialization-error',
                     level: 'error',
+                    ...getAhaTraceLogFields(request),
                     method: request.method,
                     url: request.url,
                     stack: error.stack
