@@ -13,11 +13,11 @@ vi.mock('@/storage/db', () => ({
 }));
 
 vi.mock('@/app/team/teamArtifacts', () => ({
-    getAccessibleTeamArtifact: vi.fn(),
+    getTeamAccessContext: vi.fn(),
 }));
 
 import { db } from '@/storage/db';
-import { getAccessibleTeamArtifact } from '@/app/team/teamArtifacts';
+import { getTeamAccessContext } from '@/app/team/teamArtifacts';
 import { teamReviewRoutes } from './teamReviewRoutes';
 
 function buildApp() {
@@ -35,12 +35,21 @@ function buildApp() {
 describe('teamReviewRoutes', () => {
     beforeEach(() => {
         vi.clearAllMocks();
-        vi.mocked(getAccessibleTeamArtifact).mockResolvedValue({
-            id: 'team-1',
-            accountId: 'user-1',
-            body: Buffer.from('{}'),
-            createdAt: new Date('2026-03-20T00:00:00Z'),
-            updatedAt: new Date('2026-03-20T00:00:00Z'),
+        vi.mocked(getTeamAccessContext).mockResolvedValue({
+            ok: true,
+            context: {
+                artifact: {
+                    id: 'team-1',
+                    accountId: 'user-1',
+                    body: Buffer.from('{}'),
+                    bodyVersion: 1,
+                    createdAt: new Date('2026-03-20T00:00:00Z'),
+                    updatedAt: new Date('2026-03-20T00:00:00Z'),
+                },
+                currentAccountId: 'user-1',
+                teamOwnerAccountId: 'user-1',
+                access: 'owner',
+            },
         } as never);
     });
 
@@ -199,6 +208,35 @@ describe('teamReviewRoutes', () => {
                 system: 5,
             },
             lastReviewedAt: '2026-03-20T02:00:00.000Z',
+        });
+
+        await app.close();
+    });
+
+    it('returns explicit account mismatch for inaccessible existing teams', async () => {
+        vi.mocked(getTeamAccessContext).mockResolvedValue({
+            ok: false,
+            failure: {
+                statusCode: 403,
+                error: 'Team account mismatch',
+                code: 'TEAM_ACCOUNT_MISMATCH',
+                currentAccountId: 'user-1',
+                teamOwnerAccountId: 'owner-1',
+            },
+        } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/teams/team-1/score',
+        });
+
+        expect(response.statusCode).toBe(403);
+        expect(response.json()).toEqual({
+            error: 'Team account mismatch',
+            code: 'TEAM_ACCOUNT_MISMATCH',
+            currentAccountId: 'user-1',
+            teamOwnerAccountId: 'owner-1',
         });
 
         await app.close();

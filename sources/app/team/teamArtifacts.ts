@@ -2,7 +2,7 @@ import { db } from "@/storage/db";
 import type { AgentLifecycle } from "./spawnState";
 import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
 
-type ArtifactLike = {
+export type ArtifactLike = {
     id: string;
     accountId: string;
     body: Uint8Array | null;
@@ -116,6 +116,25 @@ export type TeamMirrorSnapshot = {
     members: TeamMirrorMember[];
     tasks: TeamMirrorTask[];
 };
+
+export type TeamAccessContext = {
+    artifact: ArtifactLike;
+    currentAccountId: string;
+    teamOwnerAccountId: string;
+    access: 'owner' | 'member';
+};
+
+export type TeamAccessFailure = {
+    statusCode: 403 | 404;
+    error: string;
+    code: 'TEAM_NOT_FOUND' | 'TEAM_ACCOUNT_MISMATCH';
+    currentAccountId: string;
+    teamOwnerAccountId?: string;
+};
+
+export type TeamAccessResult =
+    | { ok: true; context: TeamAccessContext }
+    | { ok: false; failure: TeamAccessFailure };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -310,7 +329,36 @@ export function buildTeamMirrorSnapshot(
     };
 }
 
-export async function getAccessibleTeamArtifact(userId: string, teamId: string, options?: { includeArchived?: boolean }): Promise<ArtifactLike | null> {
+function teamNotFound(currentAccountId: string): TeamAccessResult {
+    return {
+        ok: false,
+        failure: {
+            statusCode: 404,
+            error: 'Team not found',
+            code: 'TEAM_NOT_FOUND',
+            currentAccountId,
+        },
+    };
+}
+
+function teamAccountMismatch(currentAccountId: string, teamOwnerAccountId: string): TeamAccessResult {
+    return {
+        ok: false,
+        failure: {
+            statusCode: 403,
+            error: 'Team account mismatch',
+            code: 'TEAM_ACCOUNT_MISMATCH',
+            currentAccountId,
+            teamOwnerAccountId,
+        },
+    };
+}
+
+export async function getTeamAccessContext(
+    userId: string,
+    teamId: string,
+    options?: { includeArchived?: boolean }
+): Promise<TeamAccessResult> {
     const artifact = await db.artifact.findUnique({
         where: { id: teamId },
         select: {
@@ -324,16 +372,24 @@ export async function getAccessibleTeamArtifact(userId: string, teamId: string, 
     });
 
     if (!artifact || !isTeamArtifact(artifact)) {
-        return null;
+        return teamNotFound(userId);
     }
 
     const board = extractTeamBoard(artifact);
     if (!options?.includeArchived && isArchivedTeamBoard(board)) {
-        return null;
+        return teamNotFound(userId);
     }
 
     if (artifact.accountId === userId) {
-        return artifact;
+        return {
+            ok: true,
+            context: {
+                artifact,
+                currentAccountId: userId,
+                teamOwnerAccountId: artifact.accountId,
+                access: 'owner',
+            },
+        };
     }
 
     const memberSessionIds = extractTeamMembers(board)
@@ -341,18 +397,36 @@ export async function getAccessibleTeamArtifact(userId: string, teamId: string, 
         .filter((value): value is string => typeof value === 'string' && value.length > 0);
 
     if (memberSessionIds.length === 0) {
-        return null;
+        return teamAccountMismatch(userId, artifact.accountId);
     }
 
     const session = await db.session.findFirst({
         where: {
             accountId: userId,
             id: { in: memberSessionIds },
+            deletedAt: null,
         },
         select: { id: true },
     });
 
-    return session ? artifact : null;
+    if (!session) {
+        return teamAccountMismatch(userId, artifact.accountId);
+    }
+
+    return {
+        ok: true,
+        context: {
+            artifact,
+            currentAccountId: userId,
+            teamOwnerAccountId: artifact.accountId,
+            access: 'member',
+        },
+    };
+}
+
+export async function getAccessibleTeamArtifact(userId: string, teamId: string, options?: { includeArchived?: boolean }): Promise<ArtifactLike | null> {
+    const result = await getTeamAccessContext(userId, teamId, options);
+    return result.ok ? result.context.artifact : null;
 }
 
 export async function getTeamMemberSessionIds(teamId: string): Promise<string[]> {

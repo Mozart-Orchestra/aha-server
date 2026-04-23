@@ -107,9 +107,30 @@ function buildMessage(overrides?: Partial<Record<string, unknown>>) {
     };
 }
 
+function buildTeamArtifact(accountId = 'user-1') {
+    return {
+        id: 'team-1',
+        accountId,
+        body: Buffer.from('team-body'),
+        bodyVersion: 1,
+        createdAt: new Date('2026-04-23T00:00:00Z'),
+        updatedAt: new Date('2026-04-23T00:00:00Z'),
+    };
+}
+
 describe('teamMessagesRoutes', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        mocked.artifactFindUnique.mockResolvedValue(buildTeamArtifact());
+        mocked.parseTeamArtifactBody.mockReturnValue({
+            team: {
+                members: [
+                    { sessionId: 'session-1', roleId: 'builder', displayName: 'Builder' },
+                    { sessionId: 'session-2', roleId: 'qa', displayName: 'QA' },
+                ],
+            },
+            tasks: [],
+        });
         mocked.allocateUserSeq.mockResolvedValue(7);
         mocked.randomKeyNaked.mockReturnValue('event-id');
         mocked.encryptString.mockImplementation((_path, raw) => raw);
@@ -133,7 +154,6 @@ describe('teamMessagesRoutes', () => {
     });
 
     it('returns 404 when listing messages for a team the user cannot access', async () => {
-        mocked.artifactFindFirst.mockResolvedValue(null);
         mocked.artifactFindUnique.mockResolvedValue(null);
 
         const app = buildApp();
@@ -143,13 +163,37 @@ describe('teamMessagesRoutes', () => {
         });
 
         expect(response.statusCode).toBe(404);
-        expect(response.json()).toEqual({ error: 'Team not found' });
+        expect(response.json()).toEqual({
+            error: 'Team not found',
+            code: 'TEAM_NOT_FOUND',
+            currentAccountId: 'user-1',
+        });
+
+        await app.close();
+    });
+
+    it('returns account mismatch instead of a misleading 404 for existing inaccessible teams', async () => {
+        mocked.artifactFindUnique.mockResolvedValue(buildTeamArtifact('owner-1'));
+        mocked.sessionFindFirst.mockResolvedValue(null);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/teams/team-1/messages',
+        });
+
+        expect(response.statusCode).toBe(403);
+        expect(response.json()).toEqual({
+            error: 'Team account mismatch',
+            code: 'TEAM_ACCOUNT_MISMATCH',
+            currentAccountId: 'user-1',
+            teamOwnerAccountId: 'owner-1',
+        });
 
         await app.close();
     });
 
     it('lists decrypted messages in chronological order with a cursor', async () => {
-        mocked.artifactFindFirst.mockResolvedValue({ id: 'team-1' });
         mocked.userKVStoreFindMany.mockResolvedValue([
             {
                 key: 'team_messages.team-1.200.msg-2',
@@ -168,6 +212,9 @@ describe('teamMessagesRoutes', () => {
         });
 
         expect(response.statusCode).toBe(200);
+        expect(mocked.userKVStoreFindMany).toHaveBeenCalledWith(expect.objectContaining({
+            where: expect.objectContaining({ accountId: 'user-1' }),
+        }));
         expect(response.json()).toEqual({
             messages: [
                 expect.objectContaining({ id: 'msg-1', content: 'First', timestamp: 100 }),
@@ -180,8 +227,43 @@ describe('teamMessagesRoutes', () => {
         await app.close();
     });
 
+    it('reads shared-team messages from the owner account namespace', async () => {
+        mocked.artifactFindUnique.mockResolvedValue(buildTeamArtifact('owner-1'));
+        mocked.parseTeamArtifactBody.mockReturnValue({
+            team: {
+                members: [{ sessionId: 'member-session', roleId: 'builder' }],
+            },
+            tasks: [],
+        });
+        mocked.sessionFindFirst.mockResolvedValue({ id: 'member-session' });
+        mocked.userKVStoreFindMany.mockResolvedValue([
+            {
+                key: 'team_messages.team-1.100.msg-1',
+                value: JSON.stringify({ id: 'msg-1', content: 'First', timestamp: 100 }),
+            },
+        ]);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/teams/team-1/messages',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(mocked.userKVStoreFindMany).toHaveBeenCalledWith(expect.objectContaining({
+            where: expect.objectContaining({ accountId: 'owner-1' }),
+        }));
+        expect(mocked.decryptString).toHaveBeenCalledWith(
+            ['user', 'owner-1', 'teams', 'team-1', 'messages', 'msg-1'],
+            JSON.stringify({ id: 'msg-1', content: 'First', timestamp: 100 }),
+        );
+
+        await app.close();
+    });
+
     it('rejects sending a message with an invalid fromSessionId', async () => {
         mocked.sessionFindFirst.mockResolvedValue(null);
+        mocked.parseTeamArtifactBody.mockReturnValue({ team: { members: [] }, tasks: [] });
 
         const app = buildApp();
         const response = await app.inject({
@@ -198,8 +280,6 @@ describe('teamMessagesRoutes', () => {
 
     it('falls back to the team roster when the sender session is not yet queryable', async () => {
         mocked.sessionFindFirst.mockResolvedValue(null);
-        mocked.artifactFindFirst.mockResolvedValue({ id: 'team-1' });
-        mocked.artifactFindUnique.mockResolvedValue({ body: 'team-body' });
         mocked.parseTeamArtifactBody.mockReturnValue({
             team: {
                 members: [
@@ -248,7 +328,6 @@ describe('teamMessagesRoutes', () => {
             id: 'session-1',
             metadata: JSON.stringify({ role: 'builder', name: 'Builder Name' }),
         });
-        mocked.artifactFindFirst.mockResolvedValue(null);
         mocked.artifactFindUnique.mockResolvedValue(null);
 
         const app = buildApp();
@@ -259,7 +338,11 @@ describe('teamMessagesRoutes', () => {
         });
 
         expect(response.statusCode).toBe(404);
-        expect(response.json()).toEqual({ error: 'Team not found' });
+        expect(response.json()).toEqual({
+            error: 'Team not found',
+            code: 'TEAM_NOT_FOUND',
+            currentAccountId: 'user-1',
+        });
 
         await app.close();
     });
@@ -269,7 +352,6 @@ describe('teamMessagesRoutes', () => {
             id: 'session-1',
             metadata: JSON.stringify({ role: 'builder', name: 'Builder Name' }),
         });
-        mocked.artifactFindFirst.mockResolvedValue({ id: 'team-1' });
         mocked.sessionFindMany.mockResolvedValue([{ id: 'session-1' }, { id: 'session-2' }]);
 
         const app = buildApp();
@@ -317,7 +399,6 @@ describe('teamMessagesRoutes', () => {
     });
 
     it('treats messages without fromSessionId as user messages', async () => {
-        mocked.artifactFindFirst.mockResolvedValue({ id: 'team-1' });
         mocked.sessionFindMany.mockResolvedValue([{ id: 'session-viewer' }]);
 
         const app = buildApp();

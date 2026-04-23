@@ -68,11 +68,12 @@ import axios from 'axios';
 import { existsSync, readFileSync } from 'node:fs';
 import { evolutionRoutes } from './evolutionRoutes';
 
-function buildTeamArtifact(board: Record<string, unknown>) {
+function buildTeamArtifact(board: Record<string, unknown>, accountId = 'user-1') {
     return {
         id: 'team-1',
-        accountId: 'user-1',
+        accountId,
         body: Buffer.from(JSON.stringify({ body: JSON.stringify(board) })),
+        bodyVersion: 1,
         createdAt: new Date('2026-03-17T00:00:00Z'),
         updatedAt: new Date('2026-03-17T00:05:00Z'),
     };
@@ -245,6 +246,29 @@ describe('evolutionRoutes', () => {
                     },
                 },
             ],
+        });
+
+        await app.close();
+    });
+
+    it('returns explicit account mismatch for inaccessible bypass-agent lists', async () => {
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(buildTeamArtifact({
+            team: { members: [] },
+            tasks: [],
+        }, 'owner-1') as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/teams/team-1/bypass-agents',
+        });
+
+        expect(response.statusCode).toBe(403);
+        expect(response.json()).toEqual({
+            error: 'Team account mismatch',
+            code: 'TEAM_ACCOUNT_MISMATCH',
+            currentAccountId: 'user-1',
+            teamOwnerAccountId: 'owner-1',
         });
 
         await app.close();

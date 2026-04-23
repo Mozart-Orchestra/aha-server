@@ -13,7 +13,9 @@ import {
     extractTeamBoard,
     extractTeamMembers,
     getAccessibleTeamArtifact,
+    getTeamAccessContext,
     serializeTeamBoard,
+    type TeamAccessFailure,
 } from "@/app/team/teamArtifacts";
 
 const GenomeCreateSchema = z.object({
@@ -95,6 +97,15 @@ const GenomeForkPayloadSchema = z.object({
     isPublic: z.boolean().optional(),
     publisherId: z.string().max(256).nullable().optional(),
 });
+
+function sendTeamAccessFailure(reply: any, failure: TeamAccessFailure) {
+    return reply.code(failure.statusCode).send({
+        error: failure.error,
+        code: failure.code,
+        currentAccountId: failure.currentAccountId,
+        ...(failure.teamOwnerAccountId ? { teamOwnerAccountId: failure.teamOwnerAccountId } : {}),
+    });
+}
 
 const EntityDiffProxyPayloadSchema = z.object({
     description: z.string().min(1),
@@ -575,12 +586,12 @@ export function evolutionRoutes(app: Fastify) {
         const { teamId } = request.params as { teamId: string };
 
         try {
-            const artifact = await getAccessibleTeamArtifact(userId, teamId);
-            if (!artifact) {
-                return reply.code(404).send({ error: 'Team not found' });
+            const access = await getTeamAccessContext(userId, teamId);
+            if (!access.ok) {
+                return sendTeamAccessFailure(reply, access.failure);
             }
 
-            const board = extractTeamBoard(artifact);
+            const board = extractTeamBoard(access.context.artifact);
             const latestByBypassKey = new Map<string, any>();
             for (const member of extractTeamMembers(board).filter((m: any) => m.executionPlane === 'bypass')) {
                 const roleId = member.roleId || member.role || '';
@@ -636,9 +647,9 @@ export function evolutionRoutes(app: Fastify) {
         const { teamId } = request.params as { teamId: string };
 
         try {
-            const artifact = await getAccessibleTeamArtifact(userId, teamId);
-            if (!artifact) {
-                return reply.code(404).send({ error: 'Team not found' });
+            const access = await getTeamAccessContext(userId, teamId);
+            if (!access.ok) {
+                return sendTeamAccessFailure(reply, access.failure);
             }
 
             return reply.send({ signals: [], total: 0 });
@@ -695,9 +706,9 @@ export function evolutionRoutes(app: Fastify) {
         const { teamId } = request.params as { teamId: string };
 
         try {
-            const artifact = await getAccessibleTeamArtifact(userId, teamId);
-            if (!artifact) {
-                return reply.code(404).send({ error: 'Team not found' });
+            const access = await getTeamAccessContext(userId, teamId);
+            if (!access.ok) {
+                return sendTeamAccessFailure(reply, access.failure);
             }
 
             return reply.send({ state: readSupervisorStateSnapshot(teamId) });

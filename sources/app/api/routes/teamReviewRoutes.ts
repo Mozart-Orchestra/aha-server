@@ -2,7 +2,7 @@ import { Fastify } from "../types";
 import { z } from "zod";
 import { db } from "@/storage/db";
 import { log } from "@/utils/log";
-import { getAccessibleTeamArtifact } from "@/app/team/teamArtifacts";
+import { getTeamAccessContext, type TeamAccessFailure } from "@/app/team/teamArtifacts";
 
 const ReviewSourceSchema = z.enum(["user", "master", "system"]);
 
@@ -107,6 +107,15 @@ function buildTeamScorecard(reviews: StoredTeamReview[]) {
     };
 }
 
+function sendTeamAccessFailure(reply: any, failure: TeamAccessFailure) {
+    return reply.code(failure.statusCode).send({
+        error: failure.error,
+        code: failure.code,
+        currentAccountId: failure.currentAccountId,
+        ...(failure.teamOwnerAccountId ? { teamOwnerAccountId: failure.teamOwnerAccountId } : {}),
+    });
+}
+
 export function teamReviewRoutes(app: Fastify) {
     app.post('/v1/teams/:teamId/reviews', {
         preHandler: app.authenticate,
@@ -122,9 +131,9 @@ export function teamReviewRoutes(app: Fastify) {
         const payload = request.body as z.infer<typeof TeamReviewPayloadSchema>;
 
         try {
-            const team = await getAccessibleTeamArtifact(reviewerId, teamId);
-            if (!team) {
-                return reply.code(404).send({ error: 'Team not found' });
+            const access = await getTeamAccessContext(reviewerId, teamId);
+            if (!access.ok) {
+                return sendTeamAccessFailure(reply, access.failure);
             }
 
             const key = buildTeamReviewKey(teamId, reviewerId);
@@ -188,9 +197,9 @@ export function teamReviewRoutes(app: Fastify) {
         const { limit } = request.query as { limit: number };
 
         try {
-            const team = await getAccessibleTeamArtifact(request.userId, teamId);
-            if (!team) {
-                return reply.code(404).send({ error: 'Team not found' });
+            const access = await getTeamAccessContext(request.userId, teamId);
+            if (!access.ok) {
+                return sendTeamAccessFailure(reply, access.failure);
             }
 
             const reviews = await listStoredTeamReviews(teamId, limit);
@@ -215,9 +224,9 @@ export function teamReviewRoutes(app: Fastify) {
         const { teamId } = request.params as { teamId: string };
 
         try {
-            const team = await getAccessibleTeamArtifact(request.userId, teamId);
-            if (!team) {
-                return reply.code(404).send({ error: 'Team not found' });
+            const access = await getTeamAccessContext(request.userId, teamId);
+            if (!access.ok) {
+                return sendTeamAccessFailure(reply, access.failure);
             }
 
             const reviews = await listStoredTeamReviews(teamId);

@@ -8,12 +8,11 @@ import { log } from "@/utils/log";
 import { kvMutate } from "@/app/kv/kvMutate";
 import { encryptString } from "@/modules/encrypt";
 import { teamMessagesCounter, teamTaskOperationsCounter } from "@/app/monitoring/metrics2";
-import { parseTeamArtifactBody } from "@/utils/teamArtifacts";
 import { observeSessionActivity } from "@/app/presence/observeSessionActivity";
 import { pushToWeixinIfBound } from "@/app/channels/weixinOutbound";
 import { buildTeamMessageEncryptionPath, decryptTeamMessage } from "@/app/team/teamMessageCrypto";
 import { buildTeamScopeFromMetadata, matchesTeamScopeFilter } from "@/app/team/teamScope";
-import { extractTeamMembers, extractTeamSessionIds, getTeamMemberSessionIds } from "@/app/team/teamArtifacts";
+import { extractTeamBoard, extractTeamMembers, getTeamAccessContext, getTeamMemberSessionIds, type TeamAccessFailure } from "@/app/team/teamArtifacts";
 
 /**
  * Team Messages Routes
@@ -63,44 +62,13 @@ const TeamMessageSchema = z.object({
     metadata: TeamMessageMetadataSchema.optional()
 });
 
-async function canUserAccessTeam(userId: string, teamId: string): Promise<boolean> {
-    const ownedTeam = await db.artifact.findFirst({
-        where: { id: teamId, accountId: userId },
-        select: { id: true }
+function sendTeamAccessFailure(reply: any, failure: TeamAccessFailure) {
+    return reply.code(failure.statusCode).send({
+        error: failure.error,
+        code: failure.code,
+        currentAccountId: failure.currentAccountId,
+        ...(failure.teamOwnerAccountId ? { teamOwnerAccountId: failure.teamOwnerAccountId } : {}),
     });
-    if (ownedTeam) {
-        return true;
-    }
-
-    const sharedTeam = await db.artifact.findUnique({
-        where: { id: teamId },
-        select: { body: true }
-    });
-    if (!sharedTeam?.body) {
-        return false;
-    }
-
-    try {
-        const parsed = parseTeamArtifactBody(sharedTeam.body) as Record<string, any>;
-        const memberSessionIds = extractTeamSessionIds(parsed);
-
-        if (memberSessionIds.length === 0) {
-            return false;
-        }
-
-        const session = await db.session.findFirst({
-            where: {
-                accountId: userId,
-                id: { in: memberSessionIds },
-                deletedAt: null
-            },
-            select: { id: true }
-        });
-
-        return !!session;
-    } catch {
-        return false;
-    }
 }
 
 export function teamMessagesRoutes(app: Fastify) {
@@ -144,9 +112,11 @@ export function teamMessagesRoutes(app: Fastify) {
         };
 
         try {
-            if (!(await canUserAccessTeam(userId, teamId))) {
-                return reply.code(404).send({ error: 'Team not found' });
+            const access = await getTeamAccessContext(userId, teamId);
+            if (!access.ok) {
+                return sendTeamAccessFailure(reply, access.failure);
             }
+            const teamOwnerAccountId = access.context.teamOwnerAccountId;
 
             const prefix = `team_messages.${teamId}.`;
             const fetchLimit = Math.min(limit ?? 50, 200);
@@ -154,7 +124,7 @@ export function teamMessagesRoutes(app: Fastify) {
             // Key format: team_messages.{teamId}.{timestamp}.{messageId}
             // ORDER BY key DESC → newest first; we take `fetchLimit` rows and reverse for client.
             const whereClause: any = {
-                accountId: userId,
+                accountId: teamOwnerAccountId,
                 key: { startsWith: prefix },
                 value: { not: null }
             };
@@ -194,7 +164,7 @@ export function teamMessagesRoutes(app: Fastify) {
                     try {
                         const parts = item.key.split('.');
                         const messageId = parts[parts.length - 1];
-                        const decrypted = decryptTeamMessage(userId, teamId, messageId, item.value!);
+                        const decrypted = decryptTeamMessage(teamOwnerAccountId, teamId, messageId, item.value!);
                         const parsed = JSON.parse(decrypted);
                         if (!matchesTeamScopeFilter(parsed?.metadata?.scope, { scopePath, repoName, includeGlobal })) {
                             continue;
@@ -247,10 +217,15 @@ export function teamMessagesRoutes(app: Fastify) {
                     error: z.string()
                 }),
                 403: z.object({
-                    error: z.string()
+                    error: z.string(),
+                    code: z.string().optional(),
+                    currentAccountId: z.string().optional(),
+                    teamOwnerAccountId: z.string().optional()
                 }),
                 404: z.object({
-                    error: z.literal('Team not found')
+                    error: z.literal('Team not found'),
+                    code: z.string().optional(),
+                    currentAccountId: z.string().optional()
                 }),
                 410: z.object({
                     error: z.string()
@@ -278,6 +253,13 @@ export function teamMessagesRoutes(app: Fastify) {
         try {
             log({ module: 'team-messages', level: 'info' }, `Sending message to teamId: ${teamId}, userId: ${userId}`);
 
+            const access = await getTeamAccessContext(userId, teamId);
+            if (!access.ok) {
+                return sendTeamAccessFailure(reply, access.failure);
+            }
+            const teamOwnerAccountId = access.context.teamOwnerAccountId;
+            let activityAccountId = userId;
+
             // Security Check: Verify fromSessionId belongs to the user
             // This prevents an agent from spoofing a session they don't own (e.g. another user's session, if we were multi-tenant in that way)
             // or ensures consistency.
@@ -300,16 +282,8 @@ export function teamMessagesRoutes(app: Fastify) {
                     // Live sessions can appear in the team roster before their
                     // backing Session row is visible here. Fall back to the team
                     // artifact roster so legitimate team members do not get 403s.
-                    const teamArtifact = await db.artifact.findUnique({
-                        where: { id: teamId },
-                        select: { body: true }
-                    });
-                    const teamBoard = teamArtifact?.body
-                        ? parseTeamArtifactBody(teamArtifact.body) as Record<string, any>
-                        : null;
-                    const teamMember = teamBoard
-                        ? extractTeamMembers(teamBoard).find((member) => member.sessionId === fromSessionId)
-                        : undefined;
+                    const teamBoard = extractTeamBoard(access.context.artifact);
+                    const teamMember = extractTeamMembers(teamBoard).find((member) => member.sessionId === fromSessionId);
 
                     if (!teamMember) {
                         return reply.code(403).send({ error: `Invalid fromSessionId: ${fromSessionId}` });
@@ -328,6 +302,7 @@ export function teamMessagesRoutes(app: Fastify) {
                     if (typeof teamMember.displayName === 'string' && teamMember.displayName.trim().length > 0) {
                         message.fromDisplayName = teamMember.displayName;
                     }
+                    activityAccountId = teamOwnerAccountId;
                 } else {
                     if (session.deletedAt) {
                         return reply.code(410).send({ error: `Session has been deleted: ${fromSessionId}` });
@@ -367,10 +342,6 @@ export function teamMessagesRoutes(app: Fastify) {
                 }
             }
 
-            if (!(await canUserAccessTeam(userId, teamId))) {
-                return reply.code(404).send({ error: 'Team not found' });
-            }
-
             // Override trusted fields to prevent spoofing
             // 1. Force timestamp to server time
             message.timestamp = Date.now();
@@ -387,12 +358,12 @@ export function teamMessagesRoutes(app: Fastify) {
             // Persist message in KV store for this account (encrypted per-message)
             const kvKey = `team_messages.${teamId}.${message.timestamp}.${message.id}`;
             const encryptedMessage = encryptString(
-                buildTeamMessageEncryptionPath(userId, teamId, message.id),
+                buildTeamMessageEncryptionPath(teamOwnerAccountId, teamId, message.id),
                 JSON.stringify(message),
             );
             const serializedMessage = Buffer.from(encryptedMessage).toString('base64');
 
-            await kvMutate({ uid: userId }, [{
+            await kvMutate({ uid: teamOwnerAccountId }, [{
                 key: kvKey,
                 value: serializedMessage,
                 version: -1
@@ -414,14 +385,14 @@ export function teamMessagesRoutes(app: Fastify) {
             const sessionIds = new Set(await getTeamMemberSessionIds(teamId));
             if (sessionIds.size === 0) {
                 const sessionRows = await db.session.findMany({
-                    where: { accountId: userId },
+                    where: { accountId: teamOwnerAccountId },
                     select: { id: true }
                 });
                 sessionRows.forEach((session) => sessionIds.add(session.id));
             }
 
             if (sessionIds.size > 0) {
-                const updSeq = await allocateUserSeq(userId);
+                const updSeq = await allocateUserSeq(teamOwnerAccountId);
 
                 const messageEvent = {
                     id: randomKeyNaked(12),
@@ -435,19 +406,19 @@ export function teamMessagesRoutes(app: Fastify) {
                 };
 
                 eventRouter.emitUpdate({
-                    userId,
+                    userId: teamOwnerAccountId,
                     payload: messageEvent,
                     recipientFilter: { type: 'specific-sessions', sessionIds }
                 });
             }
 
             // Push to WeChat if user has an active bridge (fire-and-forget)
-            pushToWeixinIfBound(userId, teamId, message).catch(() => { /* non-fatal */ });
+            pushToWeixinIfBound(teamOwnerAccountId, teamId, message).catch(() => { /* non-fatal */ });
 
             log({ module: 'team-messages', teamId, messageId: message.id }, 'Message broadcasted');
 
             if (message.fromSessionId) {
-                await observeSessionActivity(userId, message.fromSessionId, Date.now());
+                await observeSessionActivity(activityAccountId, message.fromSessionId, Date.now());
             }
 
             return reply.send({
