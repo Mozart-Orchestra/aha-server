@@ -37,6 +37,19 @@ async function buildApp() {
     return app;
 }
 
+function headerList(value: string | string[] | number | undefined): string[] {
+    if (Array.isArray(value)) {
+        return value.flatMap(item => headerList(item));
+    }
+    if (value === undefined) {
+        return [];
+    }
+    return String(value)
+        .split(',')
+        .map(item => item.trim().toLowerCase())
+        .filter(Boolean);
+}
+
 describe('corsConfig', () => {
     afterEach(() => {
         restoreEnv();
@@ -84,6 +97,37 @@ describe('corsConfig', () => {
 
         expect(response.headers['access-control-allow-origin']).toBe('http://localhost:8082');
         expect(response.headers['access-control-allow-credentials']).toBe('true');
+
+        await app.close();
+    });
+
+    it('allows production webapp alias origins and trace headers for auth preflight requests', async () => {
+        setEnv({
+            NODE_ENV: 'production',
+            CORS_ALLOWED_ORIGINS: undefined,
+        });
+
+        const app = await buildApp();
+        const response = await app.inject({
+            method: 'OPTIONS',
+            url: '/v1/auth',
+            headers: {
+                origin: 'https://ahaagi.com',
+                'access-control-request-method': 'POST',
+                'access-control-request-headers': 'content-type,x-aha-trace-id,x-aha-span-id,x-aha-request-id',
+            },
+        });
+
+        const allowedHeaders = headerList(response.headers['access-control-allow-headers']);
+
+        expect(response.statusCode).toBe(204);
+        expect(response.headers['access-control-allow-origin']).toBe('https://ahaagi.com');
+        expect(allowedHeaders).toEqual(expect.arrayContaining([
+            'content-type',
+            'x-aha-trace-id',
+            'x-aha-span-id',
+            'x-aha-request-id',
+        ]));
 
         await app.close();
     });

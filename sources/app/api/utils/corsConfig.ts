@@ -5,6 +5,8 @@ import type { CorsOptions as SocketCorsOptions } from 'cors';
 const ALLOWED_ORIGINS_PRODUCTION = [
     'https://aha-agi.com',
     'https://www.aha-agi.com',
+    'https://ahaagi.com',
+    'https://www.ahaagi.com',
     'https://aha.engineering',
     'https://app.aha.engineering',
     'https://www.aha.engineering',
