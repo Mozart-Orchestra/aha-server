@@ -12,7 +12,6 @@ import { db } from "@/storage/db";
 import {
     extractTeamBoard,
     extractTeamMembers,
-    getAccessibleTeamArtifact,
     getTeamAccessContext,
     serializeTeamBoard,
     type TeamAccessFailure,
@@ -735,11 +734,13 @@ export function evolutionRoutes(app: Fastify) {
         const { teamId, id } = request.params as { teamId: string; id: string };
 
         try {
-            const artifact = await getAccessibleTeamArtifact(userId, teamId);
-            if (!artifact) {
-                return reply.code(404).send({ error: 'Team not found' });
+            const access = await getTeamAccessContext(userId, teamId);
+            if (!access.ok) {
+                return sendTeamAccessFailure(reply, access.failure);
             }
 
+            const artifact = access.context.artifact;
+            const teamOwnerAccountId = access.context.teamOwnerAccountId;
             const board = extractTeamBoard(artifact);
             const members = extractTeamMembers(board);
             const hasTarget = members.some(member => member.sessionId === id && member.executionPlane === 'bypass');
@@ -765,7 +766,7 @@ export function evolutionRoutes(app: Fastify) {
             await db.session.updateMany({
                 where: {
                     id,
-                    accountId: userId,
+                    accountId: teamOwnerAccountId,
                     active: true,
                 },
                 data: {
@@ -774,8 +775,8 @@ export function evolutionRoutes(app: Fastify) {
                 },
             });
             activityCache.invalidateSession(id);
-            await broadcastSessionUpdate(userId, id, 'session-archived');
-            await broadcastTeamUpdate(userId, teamId, 'member-removed', { sessionId: id, roleId: 'bypass' });
+            await broadcastSessionUpdate(teamOwnerAccountId, id, 'session-archived');
+            await broadcastTeamUpdate(teamOwnerAccountId, teamId, 'member-removed', { sessionId: id, roleId: 'bypass' });
 
             return reply.send({ success: true, retiredAgentId: id });
         } catch (error: any) {

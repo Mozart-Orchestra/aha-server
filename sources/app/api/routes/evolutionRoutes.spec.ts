@@ -65,6 +65,7 @@ vi.mock('@/utils/randomKeyNaked', () => ({
 
 import { db } from '@/storage/db';
 import axios from 'axios';
+import { eventRouter } from '@/app/events/eventRouter';
 import { existsSync, readFileSync } from 'node:fs';
 import { evolutionRoutes } from './evolutionRoutes';
 
@@ -198,6 +199,45 @@ describe('evolutionRoutes', () => {
         await app.close();
     });
 
+    it('retires bypass agents against the canonical team owner namespace', async () => {
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(buildTeamArtifact({
+            team: {
+                members: [
+                    { sessionId: 'member-session', roleId: 'builder', executionPlane: 'mainline' },
+                    { sessionId: 'bypass-1', roleId: 'supervisor', executionPlane: 'bypass' },
+                ],
+            },
+            tasks: [],
+        }, 'owner-1') as never);
+        vi.mocked(db.session.findFirst).mockResolvedValue({ id: 'member-session' } as never);
+        vi.mocked(db.artifact.update).mockResolvedValue({ id: 'team-1' } as never);
+        vi.mocked(db.session.updateMany).mockResolvedValue({ count: 1 } as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'DELETE',
+            url: '/v1/teams/team-1/bypass-agents/bypass-1',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(db.session.updateMany).toHaveBeenCalledWith({
+            where: {
+                id: 'bypass-1',
+                accountId: 'owner-1',
+                active: true,
+            },
+            data: expect.objectContaining({
+                active: false,
+                updatedAt: expect.any(Date),
+            }),
+        });
+        expect(vi.mocked(eventRouter.emitUpdate).mock.calls).toEqual(expect.arrayContaining([
+            [expect.objectContaining({ userId: 'owner-1' })],
+        ]));
+
+        await app.close();
+    });
+
     it('deduplicates bypass agents by role/profile and keeps the latest member', async () => {
         vi.mocked(db.artifact.findUnique).mockResolvedValue(buildTeamArtifact({
             team: {
@@ -261,6 +301,29 @@ describe('evolutionRoutes', () => {
         const response = await app.inject({
             method: 'GET',
             url: '/v1/teams/team-1/bypass-agents',
+        });
+
+        expect(response.statusCode).toBe(403);
+        expect(response.json()).toEqual({
+            error: 'Team account mismatch',
+            code: 'TEAM_ACCOUNT_MISMATCH',
+            currentAccountId: 'user-1',
+            teamOwnerAccountId: 'owner-1',
+        });
+
+        await app.close();
+    });
+
+    it('returns explicit account mismatch for inaccessible bypass-agent deletes', async () => {
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(buildTeamArtifact({
+            team: { members: [] },
+            tasks: [],
+        }, 'owner-1') as never);
+
+        const app = buildApp();
+        const response = await app.inject({
+            method: 'DELETE',
+            url: '/v1/teams/team-1/bypass-agents/bypass-1',
         });
 
         expect(response.statusCode).toBe(403);
