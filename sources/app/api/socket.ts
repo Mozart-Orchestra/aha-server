@@ -17,14 +17,27 @@ import { getSocketCorsConfig } from "./utils/corsConfig";
 import { activityCache } from "@/app/presence/sessionCache";
 import { observeSessionActivity } from "@/app/presence/observeSessionActivity";
 
-// Grace-period timers: sessionId → pending offline DB-write timer.
-// When a session-scoped socket disconnects, we wait OFFLINE_GRACE_MS before
-// actually marking the session inactive. If the same session reconnects within
-// that window, the timer is cancelled — the session never appears offline.
-// This prevents rapid Socket.IO reconnects (common under load) from causing
-// false-offline flicker in the kanban.
-const OFFLINE_GRACE_MS = 30_000; // 30 seconds
+function readGracePeriodMs(envName: string, fallbackMs: number): number {
+    const rawValue = process.env[envName];
+    if (!rawValue) {
+        return fallbackMs;
+    }
+
+    const parsed = Number(rawValue);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : fallbackMs;
+}
+
+function machineDisconnectTimerKey(userId: string, machineId: string): string {
+    return `${userId}:${machineId}`;
+}
+
+// Grace-period timers for transient Socket.IO disconnects. We delay the offline
+// DB write so reconnecting sockets do not make healthy agents/daemons flicker
+// offline while they are still working through HTTP/MCP paths.
+const SESSION_OFFLINE_GRACE_MS = readGracePeriodMs('AHA_SESSION_OFFLINE_GRACE_MS', 90_000);
+const MACHINE_OFFLINE_GRACE_MS = readGracePeriodMs('AHA_MACHINE_OFFLINE_GRACE_MS', 90_000);
 const disconnectGraceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const machineDisconnectGraceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 export function startSocket(app: Fastify) {
     const io = new Server(app.server, {
@@ -132,6 +145,12 @@ export function startSocket(app: Fastify) {
 
         // Broadcast daemon online status
         if (connection.connectionType === 'machine-scoped') {
+            const pendingMachineTimer = machineDisconnectGraceTimers.get(machineDisconnectTimerKey(userId, connection.machineId));
+            if (pendingMachineTimer) {
+                clearTimeout(pendingMachineTimer);
+                machineDisconnectGraceTimers.delete(machineDisconnectTimerKey(userId, connection.machineId));
+            }
+
             try {
                 await db.machine.update({
                     where: {
@@ -145,12 +164,13 @@ export function startSocket(app: Fastify) {
                         lastActiveAt: new Date()
                     }
                 });
+                activityCache.invalidateMachine(connection.machineId);
             } catch (error) {
-                log({ module: 'websocket', level: 'error' }, `Error marking machine ${machineId} as online: ${error}`);
+                log({ module: 'websocket', level: 'error' }, `Error marking machine ${connection.machineId} as online: ${error}`);
             }
 
             // Broadcast daemon online
-            const machineActivity = buildMachineActivityEphemeral(machineId!, true, Date.now());
+            const machineActivity = buildMachineActivityEphemeral(connection.machineId, true, Date.now());
             eventRouter.emitEphemeral({
                 userId,
                 payload: machineActivity,
@@ -169,35 +189,49 @@ export function startSocket(app: Fastify) {
 
             // Broadcast daemon offline status
             if (connection.connectionType === 'machine-scoped') {
-                const machineActivity = buildMachineActivityEphemeral(connection.machineId, false, Date.now());
-                eventRouter.emitEphemeral({
-                    userId,
-                    payload: machineActivity,
-                    recipientFilter: { type: 'user-scoped-only' }
-                });
-
-                // Update database to mark machine as offline
-                try {
-                    await db.machine.update({
-                        where: {
-                            accountId_id: {
-                                accountId: userId,
-                                id: connection.machineId
-                            }
-                        },
-                        data: {
-                            active: false,
-                            lastActiveAt: new Date()
-                        }
-                    });
-                    log({ module: 'websocket' }, `Machine ${connection.machineId} marked as offline`);
-                } catch (error) {
-                    log({ module: 'websocket', level: 'error' }, `Error marking machine ${connection.machineId} as offline: ${error}`);
+                const machineId = connection.machineId;
+                const timerKey = machineDisconnectTimerKey(userId, machineId);
+                const existingTimer = machineDisconnectGraceTimers.get(timerKey);
+                if (existingTimer) {
+                    clearTimeout(existingTimer);
                 }
+
+                const timer = setTimeout(async () => {
+                    machineDisconnectGraceTimers.delete(timerKey);
+                    const disconnectedAt = Date.now();
+
+                    try {
+                        await db.machine.update({
+                            where: {
+                                accountId_id: {
+                                    accountId: userId,
+                                    id: machineId
+                                }
+                            },
+                            data: {
+                                active: false,
+                                lastActiveAt: new Date(disconnectedAt)
+                            }
+                        });
+                        activityCache.invalidateMachine(machineId);
+                        const machineActivity = buildMachineActivityEphemeral(machineId, false, disconnectedAt);
+                        eventRouter.emitEphemeral({
+                            userId,
+                            payload: machineActivity,
+                            recipientFilter: { type: 'user-scoped-only' }
+                        });
+                        log({ module: 'websocket' }, `Machine ${machineId} marked as offline after grace period`);
+                    } catch (error) {
+                        log({ module: 'websocket', level: 'error' }, `Error marking machine ${machineId} as offline: ${error}`);
+                    }
+                }, MACHINE_OFFLINE_GRACE_MS);
+
+                machineDisconnectGraceTimers.set(timerKey, timer);
+                log({ module: 'websocket' }, `Machine ${machineId} disconnect grace timer started (${MACHINE_OFFLINE_GRACE_MS}ms)`);
             }
 
             if (connection.connectionType === 'session-scoped') {
-                // Defer the offline write by OFFLINE_GRACE_MS.
+                // Defer the offline write by SESSION_OFFLINE_GRACE_MS.
                 // Most Socket.IO disconnects are transient (reconnects within 1-5s);
                 // writing active=false immediately causes agents to flicker offline
                 // in the kanban even while they're actively executing MCP tools via HTTP.
@@ -230,9 +264,9 @@ export function startSocket(app: Fastify) {
                     } catch (error) {
                         log({ module: 'websocket', level: 'error' }, `Error marking session ${sessionId} as offline: ${error}`);
                     }
-                }, OFFLINE_GRACE_MS);
+                }, SESSION_OFFLINE_GRACE_MS);
                 disconnectGraceTimers.set(sessionId, timer);
-                log({ module: 'websocket' }, `Session ${sessionId} disconnect grace timer started (${OFFLINE_GRACE_MS}ms)`);
+                log({ module: 'websocket' }, `Session ${sessionId} disconnect grace timer started (${SESSION_OFFLINE_GRACE_MS}ms)`);
             }
         });
 
@@ -264,6 +298,14 @@ export function startSocket(app: Fastify) {
     });
 
     onShutdown('api', async () => {
+        for (const timer of disconnectGraceTimers.values()) {
+            clearTimeout(timer);
+        }
+        disconnectGraceTimers.clear();
+        for (const timer of machineDisconnectGraceTimers.values()) {
+            clearTimeout(timer);
+        }
+        machineDisconnectGraceTimers.clear();
         await io.close();
     });
 }

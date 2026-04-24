@@ -57,7 +57,8 @@ vi.mock('@/app/team/teamOverview', () => ({
 }));
 
 import { db } from '@/storage/db';
-import { getTeamOverviewSnapshot } from '@/app/team/teamOverview';
+import { eventRouter } from '@/app/events/eventRouter';
+import { getTeamOverviewSnapshot, invalidateTeamOverviewSnapshot } from '@/app/team/teamOverview';
 import { teamManagementRoutes } from './teamManagementRoutes';
 
 function buildTeamArtifact(
@@ -658,6 +659,46 @@ describe('teamManagementRoutes', () => {
         await app.close();
     });
 
+    it('archives teams in the owner namespace when a member triggers the route', async () => {
+        const board = {
+            team: {
+                name: 'Ops Team',
+                members: [
+                    { sessionId: 'session-1', roleId: 'builder' },
+                    { sessionId: 'session-2', roleId: 'reviewer' },
+                ],
+            },
+            tasks: [],
+        };
+
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(
+            buildTeamArtifact(board, { accountId: 'owner-1' }) as never
+        );
+        vi.mocked(db.session.findFirst).mockResolvedValue({ id: 'session-1' } as never);
+        vi.mocked(db.session.updateMany).mockResolvedValue({ count: 2 } as never);
+        vi.mocked(db.artifact.update).mockResolvedValue({ id: 'team-1' } as never);
+
+        const app = buildApp({
+            authenticate: async (request: any) => {
+                request.userId = 'member-1';
+            },
+        });
+        const response = await app.inject({
+            method: 'POST',
+            url: '/v1/teams/team-1/archive',
+            payload: {},
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(vi.mocked(eventRouter.emitUpdate).mock.calls).toHaveLength(3);
+        expect(
+            vi.mocked(eventRouter.emitUpdate).mock.calls.map(([call]) => call.userId)
+        ).toEqual(['owner-1', 'owner-1', 'owner-1']);
+        expect(vi.mocked(invalidateTeamOverviewSnapshot)).toHaveBeenCalledWith('owner-1');
+
+        await app.close();
+    });
+
     it('returns team detail with members', async () => {
         const board = {
             team: {
@@ -1115,6 +1156,49 @@ describe('teamManagementRoutes', () => {
                 body: expect.any(Buffer),
             }),
         }));
+
+        await app.close();
+    });
+
+    it('renames teams in the owner namespace when a member triggers the route', async () => {
+        const board = {
+            name: 'Old Team Name',
+            team: {
+                name: 'Old Team Name',
+                members: [{ sessionId: 'session-1', roleId: 'builder' }],
+            },
+            tasks: [],
+        };
+
+        vi.mocked(db.artifact.findUnique).mockResolvedValue(
+            buildTeamArtifact(board, { accountId: 'owner-1' }) as never
+        );
+        vi.mocked(db.session.findFirst).mockResolvedValue({ id: 'session-1' } as never);
+        vi.mocked(db.artifact.update).mockResolvedValue({ id: 'team-1' } as never);
+
+        const app = buildApp({
+            authenticate: async (request: any) => {
+                request.userId = 'member-1';
+            },
+        });
+        const response = await app.inject({
+            method: 'PUT',
+            url: '/v1/teams/team-1/rename',
+            payload: { name: 'New Team Name' },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(vi.mocked(eventRouter.emitUpdate)).toHaveBeenCalledWith(expect.objectContaining({
+            userId: 'owner-1',
+            payload: expect.objectContaining({
+                body: expect.objectContaining({
+                    t: 'team-update',
+                    teamId: 'team-1',
+                    eventType: 'team-renamed',
+                }),
+            }),
+        }));
+        expect(vi.mocked(invalidateTeamOverviewSnapshot)).toHaveBeenCalledWith('owner-1');
 
         await app.close();
     });

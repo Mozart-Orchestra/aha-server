@@ -1,7 +1,7 @@
 # Aha Server API Documentation
 
 **Version:** 1.0.0
-**Base URL:** `http://localhost:3005` (development) or `https://top1vibe.com` (production)
+**Base URL:** `http://localhost:3005` (development) or `https://aha-agi.com/api` (production)
 **Documentation:** `http://localhost:3005/docs` (Swagger UI)
 
 ---

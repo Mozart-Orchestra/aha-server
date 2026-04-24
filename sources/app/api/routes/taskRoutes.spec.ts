@@ -19,7 +19,8 @@ const mocked = vi.hoisted(() => ({
     addTaskComment: vi.fn(),
     invalidateTeamOverviewSnapshot: vi.fn(),
     observeSessionActivity: vi.fn(),
-    getAccessibleTeamArtifact: vi.fn(),
+    getTeamAccessContext: vi.fn(),
+    extractTeamBoard: vi.fn(),
     extractTeamMembers: vi.fn(),
     sessionFindFirst: vi.fn(),
 }));
@@ -50,7 +51,8 @@ vi.mock('@/app/presence/observeSessionActivity', () => ({
 }));
 
 vi.mock('@/app/team/teamArtifacts', () => ({
-    getAccessibleTeamArtifact: mocked.getAccessibleTeamArtifact,
+    getTeamAccessContext: mocked.getTeamAccessContext,
+    extractTeamBoard: mocked.extractTeamBoard,
     extractTeamMembers: mocked.extractTeamMembers,
 }));
 
@@ -96,18 +98,35 @@ function buildTeamArtifactBody(board: Record<string, unknown>) {
 describe('taskRoutes', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        mocked.extractTeamBoard.mockImplementation((artifact: { body?: Uint8Array | Buffer | null }) => {
+            if (!artifact.body) {
+                return {};
+            }
+            const parsed = JSON.parse(Buffer.from(artifact.body).toString('utf8'));
+            return typeof parsed.body === 'string' ? JSON.parse(parsed.body) : parsed;
+        });
         mocked.extractTeamMembers.mockImplementation((board: Record<string, any>) => (
             Array.isArray(board?.team?.members) ? board.team.members : []
         ));
-        mocked.getAccessibleTeamArtifact.mockResolvedValue({
-            id: 'team-1',
-            accountId: 'user-1',
-            body: buildTeamArtifactBody({}),
-            createdAt: new Date('2026-03-17T00:00:00Z'),
-            updatedAt: new Date('2026-03-17T00:05:00Z'),
+        mocked.getTeamAccessContext.mockResolvedValue({
+            ok: true,
+            context: {
+                artifact: {
+                    id: 'team-1',
+                    accountId: 'user-1',
+                    body: buildTeamArtifactBody({}),
+                    bodyVersion: 1,
+                    createdAt: new Date('2026-03-17T00:00:00Z'),
+                    updatedAt: new Date('2026-03-17T00:05:00Z'),
+                },
+                currentAccountId: 'user-1',
+                teamOwnerAccountId: 'user-1',
+                access: 'owner',
+            },
         });
         mocked.sessionFindFirst.mockResolvedValue({
             id: 'session-1',
+            accountId: 'user-1',
             metadata: JSON.stringify({
                 role: 'builder',
                 name: 'Builder Name',
@@ -143,8 +162,51 @@ describe('taskRoutes', () => {
         await app.close();
     });
 
+    it('uses the canonical team owner namespace when a member lists tasks', async () => {
+        mocked.getTeamAccessContext.mockResolvedValueOnce({
+            ok: true,
+            context: {
+                artifact: {
+                    id: 'team-1',
+                    accountId: 'owner-1',
+                    body: buildTeamArtifactBody({}),
+                    bodyVersion: 1,
+                    createdAt: new Date('2026-03-17T00:00:00Z'),
+                    updatedAt: new Date('2026-03-17T00:05:00Z'),
+                },
+                currentAccountId: 'member-1',
+                teamOwnerAccountId: 'owner-1',
+                access: 'member',
+            },
+        });
+        mocked.listTasks.mockResolvedValue({ tasks: [], version: 1 });
+
+        const app = buildApp({
+            authenticate: async (request) => {
+                request.userId = 'member-1';
+            },
+        });
+        const response = await app.inject({
+            method: 'GET',
+            url: '/v1/teams/team-1/tasks',
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(mocked.listTasks).toHaveBeenCalledWith('owner-1', 'team-1', expect.any(Object));
+
+        await app.close();
+    });
+
     it('returns 404 before listing tasks when the caller cannot access the team', async () => {
-        mocked.getAccessibleTeamArtifact.mockResolvedValueOnce(null);
+        mocked.getTeamAccessContext.mockResolvedValueOnce({
+            ok: false,
+            failure: {
+                statusCode: 404,
+                error: 'Team not found',
+                code: 'TEAM_NOT_FOUND',
+                currentAccountId: 'user-1',
+            },
+        });
 
         const app = buildApp();
         const response = await app.inject({
@@ -327,23 +389,32 @@ describe('taskRoutes', () => {
 
     it('falls back to the team roster when the update actor session is not yet queryable', async () => {
         mocked.sessionFindFirst.mockResolvedValue(null);
-        mocked.getAccessibleTeamArtifact.mockResolvedValue({
-            id: 'team-1',
-            accountId: 'user-1',
-            body: buildTeamArtifactBody({
-                team: {
-                    members: [
-                        {
-                            sessionId: 'session-roster',
-                            roleId: 'researcher',
-                            displayName: 'Researcher Name',
-                            workspacePath: '/tmp/happy-server-0330-max-redefine-login',
+        mocked.getTeamAccessContext.mockResolvedValue({
+            ok: true,
+            context: {
+                artifact: {
+                    id: 'team-1',
+                    accountId: 'user-1',
+                    body: buildTeamArtifactBody({
+                        team: {
+                            members: [
+                                {
+                                    sessionId: 'session-roster',
+                                    roleId: 'researcher',
+                                    displayName: 'Researcher Name',
+                                    workspacePath: '/tmp/happy-server-0330-max-redefine-login',
+                                },
+                            ],
                         },
-                    ],
+                    }),
+                    bodyVersion: 1,
+                    createdAt: new Date('2026-03-17T00:00:00Z'),
+                    updatedAt: new Date('2026-03-17T00:05:00Z'),
                 },
-            }),
-            createdAt: new Date('2026-03-17T00:00:00Z'),
-            updatedAt: new Date('2026-03-17T00:05:00Z'),
+                currentAccountId: 'user-1',
+                teamOwnerAccountId: 'user-1',
+                access: 'owner',
+            },
         });
         mocked.updateTask.mockResolvedValue(buildTask('task-1'));
 
@@ -489,7 +560,15 @@ describe('taskRoutes', () => {
     });
 
     it('returns 404 before starting a task when the caller cannot access the team', async () => {
-        mocked.getAccessibleTeamArtifact.mockResolvedValueOnce(null);
+        mocked.getTeamAccessContext.mockResolvedValueOnce({
+            ok: false,
+            failure: {
+                statusCode: 404,
+                error: 'Team not found',
+                code: 'TEAM_NOT_FOUND',
+                currentAccountId: 'user-1',
+            },
+        });
 
         const app = buildApp();
         const response = await app.inject({
@@ -603,23 +682,32 @@ describe('taskRoutes', () => {
 
     it('falls back to the team roster when the comment session is not yet queryable', async () => {
         mocked.sessionFindFirst.mockResolvedValue(null);
-        mocked.getAccessibleTeamArtifact.mockResolvedValue({
-            id: 'team-1',
-            accountId: 'user-1',
-            body: buildTeamArtifactBody({
-                team: {
-                    members: [
-                        {
-                            sessionId: 'session-roster',
-                            roleId: 'researcher',
-                            displayName: 'Researcher Name',
-                            workspacePath: '/tmp/kanban-0330-max-redefine-login',
+        mocked.getTeamAccessContext.mockResolvedValue({
+            ok: true,
+            context: {
+                artifact: {
+                    id: 'team-1',
+                    accountId: 'user-1',
+                    body: buildTeamArtifactBody({
+                        team: {
+                            members: [
+                                {
+                                    sessionId: 'session-roster',
+                                    roleId: 'researcher',
+                                    displayName: 'Researcher Name',
+                                    workspacePath: '/tmp/kanban-0330-max-redefine-login',
+                                },
+                            ],
                         },
-                    ],
+                    }),
+                    bodyVersion: 1,
+                    createdAt: new Date('2026-03-17T00:00:00Z'),
+                    updatedAt: new Date('2026-03-17T00:05:00Z'),
                 },
-            }),
-            createdAt: new Date('2026-03-17T00:00:00Z'),
-            updatedAt: new Date('2026-03-17T00:05:00Z'),
+                currentAccountId: 'user-1',
+                teamOwnerAccountId: 'user-1',
+                access: 'owner',
+            },
         });
         mocked.addTaskComment.mockResolvedValue(buildTask('task-1'));
 

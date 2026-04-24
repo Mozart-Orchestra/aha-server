@@ -3,6 +3,22 @@ import { log } from "@/utils/log";
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+let supabaseAdminClient: ReturnType<typeof createClient> | null = null;
+
+function getSupabaseAdminClient(): ReturnType<typeof createClient> | null {
+    if (!supabaseUrl || !supabaseServiceRoleKey) {
+        log({ module: 'supabase-auth', level: 'error' }, 'SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not configured');
+        return null;
+    }
+
+    if (!supabaseAdminClient) {
+        supabaseAdminClient = createClient(supabaseUrl, supabaseServiceRoleKey, {
+            auth: { autoRefreshToken: false, persistSession: false }
+        });
+    }
+
+    return supabaseAdminClient;
+}
 
 /**
  * Verifies a Supabase access token and returns the authenticated user info.
@@ -14,14 +30,10 @@ export async function supabaseVerifyToken(accessToken: string): Promise<{
     name: string | null;
     avatarUrl: string | null;
 } | null> {
-    if (!supabaseUrl || !supabaseServiceRoleKey) {
-        log({ module: 'supabase-auth', level: 'error' }, 'SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not configured');
+    const supabase = getSupabaseAdminClient();
+    if (!supabase) {
         return null;
     }
-
-    const supabase = createClient(supabaseUrl, supabaseServiceRoleKey, {
-        auth: { autoRefreshToken: false, persistSession: false }
-    });
 
     const { data, error } = await supabase.auth.getUser(accessToken);
 

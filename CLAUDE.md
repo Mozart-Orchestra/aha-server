@@ -5,7 +5,7 @@ This document contains the development guidelines and instructions for the Aha S
 ## Project Overview
 
 **Name**: aha-server
-**Repository**: https://github.com/slopus/aha-server.git
+**Repository**: https://github.com/Shiyao-Huang/happy-server.git
 **License**: MIT  
 **Language**: TypeScript  
 **Runtime**: Node.js 20  

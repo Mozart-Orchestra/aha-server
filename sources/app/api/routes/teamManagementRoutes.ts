@@ -223,7 +223,8 @@ function normalizeTeamBoard(board: Record<string, any>, name: string, descriptio
     if (!board.team || typeof board.team !== 'object') {
         board.team = { members: [] };
     }
-    board.team.name = name;
+    // team.name is derived from board.name — single source of truth
+    board.team.name = board.name;
     if (!Array.isArray(board.team.members)) {
         board.team.members = [];
     }
@@ -1328,6 +1329,7 @@ async function addTeamMember(
     }
 
     const board = extractTeamBoard(artifact);
+    const teamOwnerAccountId = artifact.accountId;
 
     if (!board.team) {
         board.team = { members: [] };
@@ -1454,8 +1456,8 @@ async function addTeamMember(
     });
 
     // Broadcast update
-    await broadcastTeamUpdate(userId, teamId, 'member-added', { sessionId, roleId });
-    await invalidateTeamOverviewSnapshot(userId);
+    await broadcastTeamUpdate(teamOwnerAccountId, teamId, 'member-added', { sessionId, roleId });
+    await invalidateTeamOverviewSnapshot(teamOwnerAccountId);
 
     return {
         success: true,
@@ -1475,6 +1477,7 @@ async function removeTeamMember(
     }
 
     const board = extractTeamBoard(artifact);
+    const teamOwnerAccountId = artifact.accountId;
 
     if (!board.team?.members) {
         return { success: true };
@@ -1493,8 +1496,8 @@ async function removeTeamMember(
     });
 
     // Broadcast update
-    await broadcastTeamUpdate(userId, teamId, 'member-removed', { sessionId });
-    await invalidateTeamOverviewSnapshot(userId);
+    await broadcastTeamUpdate(teamOwnerAccountId, teamId, 'member-removed', { sessionId });
+    await invalidateTeamOverviewSnapshot(teamOwnerAccountId);
 
     return { success: true };
 }
@@ -1511,6 +1514,7 @@ async function archiveTeam(
     }
 
     const board = extractTeamBoard(artifact);
+    const teamOwnerAccountId = artifact.accountId;
     const managedSessionIds = Array.from(new Set([
         ...extractTeamMembers(board)
             .map((member) => member.sessionId)
@@ -1552,11 +1556,11 @@ async function archiveTeam(
 
     // Broadcast archive events for each session
     for (const sessionId of managedSessionIds) {
-        await broadcastSessionUpdate(userId, sessionId, 'session-archived');
+        await broadcastSessionUpdate(teamOwnerAccountId, sessionId, 'session-archived');
     }
 
-    await broadcastTeamUpdate(userId, teamId, 'team-archived', { archivedSessions: archivedCount });
-    await invalidateTeamOverviewSnapshot(userId);
+    await broadcastTeamUpdate(teamOwnerAccountId, teamId, 'team-archived', { archivedSessions: archivedCount });
+    await invalidateTeamOverviewSnapshot(teamOwnerAccountId);
 
     return { success: true, archivedSessions: archivedCount };
 }
@@ -1573,6 +1577,7 @@ async function deleteTeam(
     }
 
     const board = extractTeamBoard(artifact);
+    const teamOwnerAccountId = artifact.accountId;
     const managedSessionIds = Array.from(new Set([
         ...extractTeamMembers(board)
             .map((member) => member.sessionId)
@@ -1618,11 +1623,11 @@ async function deleteTeam(
 
     // Broadcast delete events
     for (const sessionId of managedSessionIds) {
-        await broadcastSessionUpdate(userId, sessionId, 'session-deleted');
+        await broadcastSessionUpdate(teamOwnerAccountId, sessionId, 'session-deleted');
     }
 
-    await broadcastTeamUpdate(userId, teamId, 'team-deleted', { deletedSessions: deletedCount });
-    await invalidateTeamOverviewSnapshot(userId);
+    await broadcastTeamUpdate(teamOwnerAccountId, teamId, 'team-deleted', { deletedSessions: deletedCount });
+    await invalidateTeamOverviewSnapshot(teamOwnerAccountId);
 
     return { success: true, deletedSessions: deletedCount };
 }
@@ -1639,10 +1644,11 @@ async function renameTeam(
     }
 
     const board = extractTeamBoard(artifact);
+    const teamOwnerAccountId = artifact.accountId;
 
     board.name = name;
     if (board.team) {
-        board.team.name = name;
+        board.team.name = board.name;
     }
 
     await db.artifact.update({
@@ -1654,8 +1660,8 @@ async function renameTeam(
         }
     });
 
-    await broadcastTeamUpdate(userId, teamId, 'team-renamed', { name });
-    await invalidateTeamOverviewSnapshot(userId);
+    await broadcastTeamUpdate(teamOwnerAccountId, teamId, 'team-renamed', { name });
+    await invalidateTeamOverviewSnapshot(teamOwnerAccountId);
 
     return {
         success: true,
@@ -1716,8 +1722,8 @@ async function batchArchiveSessions(
                     },
                 });
                 const removedIds = archivableIds.filter(sid => members.some(m => m.sessionId === sid));
-                await broadcastTeamUpdate(userId, artifact.id, 'member-removed', { sessionIds: removedIds });
-                await invalidateTeamOverviewSnapshot(userId);
+                await broadcastTeamUpdate(artifact.accountId, artifact.id, 'member-removed', { sessionIds: removedIds });
+                await invalidateTeamOverviewSnapshot(artifact.accountId);
             }
         }
     }
@@ -1789,6 +1795,7 @@ async function unarchiveTeam(
     }
 
     const board = extractTeamBoard(artifact);
+    const teamOwnerAccountId = artifact.accountId;
     const managedSessionIds = Array.from(new Set([
         ...extractTeamMembers(board)
             .map((member) => member.sessionId)
@@ -1827,11 +1834,11 @@ async function unarchiveTeam(
     });
 
     for (const sessionId of managedSessionIds) {
-        await broadcastSessionUpdate(userId, sessionId, 'session-unarchived');
+        await broadcastSessionUpdate(teamOwnerAccountId, sessionId, 'session-unarchived');
     }
 
-    await broadcastTeamUpdate(userId, teamId, 'team-unarchived', { restoredSessions: restoredCount });
-    await invalidateTeamOverviewSnapshot(userId);
+    await broadcastTeamUpdate(teamOwnerAccountId, teamId, 'team-unarchived', { restoredSessions: restoredCount });
+    await invalidateTeamOverviewSnapshot(teamOwnerAccountId);
 
     return { success: true, restoredSessions: restoredCount };
 }
@@ -1889,8 +1896,8 @@ async function batchDeleteSessions(
                     },
                 });
                 const removedIds = deletableIds.filter((sessionId) => members.some((member) => member.sessionId === sessionId));
-                await broadcastTeamUpdate(userId, artifact.id, 'member-removed', { sessionIds: removedIds });
-                await invalidateTeamOverviewSnapshot(userId);
+                await broadcastTeamUpdate(artifact.accountId, artifact.id, 'member-removed', { sessionIds: removedIds });
+                await invalidateTeamOverviewSnapshot(artifact.accountId);
             }
         }
     }

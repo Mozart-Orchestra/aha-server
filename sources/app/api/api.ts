@@ -66,8 +66,8 @@ export async function startApi() {
                 version: '1.0.0',
                 contact: {
                     name: 'Aha Team',
-                    url: 'https://github.com/slopus/aha-server',
-                    email: 'steve@korshakov.com'
+                    url: 'https://github.com/Shiyao-Huang/happy-server',
+                    email: 'hsy863551305@gmail.com'
                 },
                 license: {
                     name: 'MIT',

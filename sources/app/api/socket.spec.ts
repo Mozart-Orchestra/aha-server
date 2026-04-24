@@ -10,7 +10,9 @@ const {
     verifyToken,
     accountFindUnique,
     sessionUpdateManyAndReturn,
+    machineUpdate,
     invalidateSession,
+    invalidateMachine,
     observeSessionActivity,
 } = vi.hoisted(() => ({
     addConnection: vi.fn(),
@@ -22,7 +24,9 @@ const {
     verifyToken: vi.fn(),
     accountFindUnique: vi.fn(),
     sessionUpdateManyAndReturn: vi.fn(),
+    machineUpdate: vi.fn(),
     invalidateSession: vi.fn(),
+    invalidateMachine: vi.fn(),
     observeSessionActivity: vi.fn(),
 }));
 
@@ -122,7 +126,7 @@ vi.mock('@/storage/db', () => ({
             updateManyAndReturn: sessionUpdateManyAndReturn,
         },
         machine: {
-            update: vi.fn(),
+            update: machineUpdate,
         },
     },
 }));
@@ -130,6 +134,7 @@ vi.mock('@/storage/db', () => ({
 vi.mock('@/app/presence/sessionCache', () => ({
     activityCache: {
         invalidateSession,
+        invalidateMachine,
     },
 }));
 
@@ -167,6 +172,7 @@ describe('startSocket', () => {
         verifyToken.mockResolvedValue({ userId: 'user-1' });
         accountFindUnique.mockResolvedValue({ id: 'user-1' });
         sessionUpdateManyAndReturn.mockResolvedValue([{ id: 'session-1' }]);
+        machineUpdate.mockResolvedValue({ id: 'machine-1' });
         observeSessionActivity.mockResolvedValue(true);
     });
 
@@ -300,6 +306,93 @@ describe('startSocket', () => {
 
         expect(emitEphemeral).not.toHaveBeenCalled();
         expect(invalidateSession).not.toHaveBeenCalled();
+        vi.useRealTimers();
+    });
+
+    it('marks a machine-scoped connection offline only after grace period on disconnect', async () => {
+        vi.useFakeTimers();
+        startSocket({ server: {} } as any);
+        const socket = new FakeSocket({
+            token: 'valid-token',
+            clientType: 'machine-scoped',
+            machineId: 'machine-1',
+        });
+
+        await connectionHandler!(socket);
+        vi.clearAllMocks();
+
+        await socket.trigger('disconnect');
+
+        expect(machineUpdate).not.toHaveBeenCalled();
+        expect(invalidateMachine).not.toHaveBeenCalled();
+        expect(emitEphemeral).not.toHaveBeenCalled();
+
+        await vi.runAllTimersAsync();
+
+        expect(machineUpdate).toHaveBeenCalledWith({
+            where: {
+                accountId_id: {
+                    accountId: 'user-1',
+                    id: 'machine-1',
+                },
+            },
+            data: {
+                active: false,
+                lastActiveAt: expect.any(Date),
+            },
+        });
+        expect(invalidateMachine).toHaveBeenCalledWith('machine-1');
+        expect(emitEphemeral).toHaveBeenCalledWith({
+            userId: 'user-1',
+            payload: expect.objectContaining({
+                type: 'machine-activity',
+                id: 'machine-1',
+                active: false,
+            }),
+            recipientFilter: { type: 'user-scoped-only' },
+        });
+        vi.useRealTimers();
+    });
+
+    it('cancels machine offline grace timer when daemon reconnects within grace period', async () => {
+        vi.useFakeTimers();
+        startSocket({ server: {} } as any);
+        const socket = new FakeSocket({
+            token: 'valid-token',
+            clientType: 'machine-scoped',
+            machineId: 'machine-1',
+        });
+
+        await connectionHandler!(socket);
+        vi.clearAllMocks();
+
+        await socket.trigger('disconnect');
+        expect(machineUpdate).not.toHaveBeenCalled();
+
+        const socket2 = new FakeSocket({
+            token: 'valid-token',
+            clientType: 'machine-scoped',
+            machineId: 'machine-1',
+        }, 'socket-2');
+        await connectionHandler!(socket2);
+
+        await vi.runAllTimersAsync();
+
+        expect(machineUpdate).toHaveBeenCalledWith({
+            where: {
+                accountId_id: {
+                    accountId: 'user-1',
+                    id: 'machine-1',
+                },
+            },
+            data: {
+                active: true,
+                lastActiveAt: expect.any(Date),
+            },
+        });
+        expect(machineUpdate).not.toHaveBeenCalledWith(expect.objectContaining({
+            data: expect.objectContaining({ active: false }),
+        }));
         vi.useRealTimers();
     });
 

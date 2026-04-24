@@ -116,6 +116,9 @@ export function sessionRoutes(app: Fastify) {
                         persistedMessageCount: z.number(),
                     }),
                 }),
+                403: z.object({
+                    error: z.literal('Session not owned by user'),
+                }),
                 404: z.object({
                     error: z.literal('Session not found'),
                 }),
@@ -132,10 +135,10 @@ export function sessionRoutes(app: Fastify) {
             const session = await db.session.findFirst({
                 where: {
                     id: sessionId,
-                    accountId: userId,
                 },
                 select: {
                     id: true,
+                    accountId: true,
                     seq: true,
                     createdAt: true,
                     updatedAt: true,
@@ -156,6 +159,10 @@ export function sessionRoutes(app: Fastify) {
 
             if (!session) {
                 return reply.code(404).send({ error: 'Session not found' });
+            }
+
+            if (session.accountId !== userId) {
+                return reply.code(403).send({ error: 'Session not owned by user' });
             }
 
             return reply.send({
@@ -547,12 +554,16 @@ export function sessionRoutes(app: Fastify) {
         const session = await db.session.findFirst({
             where: {
                 id: sessionId,
-                accountId: userId
-            }
+            },
+            select: { id: true, accountId: true }
         });
 
         if (!session) {
             return reply.code(404).send({ error: 'Session not found' });
+        }
+
+        if (session.accountId !== userId) {
+            return reply.code(403).send({ error: 'Session not owned by user' });
         }
 
         const messages = await db.sessionMessage.findMany({
@@ -628,12 +639,16 @@ export function sessionRoutes(app: Fastify) {
         const session = await db.session.findFirst({
             where: {
                 id: sessionId,
-                accountId: userId
-            }
+            },
+            select: { id: true, accountId: true, metadataVersion: true }
         });
 
         if (!session) {
             return reply.code(404).send({ error: 'Session not found' });
+        }
+
+        if (session.accountId !== userId) {
+            return reply.code(403).send({ error: 'Session not owned by user' });
         }
 
         // Check version if provided

@@ -16,3 +16,4 @@ prisma/local.db
 
 .aha/runtime-events/
 .aha/teams/*/messages.jsonl
+.aha/

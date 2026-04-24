@@ -66,13 +66,13 @@ HTTP Status Codes:
 - 429: Rate limit exceeded
 - 500: Server error
 
-For more information, visit [GitHub Repository](https://github.com/slopus/aha-server)
+For more information, visit [GitHub Repository](https://github.com/Shiyao-Huang/happy-server)
     `,
     version: '1.0.0',
     contact: {
       name: 'Aha Team',
-      url: 'https://github.com/slopus/aha-server',
-      email: 'steve@korshakov.com'
+      url: 'https://github.com/Shiyao-Huang/happy-server',
+      email: 'hsy863551305@gmail.com'
     },
     license: {
       name: 'MIT',
@@ -149,7 +149,7 @@ export const swaggerUiOptions = {
     security: swaggerConfig.security,
     externalDocs: {
       description: 'Find out more about Aha',
-      url: 'https://github.com/slopus/aha-server/blob/main/README.md'
+      url: 'https://github.com/Shiyao-Huang/happy-server/blob/main/README.md'
     }
   },
   uiConfig: {

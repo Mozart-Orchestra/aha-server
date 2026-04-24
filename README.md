@@ -24,10 +24,17 @@ Your Claude Code clients generate encryption keys locally and use Aha Server as 
 
 ## Hosting
 
-**You don't need to self-host!** Our free cloud Aha Server at `aha-api.slopus.com` is just as secure as running your own. Since all data is end-to-end encrypted before it reaches our servers, we literally cannot read your messages even if we wanted to. The encryption happens on your device, and only you have the keys.
+**You don't need to self-host!** The Aha community cloud endpoint at `https://aha-agi.com/api` uses the same end-to-end encrypted protocol as a self-hosted deployment. Since all data is encrypted before it reaches the server, the relay cannot read your messages. The encryption happens on your device, and only you have the keys.
 
 That said, Aha Server is open source and self-hostable if you prefer running your own infrastructure. The security model is identical whether you use our servers or your own.
 
 ## License
 
 MIT - Use it, modify it, deploy it anywhere.
+
+## Project Lineage
+
+Aha Server is independently maintained by the Aha community under
+[`Shiyao-Huang/happy-server`](https://github.com/Shiyao-Huang/happy-server).
+We keep license and provenance notices intact while developing the current
+multi-agent, team, auth, and genome integrations on our own roadmap.

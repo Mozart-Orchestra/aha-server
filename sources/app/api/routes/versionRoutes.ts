@@ -27,7 +27,7 @@ export function versionRoutes(app: Fastify) {
             if (semver.satisfies(version, IOS_UP_TO_DATE)) {
                 reply.send({ updateUrl: null });
             } else {
-                reply.send({ updateUrl: 'https://apps.apple.com/us/app/aha-claude-code-client/id6748571505' });
+                reply.send({ updateUrl: 'https://github.com/Shiyao-Huang/happy/releases' });
             }
             return;
         }
@@ -37,7 +37,7 @@ export function versionRoutes(app: Fastify) {
             if (semver.satisfies(version, ANDROID_UP_TO_DATE)) {
                 reply.send({ updateUrl: null });
             } else {
-                reply.send({ updateUrl: 'https://play.google.com/store/apps/details?id=com.ex3ndr.aha' });
+                reply.send({ updateUrl: 'https://github.com/Shiyao-Huang/happy/releases' });
             }
             return;
         }

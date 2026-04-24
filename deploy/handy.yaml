@@ -23,7 +23,7 @@ spec:
     spec:
       containers:
       - name: handy
-        image: docker.korshakov.com/handy-server:{version}
+        image: ghcr.io/shiyao-huang/happy-server:{version}
         ports:
         - containerPort: 3005
         env:
