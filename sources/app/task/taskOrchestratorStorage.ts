@@ -13,7 +13,17 @@ import {
     type TaskBoardEventType,
 } from './taskOrchestratorTypes';
 
-export async function getBoardFromArtifact(userId: string, teamId: string): Promise<KanbanBoard | null> {
+export interface ArtifactRef {
+    id: string;
+    bodyVersion: number;
+}
+
+export interface BoardWithRef {
+    board: KanbanBoard;
+    artifactRef: ArtifactRef;
+}
+
+export async function getBoardFromArtifact(userId: string, teamId: string): Promise<BoardWithRef | null> {
     const artifact = await getAccessibleTeamArtifact(userId, teamId);
 
     if (!artifact) {
@@ -32,21 +42,29 @@ export async function getBoardFromArtifact(userId: string, teamId: string): Prom
         return null;
     }
 
+    const artifactRef: ArtifactRef = { id: artifact.id, bodyVersion: artifact.bodyVersion };
+
     try {
         const parsed = parseTeamArtifactBody(artifact.body) as Record<string, any>;
         return {
-            columns: parsed.columns || DEFAULT_COLUMNS,
-            tasks: parsed.tasks || [],
-            version: parsed.version || artifact.bodyVersion,
-            updatedAt: parsed.updatedAt || artifact.updatedAt.getTime(),
-            team: parsed.team,
+            board: {
+                columns: parsed.columns || DEFAULT_COLUMNS,
+                tasks: parsed.tasks || [],
+                version: parsed.version || artifact.bodyVersion,
+                updatedAt: parsed.updatedAt || artifact.updatedAt.getTime(),
+                team: parsed.team,
+            },
+            artifactRef,
         };
     } catch {
         return {
-            columns: DEFAULT_COLUMNS,
-            tasks: [],
-            version: artifact.bodyVersion,
-            updatedAt: artifact.updatedAt.getTime(),
+            board: {
+                columns: DEFAULT_COLUMNS,
+                tasks: [],
+                version: artifact.bodyVersion,
+                updatedAt: artifact.updatedAt.getTime(),
+            },
+            artifactRef,
         };
     }
 }
@@ -58,14 +76,18 @@ export async function saveBoardToArtifact(
     eventType: TaskBoardEventType,
     taskId: string,
     taskData?: Partial<KanbanTask>,
-): Promise<void> {
-    const artifact = await getAccessibleTeamArtifact(userId, teamId);
-    if (!artifact) {
-        log(
-            { module: 'task-orchestrator', teamId, userId, level: 'warn' },
-            'Refusing to persist task board for missing or inaccessible team artifact.',
-        );
-        throw new Error('Team not found');
+    artifactRef?: ArtifactRef,
+): Promise<ArtifactRef> {
+    if (!artifactRef) {
+        const artifact = await getAccessibleTeamArtifact(userId, teamId);
+        if (!artifact) {
+            log(
+                { module: 'task-orchestrator', teamId, userId, level: 'warn' },
+                'Refusing to persist task board for missing or inaccessible team artifact.',
+            );
+            throw new Error('Team not found');
+        }
+        artifactRef = { id: artifact.id, bodyVersion: artifact.bodyVersion };
     }
 
     board.version = (board.version || 0) + 1;
@@ -74,7 +96,7 @@ export async function saveBoardToArtifact(
     const bodyBuffer = Buffer.from(JSON.stringify(board));
 
     const result = await db.artifact.updateMany({
-        where: { id: artifact.id, bodyVersion: artifact.bodyVersion },
+        where: { id: artifactRef.id, bodyVersion: artifactRef.bodyVersion },
         data: {
             body: bodyBuffer,
             bodyVersion: { increment: 1 },
@@ -86,7 +108,11 @@ export async function saveBoardToArtifact(
         throw new Error('Concurrent write conflict - board was modified by another operation, please retry');
     }
 
+    const updatedRef: ArtifactRef = { id: artifactRef.id, bodyVersion: artifactRef.bodyVersion + 1 };
+
     await broadcastTaskEvent(userId, teamId, eventType, taskId, taskData);
+
+    return updatedRef;
 }
 
 async function broadcastTaskEvent(

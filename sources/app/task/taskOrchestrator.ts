@@ -23,7 +23,7 @@ import {
     setHumanStatusLock,
     updateTask,
 } from './taskOrchestratorOperations';
-import { getBoardFromArtifact, saveBoardToArtifact } from './taskOrchestratorStorage';
+import { getBoardFromArtifact, saveBoardToArtifact, type ArtifactRef } from './taskOrchestratorStorage';
 import type {
     HumanStatusLock,
     KanbanBoard,
@@ -60,6 +60,9 @@ export { DEFAULT_COLUMNS, DEFAULT_STATUS_PROPAGATION } from './taskOrchestratorT
  * 3. Handles status propagation for nested tasks
  */
 export class TaskOrchestrator {
+    private artifactMeta = new Map<string, ArtifactRef>();
+    private boardCache = new Map<string, KanbanBoard>();
+
     private context(): TaskOrchestratorContext {
         return {
             getBoard: this.getBoard.bind(this),
@@ -68,7 +71,14 @@ export class TaskOrchestrator {
     }
 
     async getBoard(userId: string, teamId: string): Promise<KanbanBoard | null> {
-        return getBoardFromArtifact(userId, teamId);
+        const cached = this.boardCache.get(teamId);
+        if (cached) return cached;
+
+        const result = await getBoardFromArtifact(userId, teamId);
+        if (!result) return null;
+        this.artifactMeta.set(teamId, result.artifactRef);
+        this.boardCache.set(teamId, result.board);
+        return result.board;
     }
 
     private async saveBoard(
@@ -79,7 +89,15 @@ export class TaskOrchestrator {
         taskId: string,
         taskData?: Partial<KanbanTask>,
     ): Promise<void> {
-        await saveBoardToArtifact(userId, teamId, board, eventType, taskId, taskData);
+        const ref = this.artifactMeta.get(teamId);
+        try {
+            const updatedRef = await saveBoardToArtifact(userId, teamId, board, eventType, taskId, taskData, ref);
+            this.artifactMeta.set(teamId, updatedRef);
+            this.boardCache.set(teamId, board);
+        } catch (err) {
+            this.boardCache.delete(teamId);
+            throw err;
+        }
     }
 
     private appendTaskComment(task: KanbanTask, input: TaskCommentInput): TaskComment {
