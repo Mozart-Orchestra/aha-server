@@ -20,7 +20,7 @@ interface BridgeState {
     pushPolicy: 'all' | 'important' | 'silent';
     syncBuf: string;
     running: boolean;
-    contextTokenMap: Map<string, string>; // weixinUserId → contextToken
+    contextTokenMap: Map<string, { token: string; receivedAt: number }>; // weixinUserId → {token, receivedAt}
     onInbound: (uid: string, text: string, contextToken: string, senderId: string) => void;
 }
 
@@ -197,7 +197,7 @@ async function runPollLoop(state: BridgeState): Promise<void> {
                 const senderId: string = msg.from_user_id;
                 if (!senderId) continue;
                 if (msg.context_token) {
-                    state.contextTokenMap.set(senderId, msg.context_token);
+                    state.contextTokenMap.set(senderId, { token: msg.context_token, receivedAt: Date.now() });
                     log(
                         {
                             module: 'weixin-bridge',
@@ -210,7 +210,7 @@ async function runPollLoop(state: BridgeState): Promise<void> {
                     );
                 }
                 const text = extractText(msg);
-                const ct = msg.context_token ?? state.contextTokenMap.get(senderId);
+                const ct = msg.context_token ?? state.contextTokenMap.get(senderId)?.token;
                 if (!ct) {
                     warn(
                         { module: 'weixin-bridge', uid: state.uid, senderId, textLength: text.length },
@@ -274,7 +274,7 @@ export function startBridge(
         onInbound,
     };
     if (creds.lastSenderId && creds.lastContextToken) {
-        state.contextTokenMap.set(creds.lastSenderId, creds.lastContextToken);
+        state.contextTokenMap.set(creds.lastSenderId, { token: creds.lastContextToken, receivedAt: 0 });
         log(
             {
                 module: 'weixin-bridge',
@@ -331,13 +331,17 @@ export async function pushToWeixin(uid: string, text: string): Promise<boolean> 
         return false;
     }
 
-    const entries = Array.from(state.contextTokenMap.entries());
+    const CONTEXT_TOKEN_MAX_AGE_MS = 15 * 60 * 1000; // 15 minutes (WeChat expires ~20 min)
+    const now = Date.now();
+    const entries = Array.from(state.contextTokenMap.entries())
+        .filter(([, v]) => now - v.receivedAt < CONTEXT_TOKEN_MAX_AGE_MS);
     if (!entries.length) {
-        warn({ module: 'weixin-bridge', uid, reason: 'missing-context-token' }, 'Skipping outbound Weixin send');
+        warn({ module: 'weixin-bridge', uid, reason: 'all-context-tokens-expired' }, 'Skipping outbound Weixin send — no valid context tokens');
         return false;
     }
 
-    const [senderId, contextToken] = entries[entries.length - 1];
+    const [senderId, entry] = entries[entries.length - 1];
+    const contextToken = entry.token;
     log(
         {
             module: 'weixin-bridge',
@@ -345,6 +349,7 @@ export async function pushToWeixin(uid: string, text: string): Promise<boolean> 
             senderId,
             textLength: text.length,
             contextToken: preview(contextToken),
+            tokenAgeMs: now - entry.receivedAt,
         },
         'Sending outbound Weixin message',
     );
@@ -363,6 +368,21 @@ export async function pushToWeixin(uid: string, text: string): Promise<boolean> 
         );
         return true;
     } catch (cause) {
+        const causeMsg = cause instanceof Error ? cause.message : String(cause);
+        const isTokenExpired = causeMsg.includes('"1210"') || causeMsg.includes('API 调用参数有误');
+        if (isTokenExpired) {
+            state.contextTokenMap.delete(senderId);
+            warn(
+                {
+                    module: 'weixin-bridge',
+                    uid,
+                    senderId,
+                    contextToken: preview(contextToken),
+                },
+                'WeChat context token expired (1210), removed from cache',
+            );
+            return false;
+        }
         error(
             {
                 module: 'weixin-bridge',
@@ -370,7 +390,7 @@ export async function pushToWeixin(uid: string, text: string): Promise<boolean> 
                 senderId,
                 textLength: text.length,
                 contextToken: preview(contextToken),
-                cause: cause instanceof Error ? cause.message : String(cause),
+                cause: causeMsg,
             },
             'Failed to send outbound Weixin message',
         );
