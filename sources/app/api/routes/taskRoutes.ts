@@ -566,7 +566,7 @@ export function taskRoutes(app: Fastify) {
         const { teamId, taskId } = request.params as { teamId: string; taskId: string };
         const body = request.body as z.infer<typeof HumanStatusLockSchema>;
         const resolvedActor = await resolveTaskSession(teamAccess, body.sessionId);
-        if (body.sessionId && !resolvedActor) {
+        if (body.sessionId && !resolvedActor && body.kind !== 'human') {
             return reply.code(400).send({ error: 'Invalid human lock actor for this team' });
         }
 
@@ -616,7 +616,7 @@ export function taskRoutes(app: Fastify) {
         const { teamId, taskId } = request.params as { teamId: string; taskId: string };
         const body = (request.body ?? {}) as z.infer<typeof ClearHumanStatusLockSchema>;
         const resolvedActor = await resolveTaskSession(teamAccess, body.sessionId);
-        if (body.sessionId && !resolvedActor) {
+        if (body.sessionId && !resolvedActor && body.kind !== 'human') {
             return reply.code(400).send({ error: 'Invalid human lock actor for this team' });
         }
 
