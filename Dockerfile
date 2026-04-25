@@ -32,4 +32,4 @@ RUN mkdir -p /app/.logs /data \
 USER node
 EXPOSE 3005
 
-CMD ["sh", "-c", "npx prisma db push --skip-generate --accept-data-loss && node_modules/.bin/tsx ./sources/main.ts"]
+CMD ["sh", "-c", "npx prisma migrate deploy && node_modules/.bin/tsx ./sources/main.ts"]
